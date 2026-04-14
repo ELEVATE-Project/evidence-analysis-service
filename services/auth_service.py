@@ -2,10 +2,10 @@
 Authentication Service
 Handles user authentication, JWT token generation, and password hashing
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from jose import JWTError, jwt
-from passlib.context import CryptContext
+import bcrypt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
@@ -14,9 +14,6 @@ from core.config import settings
 from db.database import get_db
 from models.user import User
 from models.schemas import TokenData, UserResponse
-
-# Password hashing context
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 # OAuth2 scheme
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
@@ -31,12 +28,41 @@ class AuthService:
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         """Verify a password against a hash"""
-        return pwd_context.verify(plain_password, hashed_password)
+        if not hashed_password:
+            return False
+
+        try:
+            return bcrypt.checkpw(
+                plain_password.encode("utf-8"),
+                hashed_password.encode("utf-8")
+            )
+        except ValueError:
+            # Invalid hash format in DB
+            return False
     
     @staticmethod
     def get_password_hash(password: str) -> str:
         """Hash a password"""
-        return pwd_context.hash(password)
+        return bcrypt.hashpw(
+            password.encode("utf-8"),
+            bcrypt.gensalt(rounds=12)
+        ).decode("utf-8")
+
+    @staticmethod
+    def is_bcrypt_hash(password_hash: str) -> bool:
+        """Check whether stored password is a valid bcrypt hash"""
+        if not password_hash or len(password_hash) != 60:
+            return False
+
+        if not password_hash.startswith(("$2a$", "$2b$", "$2y$")):
+            return False
+
+        try:
+            # checkpw returns bool; invalid hash format raises ValueError.
+            bcrypt.checkpw(b"format-check", password_hash.encode("utf-8"))
+            return True
+        except ValueError:
+            return False
     
     def get_user_by_username(self, username: str) -> Optional[User]:
         """Get user by username from database"""
@@ -87,13 +113,13 @@ class AuthService:
         return user
     
     @staticmethod
-    def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> tuple[str, datetime]:
         """Create JWT access token"""
         to_encode = data.copy()
         if expires_delta:
-            expire = datetime.utcnow() + expires_delta
+            expire = datetime.now(timezone.utc) + expires_delta
         else:
-            expire = datetime.utcnow() + timedelta(
+            expire = datetime.now(timezone.utc) + timedelta(
                 minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
             )
         to_encode.update({"exp": expire})
@@ -102,7 +128,23 @@ class AuthService:
             settings.JWT_SECRET_KEY, 
             algorithm=settings.JWT_ALGORITHM
         )
-        return encoded_jwt
+        return encoded_jwt, expire
+
+    @staticmethod
+    def create_token_response(username: str, expires_delta: Optional[timedelta] = None) -> dict:
+        """Create token response payload with expiry metadata"""
+        access_token, expires_at = AuthService.create_access_token(
+            data={"sub": username},
+            expires_delta=expires_delta
+        )
+        expires_in = int((expires_at - datetime.now(timezone.utc)).total_seconds())
+
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "expires_in": max(expires_in, 0),
+            "expires_at": expires_at
+        }
     
     @staticmethod
     async def get_current_user(

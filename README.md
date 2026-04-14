@@ -44,7 +44,7 @@ FastAPI backend REST API for the Evidence Analysis System.
    - `DATABASE_URL`: PostgreSQL connection string (e.g., `postgresql://user:password@localhost:5432/evidence_db`)
    - `JWT_SECRET_KEY`: Secret key for JWT tokens
    - `JWT_ALGORITHM`: Algorithm for JWT (default: HS256)
-   - `ACCESS_TOKEN_EXPIRE_MINUTES`: Token expiration time in minutes
+   - `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`: Token expiration time in minutes (default: 1440 for 24 hours)
    - `STORAGE_TYPE`: Storage provider ("gcp", "s3", or "local")
    - `GCP_PROJECT_ID`, `GCP_BUCKET_NAME`, `GOOGLE_APPLICATION_CREDENTIALS`: For GCP storage
    - `GEMINI_API_KEY`: API key for Google Gemini AI

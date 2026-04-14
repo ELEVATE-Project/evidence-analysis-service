@@ -19,6 +19,8 @@ class Token(BaseModel):
     """JWT token response schema"""
     access_token: str
     token_type: str = "bearer"
+    expires_in: int
+    expires_at: datetime
 
 
 class TokenData(BaseModel):

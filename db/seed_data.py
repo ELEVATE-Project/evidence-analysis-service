@@ -66,6 +66,20 @@ def seed_default_users(db: Session) -> None:
                 logger.error(f"Failed to create user {user_data['username']}: {str(e)}")
                 db.rollback()
         else:
-            logger.info(f"User {user_data['username']} already exists, skipping")
+            # Ensure existing seeded users always keep a valid bcrypt hash.
+            if not auth_service.is_bcrypt_hash(existing_user.hashed_password):
+                try:
+                    existing_user.hashed_password = auth_service.get_password_hash(user_data["password"])
+                    db.commit()
+                    logger.warning(
+                        f"Replaced invalid password format with bcrypt hash for user: {user_data['username']}"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Failed to repair password hash for user {user_data['username']}: {str(e)}"
+                    )
+                    db.rollback()
+            else:
+                logger.info(f"User {user_data['username']} already exists with valid bcrypt hash, skipping")
     
     logger.info("Seed data initialization completed")

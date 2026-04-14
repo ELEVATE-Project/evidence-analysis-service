@@ -3,14 +3,13 @@ Authentication Router
 Handles login, token generation, and user authentication
 """
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordRequestForm
 
 from models.schemas import Token, UserResponse
 from services.auth_service import AuthService
 from core.dependencies import AuthServiceDep
 
 router = APIRouter()
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
 
 
 @router.post("/login", response_model=Token)
@@ -22,7 +21,8 @@ async def login(
     Login endpoint - returns JWT token
     Uses database authentication with proper password hashing
     """
-    user = auth_service.authenticate_user(form_data.username, form_data.password)
+    username = form_data.username.strip()
+    user = auth_service.authenticate_user(username, form_data.password)
     
     if not user:
         raise HTTPException(
@@ -31,9 +31,16 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    access_token = auth_service.create_access_token(data={"sub": user.username})
-    
-    return {"access_token": access_token, "token_type": "bearer"}
+    return auth_service.create_token_response(user.username)
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    auth_service: AuthServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user)
+):
+    """Refresh access token for authenticated user"""
+    return auth_service.create_token_response(current_user.username)
 
 
 @router.get("/me", response_model=UserResponse)
