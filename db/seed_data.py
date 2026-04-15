@@ -2,9 +2,16 @@
 Seed data initialization for Phase 1
 Creates default users with properly hashed passwords
 """
+import sys
+from pathlib import Path
 import logging
 from sqlalchemy.orm import Session
+
+# Add parent directory to path for direct script execution
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from services.auth_service import AuthService
+from db.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
@@ -83,3 +90,17 @@ def seed_default_users(db: Session) -> None:
                 logger.info(f"User {user_data['username']} already exists with valid bcrypt hash, skipping")
     
     logger.info("Seed data initialization completed")
+
+
+def run_seed() -> None:
+    """Run seed process as a standalone script."""
+    db = SessionLocal()
+    try:
+        seed_default_users(db)
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    run_seed()

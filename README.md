@@ -37,7 +37,7 @@ FastAPI backend REST API for the Evidence Analysis System.
 
 5. **Configure environment variables**:
    ```bash
-   cp .env.example .env  # If you have a template, otherwise create .env
+   cp .env.example .env
    ```
    
    Edit `.env` and set these required variables:
@@ -45,10 +45,13 @@ FastAPI backend REST API for the Evidence Analysis System.
    - `JWT_SECRET_KEY`: Secret key for JWT tokens
    - `JWT_ALGORITHM`: Algorithm for JWT (default: HS256)
    - `JWT_ACCESS_TOKEN_EXPIRE_MINUTES`: Token expiration time in minutes (default: 1440 for 24 hours)
-   - `STORAGE_TYPE`: Storage provider ("gcp", "s3", or "local")
-   - `GCP_PROJECT_ID`, `GCP_BUCKET_NAME`, `GOOGLE_APPLICATION_CREDENTIALS`: For GCP storage
-   - `GEMINI_API_KEY`: API key for Google Gemini AI
-   - `SMTP_SERVER`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`: For email notifications
+   - `DEFAULT_TENANT_CODE`: Tenant code used while creating executions (default: `default`)
+   - `DEFAULT_ORGANIZATION_CODE`: Organization code used while creating executions (default: `default_code`)
+   - `CORS_ORIGINS`: JSON array format, e.g. `["http://localhost:5173","http://localhost:3000"]`
+   - `STORAGE_TYPE`: Storage provider ("gcp", "s3", or "local"). For local development, set `STORAGE_TYPE=local`
+   - `CLOUD_STORAGE_PROJECT`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_SECRET`: For GCP storage
+   - `GEMINI_API_KEY_1` (and optionally `_2`, `_3`): Gemini API keys
+   - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`: For email notifications
 
 6. **Initialize database**:
    ```bash
@@ -58,11 +61,16 @@ FastAPI backend REST API for the Evidence Analysis System.
    
    This creates the required tables: `users` and `executions`
 
+7. **Seed default users**:
+   ```bash
+   python db/seed_data.py
+   ```
+
 ## Seeding Default Data
 
 ### Default Users
 
-The system includes three hardcoded users for Phase 1. These users are automatically created on first login attempt:
+The system includes three hardcoded users for Phase 1. These users are automatically created during backend startup:
 
 | Username | Password | Role | Email |
 |----------|----------|------|-------|
@@ -74,9 +82,17 @@ All users belong to:
 - **Tenant**: `default`
 - **Organization**: `default_code`
 
-### First Login
+### Manual Seed Command
 
-Users are created automatically on their first login attempt. Simply:
+If you want to seed users without starting the API server:
+
+```bash
+python3 db/seed_data.py
+```
+
+### Login
+
+Users are seeded automatically on backend startup. Simply:
 
 1. Start the development server:
    ```bash
@@ -87,7 +103,7 @@ Users are created automatically on their first login attempt. Simply:
 
 3. Login with one of the default credentials above
 
-4. On first login, the user account is automatically created in the database
+4. Open API docs at `http://localhost:8000/docs` to verify authenticated endpoints
 
 ## Running Development Server
 

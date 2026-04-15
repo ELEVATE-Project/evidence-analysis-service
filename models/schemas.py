@@ -51,6 +51,7 @@ class ExecutionCreate(BaseModel):
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
     state: Optional[str] = None
+    district: Optional[str] = None
     criterias_mode: Optional[str] = None
     threshold_config: Optional[Dict[str, Any]] = None
 
@@ -94,6 +95,7 @@ class ExecutionDetail(ExecutionResponse):
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
     state: Optional[str] = None
+    district: Optional[str] = None
     criterias_mode: Optional[str] = None
     criterias_config: Optional[Dict[str, Any]] = None
     threshold_config: Optional[Dict[str, Any]] = None

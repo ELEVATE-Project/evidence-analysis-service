@@ -37,8 +37,8 @@ CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_code);
 CREATE TABLE IF NOT EXISTS executions (
     -- Primary identification
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    tenant_code VARCHAR(100),
-    organization_code VARCHAR(100),
+    tenant_code VARCHAR(100) NOT NULL,
+    organization_code VARCHAR(100) NOT NULL,
     
     -- Execution metadata
     name VARCHAR(255) NOT NULL,
@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS executions (
     program_ref_id VARCHAR(100),
     program_name VARCHAR(255),
     state VARCHAR(50),
+    district VARCHAR(100),
     
     -- Configuration
     criterias_mode VARCHAR(50),

@@ -14,8 +14,8 @@ class Execution(Base):
     
     # Primary identification
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    tenant_code = Column(String(100), nullable=True)
-    organization_code = Column(String(100), nullable=True)
+    tenant_code = Column(String(100), nullable=False)
+    organization_code = Column(String(100), nullable=False)
     
     # Execution metadata
     name = Column(String(255), nullable=False)
@@ -24,6 +24,7 @@ class Execution(Base):
     program_ref_id = Column(String(100), nullable=True)
     program_name = Column(String(255), nullable=True)
     state = Column(String(50), nullable=True)
+    district = Column(String(100), nullable=True)
     
     # Configuration
     criterias_mode = Column(String(50), nullable=True)

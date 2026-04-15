@@ -2,10 +2,13 @@
 Application Configuration
 Loads environment variables and application settings
 """
-from pydantic_settings import BaseSettings
-from typing import List
+import json
 import os
 from pathlib import Path
+
+from pydantic import field_validator
+from pydantic_settings import BaseSettings
+from typing import List
 
 
 class Settings(BaseSettings):
@@ -26,6 +29,10 @@ class Settings(BaseSettings):
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
+
+    # Execution defaults
+    DEFAULT_TENANT_CODE: str = "default"
+    DEFAULT_ORGANIZATION_CODE: str = "default_code"
     
     # File Storage
     STORAGE_TYPE: str = "gcp"  # "gcp", "s3", or "local"
@@ -69,6 +76,41 @@ class Settings(BaseSettings):
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
     ALLOWED_EXTENSIONS: List[str] = [".csv"]
+
+    @field_validator("DEBUG", mode="before")
+    @classmethod
+    def parse_debug_value(cls, value):
+        """Allow bool-like and environment-style DEBUG values."""
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, str):
+            raw = value.strip().lower()
+            if raw in {"true", "1", "yes", "on", "debug", "development", "dev"}:
+                return True
+            if raw in {"false", "0", "no", "off", "release", "production", "prod"}:
+                return False
+
+        return value
+
+    @field_validator("CORS_ORIGINS", "ALLOWED_EXTENSIONS", mode="before")
+    @classmethod
+    def parse_list_settings(cls, value):
+        """Accept JSON arrays or comma-separated env values."""
+        if isinstance(value, list):
+            return value
+
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return []
+
+            if raw.startswith("["):
+                return json.loads(raw)
+
+            return [item.strip() for item in raw.split(",") if item.strip()]
+
+        return value
     
     class Config:
         env_file = ".env"

@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional
 import hashlib
 
+from core.config import settings
 from models.execution import Execution
 from models.schemas import ExecutionCreate, ExecutionResponse, ExecutionDetail, ExecutionList, StatusResponse
 from services.storage_service import StorageService
@@ -52,14 +53,25 @@ class ExecutionService:
         
         # Calculate checksums
         input_checksum = hashlib.md5(input_content).hexdigest()
+
+        tenant_code = settings.DEFAULT_TENANT_CODE.strip()
+        organization_code = settings.DEFAULT_ORGANIZATION_CODE.strip()
+        if not tenant_code or not organization_code:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Execution defaults are not configured"
+            )
         
         # Create execution record
         execution = Execution(
+            tenant_code=tenant_code,
+            organization_code=organization_code,
             name=execution_data.name,
             ai_model_id=execution_data.ai_model_id or "gemini-2.5-flash",
             program_ref_id=execution_data.program_ref_id,
             program_name=execution_data.program_name,
             state=execution_data.state,
+            district=execution_data.district,
             criterias_mode=execution_data.criterias_mode,
             threshold_config=execution_data.threshold_config,
             status='queued',
