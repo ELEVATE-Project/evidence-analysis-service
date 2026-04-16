@@ -70,6 +70,8 @@ class ExecutionResponse(BaseModel):
     id: UUID
     name: str
     status: str
+    state: Optional[str] = None
+    district: Optional[str] = None
     created_by: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None

@@ -3,12 +3,14 @@ Application Configuration
 Loads environment variables and application settings
 """
 import json
-import os
 from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import List
+
+SERVICE_ROOT = Path(__file__).resolve().parent.parent
+ENV_FILE_PATH = SERVICE_ROOT / ".env"
 
 
 class Settings(BaseSettings):
@@ -33,6 +35,16 @@ class Settings(BaseSettings):
     # Execution defaults
     DEFAULT_TENANT_CODE: str = "default"
     DEFAULT_ORGANIZATION_CODE: str = "default_code"
+
+    # Entity Management Service
+    ENTITY_MGMT_BASE_URL: str = ""
+    ENTITY_MGMT_TENANT_ID: str = "shikshalokam"
+    ENTITY_MGMT_ORIGIN: str = "https://dev.elevate-sandbox.shikshalokam.org"
+    ENTITY_MGMT_TIMEOUT_SECONDS: float = 10.0
+    ENTITY_MGMT_RETRY_ATTEMPTS: int = 2
+    ENTITY_MGMT_RETRY_BACKOFF_SECONDS: float = 0.5
+    ENTITY_MGMT_CACHE_ENABLED: bool = True
+    ENTITY_MGMT_STATES_CACHE_TTL_SECONDS: int = 900
     
     # File Storage
     STORAGE_TYPE: str = "gcp"  # "gcp", "s3", or "local"
@@ -113,7 +125,7 @@ class Settings(BaseSettings):
         return value
     
     class Config:
-        env_file = ".env"
+        env_file = str(ENV_FILE_PATH)
         case_sensitive = True
 
 

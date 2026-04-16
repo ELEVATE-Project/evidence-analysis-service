@@ -12,7 +12,7 @@ from core.dependencies import set_background_worker
 from db.database import engine, Base, SessionLocal
 from db.seed_data import seed_default_users
 from services.background_worker import BackgroundWorker
-from routers import auth, executions, reports
+from routers import auth, entities, executions, reports
 
 # Configure logging
 logging.basicConfig(
@@ -77,6 +77,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(executions.router, prefix="/api/v1/executions", tags=["Executions"])
 app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
+app.include_router(entities.router, prefix="/api/v1", tags=["Entities"])
 
 
 @app.get("/")

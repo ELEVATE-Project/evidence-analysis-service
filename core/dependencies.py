@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from db.database import get_db
 from services.auth_service import AuthService
+from services.entity_service import EntityService
 from services.execution_service import ExecutionService
 from services.report_service import ReportService
 from services.background_worker import BackgroundWorker
@@ -15,6 +16,7 @@ from services.background_worker import BackgroundWorker
 
 # Global worker instance (initialized in main.py lifespan)
 _background_worker: Optional[BackgroundWorker] = None
+_entity_service: Optional[EntityService] = None
 
 
 def set_background_worker(worker: BackgroundWorker) -> None:
@@ -48,9 +50,18 @@ def get_report_service(db: Session = Depends(get_db)) -> ReportService:
     return ReportService(db)
 
 
+def get_entity_service() -> EntityService:
+    """Dependency for EntityService singleton (supports in-memory caching)."""
+    global _entity_service
+    if _entity_service is None:
+        _entity_service = EntityService.from_settings()
+    return _entity_service
+
+
 # Type aliases for cleaner route signatures
 AuthServiceDep = Annotated[AuthService, Depends(get_auth_service)]
 ExecutionServiceDep = Annotated[ExecutionService, Depends(get_execution_service)]
 ReportServiceDep = Annotated[ReportService, Depends(get_report_service)]
+EntityServiceDep = Annotated[EntityService, Depends(get_entity_service)]
 DBSessionDep = Annotated[Session, Depends(get_db)]
 BackgroundWorkerDep = Annotated[BackgroundWorker, Depends(get_background_worker)]

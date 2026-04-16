@@ -2,10 +2,11 @@
 Executions Router
 Handles execution CRUD operations, file uploads, and status tracking
 """
+import logging
 from typing import Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 
 from core.dependencies import ExecutionServiceDep
 from models.schemas import (
@@ -19,6 +20,7 @@ from models.schemas import (
 from services.auth_service import AuthService
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.post("/", response_model=ExecutionResponse, status_code=status.HTTP_201_CREATED)
@@ -65,17 +67,26 @@ async def create_execution(
 async def list_executions(
     execution_service: ExecutionServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
-    page: int = 1,
-    page_size: int = 20,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=500),
     status_filter: Optional[str] = None,
 ):
     """List executions with pagination and filtering"""
-    return execution_service.list_executions(
-        user_id=current_user.id,
-        page=page,
-        page_size=page_size,
-        status_filter=status_filter,
-    )
+    try:
+        return execution_service.list_executions(
+            user_id=current_user.id,
+            page=page,
+            page_size=page_size,
+            status_filter=status_filter,
+        )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Unexpected error while listing executions for user=%s", current_user.id)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to list executions",
+        )
 
 
 @router.get("/{execution_id}", response_model=ExecutionDetail)
