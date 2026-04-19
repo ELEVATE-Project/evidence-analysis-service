@@ -13,6 +13,7 @@ from models.schemas import (
     ExecutionCreateRequest,
     ExecutionDetail,
     ExecutionFileCompleteResponse,
+    ExecutionFilePreviewResponse,
     ExecutionFileUploadUrlResponse,
     ExecutionList,
     ExecutionResponse,
@@ -228,6 +229,23 @@ async def get_execution(
             detail="Execution not found",
         )
     return execution
+
+
+@router.get("/{execution_id}/files/{file_type}/preview", response_model=ExecutionFilePreviewResponse)
+async def get_execution_file_preview(
+    execution_id: UUID,
+    file_type: str,
+    execution_service: ExecutionServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Get read-only CSV preview for an uploaded execution file."""
+    return await execution_service.get_execution_file_preview(
+        execution_id=execution_id,
+        file_type=file_type,
+        user_id=current_user.id,
+        limit=limit,
+    )
 
 
 @router.get("/{execution_id}/status", response_model=StatusResponse)

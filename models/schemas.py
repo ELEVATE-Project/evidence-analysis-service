@@ -131,6 +131,26 @@ class ExecutionValidationResponse(BaseModel):
     questions_file: FileValidationResult
 
 
+class ExecutionFileCheckpointState(BaseModel):
+    """Checkpoint state summary for one uploaded file."""
+    uploaded: bool = False
+    validated: bool = False
+    rows_detected: Optional[int] = None
+    columns_detected: list[str] = Field(default_factory=list)
+    message: Optional[str] = None
+    missing_columns: list[str] = Field(default_factory=list)
+    updated_at: Optional[str] = None
+
+
+class ExecutionFilePreviewResponse(BaseModel):
+    """Read-only CSV preview for one uploaded file."""
+    execution_id: UUID
+    file_type: str
+    rows_detected: int
+    columns_detected: list[str]
+    preview_rows: list[Dict[str, str]]
+
+
 class ExecutionUpdate(BaseModel):
     """Schema for updating an execution"""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
@@ -189,10 +209,16 @@ class ExecutionDetail(ExecutionResponse):
     input_file_size: Optional[int] = None
     questions_file_size: Optional[int] = None
     output_file_size: Optional[int] = None
+    upload_completed_at: Optional[datetime] = None
+    checkpoint_data: Optional[Dict[str, Any]] = None
+    input_file_status: Optional[ExecutionFileCheckpointState] = None
+    questions_file_status: Optional[ExecutionFileCheckpointState] = None
     worker_id: Optional[str] = None
+    error_logs: Optional[str] = None
     retry_count: Optional[int] = None
     processing_started_at: Optional[datetime] = None
     processing_completed_at: Optional[datetime] = None
+    notification_sent_at: Optional[datetime] = None
     
     class Config:
         from_attributes = True
