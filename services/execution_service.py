@@ -34,6 +34,7 @@ from models.schemas import (
     ExecutionValidationResponse,
     ExecutionUploadInitRequest,
     ExecutionUploadInitResponse,
+    ExecutionUpdate,
     FileUploadUrlRequest,
     FileValidationResult,
     SignedUrlPayload,
@@ -1568,7 +1569,7 @@ class ExecutionService:
     def update_execution(
         self,
         execution_id: UUID,
-        update_data: dict,
+        update_data: ExecutionUpdate,
         user_id: str
     ) -> ExecutionResponse:
         """Update an execution (draft and validated executions can be updated)."""
@@ -1589,15 +1590,36 @@ class ExecutionService:
                 detail="Only draft or validated executions can be updated"
             )
 
-        # Update allowed fields
-        allowed_fields = [
-            'name', 'state', 'district', 'program_ref_id', 'program_name',
-            'criterias_mode', 'threshold_config'
-        ]
-        
-        for field, value in update_data.items():
-            if field in allowed_fields and value is not None:
-                setattr(execution, field, value)
+        # Update only fields that are explicitly provided by the client.
+        payload = update_data.model_dump(exclude_unset=True)
+        provided_fields = set(update_data.model_fields_set)
+
+        allowed_fields = {
+            'name',
+            'state',
+            'district',
+            'program_ref_id',
+            'program_name',
+            'criterias_mode',
+            'threshold_config',
+        }
+
+        for field in allowed_fields:
+            if field not in provided_fields:
+                continue
+
+            value = payload.get(field)
+            if field == 'name':
+                if value is None or not str(value).strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Execution name cannot be empty."
+                    )
+                execution.name = str(value).strip()
+                continue
+
+            # Optional fields support explicit clears via null.
+            setattr(execution, field, value)
         
         execution.updated_by = user_id
         

@@ -21,6 +21,7 @@ from models.schemas import (
     FileUploadUrlRequest,
     ExecutionUploadInitRequest,
     ExecutionUploadInitResponse,
+    ExecutionUpdate,
     StatusResponse,
     UserResponse,
 )
@@ -267,7 +268,7 @@ async def get_execution_status(
 @router.patch("/{execution_id}", response_model=ExecutionResponse)
 async def update_execution(
     execution_id: UUID,
-    update_data: dict,
+    update_data: ExecutionUpdate,
     execution_service: ExecutionServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
 ):
