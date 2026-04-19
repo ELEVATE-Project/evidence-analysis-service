@@ -14,6 +14,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -1496,9 +1497,13 @@ class ExecutionService:
         user_id: str,
         page: int = 1,
         page_size: int = 20,
-        status_filter: Optional[str] = None
+        status_filter: Optional[str] = None,
+        status_group: Optional[str] = None,
+        state_filter: Optional[str] = None,
+        district_filter: Optional[str] = None,
+        search_query: Optional[str] = None,
     ) -> ExecutionList:
-        """List executions with pagination"""
+        """List executions with pagination and optional server-side filters."""
         if page < 1 or page_size < 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1516,6 +1521,37 @@ class ExecutionService:
 
             if status_filter:
                 query = query.filter(Execution.status == status_filter)
+
+            normalized_status_group = (status_group or "").strip().lower()
+            if normalized_status_group:
+                draft_group_statuses = {"draft", "validated", "notstarted"}
+                completed_or_failed = {"completed", "failed"}
+
+                if normalized_status_group == "draft":
+                    query = query.filter(func.lower(Execution.status).in_(draft_group_statuses))
+                elif normalized_status_group in completed_or_failed:
+                    query = query.filter(func.lower(Execution.status) == normalized_status_group)
+                elif normalized_status_group == "in_progress":
+                    query = query.filter(
+                        ~func.lower(Execution.status).in_(draft_group_statuses | completed_or_failed)
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="status_group must be one of: draft, in_progress, completed, failed",
+                    )
+
+            normalized_state_filter = (state_filter or "").strip()
+            if normalized_state_filter:
+                query = query.filter(Execution.state == normalized_state_filter)
+
+            normalized_district_filter = (district_filter or "").strip()
+            if normalized_district_filter:
+                query = query.filter(Execution.district == normalized_district_filter)
+
+            normalized_search_query = (search_query or "").strip()
+            if normalized_search_query:
+                query = query.filter(Execution.name.ilike(f"%{normalized_search_query}%"))
 
             total = query.count()
 
