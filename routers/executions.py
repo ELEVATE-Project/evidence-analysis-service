@@ -181,7 +181,7 @@ async def complete_execution_upload(
     execution_service: ExecutionServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
 ):
-    """Validate uploaded files and start execution processing."""
+    """Validate uploaded files and queue execution in creation-only mode."""
     return await execution_service.complete_execution_upload(
         execution_id=execution_id,
         user_id=current_user.id,

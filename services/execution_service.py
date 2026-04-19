@@ -5,6 +5,7 @@ Handles execution business logic, file management, and background processing
 import csv
 import io
 import logging
+from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
@@ -602,7 +603,7 @@ class ExecutionService:
 
     @staticmethod
     def _checkpoint(execution: Execution) -> dict[str, Any]:
-        checkpoint = execution.checkpoint_data if isinstance(execution.checkpoint_data, dict) else {}
+        checkpoint = deepcopy(execution.checkpoint_data) if isinstance(execution.checkpoint_data, dict) else {}
         files = checkpoint.get("files")
         if not isinstance(files, dict):
             files = {}
@@ -1124,6 +1125,20 @@ class ExecutionService:
         checkpoint = self._checkpoint(execution)
         input_valid = bool(checkpoint["files"]["input"].get("validated"))
         questions_valid = bool(checkpoint["files"]["questions"].get("validated"))
+
+        # Backward-compatible fallback: some legacy rows can have status=validated
+        # while checkpoint flags were not persisted due to JSONB in-place mutation.
+        if not (input_valid and questions_valid) and (execution.status or "").strip().lower() == "validated":
+            logger.warning(
+                "Healing stale checkpoint validation flags for execution=%s before start.",
+                execution.id,
+            )
+            self._update_file_checkpoint(execution, file_type="input", validated=True)
+            self._update_file_checkpoint(execution, file_type="questions", validated=True)
+            checkpoint = self._checkpoint(execution)
+            input_valid = bool(checkpoint["files"]["input"].get("validated"))
+            questions_valid = bool(checkpoint["files"]["questions"].get("validated"))
+
         if not (input_valid and questions_valid):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1134,6 +1149,11 @@ class ExecutionService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Execution is already running",
+            )
+        if execution.status == "queued":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Execution is already queued.",
             )
         if execution.status == "completed":
             raise HTTPException(
@@ -1147,7 +1167,7 @@ class ExecutionService:
         self.db.commit()
         self.db.refresh(execution)
 
-        self.worker.submit_job(execution.id)
+        # Creation-only phase: keep execution queued and defer processing integration.
         return self._to_execution_response(execution)
 
     async def init_execution_upload(
@@ -1253,7 +1273,7 @@ class ExecutionService:
             )
 
     async def complete_execution_upload(self, execution_id: UUID, user_id: str) -> ExecutionResponse:
-        """Validate uploaded files and queue the execution for processing."""
+        """Validate uploaded files and queue the execution (creation-only phase)."""
         execution = self.db.query(Execution).filter(
             Execution.id == execution_id,
             Execution.created_by == user_id,
@@ -1340,11 +1360,12 @@ class ExecutionService:
         execution.questions_file_size = int(questions_metadata.get("size_bytes", execution.questions_file_size or 0))
         execution.status = "queued"
         execution.upload_completed_at = datetime.utcnow()
+        execution.failure_reason = None
 
         self.db.commit()
         self.db.refresh(execution)
 
-        self.worker.submit_job(execution.id)
+        # Creation-only phase: keep execution queued and defer processing integration.
         return self._to_execution_response(execution)
 
     def get_execution(self, execution_id: UUID, user_id: str) -> Optional[ExecutionDetail]:
