@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 # Add parent directory to path for direct script execution
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from core.config import settings
+from models.csv_source_type import CsvSourceType
 from services.auth_service import AuthService
 from db.database import SessionLocal
 
@@ -92,11 +94,84 @@ def seed_default_users(db: Session) -> None:
     logger.info("Seed data initialization completed")
 
 
+def seed_default_csv_source_types(db: Session) -> None:
+    """Seed default CSV source type configuration for project reports."""
+    tenant_code = (settings.DEFAULT_TENANT_CODE or "default").strip() or "default"
+    organization_code = (settings.DEFAULT_ORGANIZATION_CODE or "default_code").strip() or "default_code"
+
+    existing = (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == tenant_code,
+            CsvSourceType.organization_code == organization_code,
+            CsvSourceType.type_key == "project_report",
+        )
+        .first()
+    )
+    if existing:
+        logger.info("CSV source type project_report already exists, skipping")
+        return
+
+    admin_user = AuthService(db).get_user_by_username("admin")
+    admin_user_id = admin_user.id if admin_user else None
+
+    source_type = CsvSourceType(
+        tenant_code=tenant_code,
+        organization_code=organization_code,
+        type_key="project_report",
+        display_name="Project Report",
+        description="Project report CSV format for evidence validation.",
+        has_geo=True,
+        has_program=True,
+        has_rubric=False,
+        has_narrative=False,
+        max_rows_per_upload=10000,
+        column_mappings={
+            "identifier": "UUID",
+            "geo": {
+                "state": "Declared State",
+                "district": "District",
+                "block": "Block",
+                "school_id": "School ID",
+                "school_name": "School Name",
+            },
+            "user_id": "UUID",
+            "program": {"id": "Program ID", "name": "Program Name"},
+        },
+        evidence_columns=[{"column": "Task Evidence", "rule": "VALIDATE"}],
+        evidence_context_config={
+            "source": "column",
+            "title_column": "Tasks",
+        },
+        available_filters=["state", "district", "block", "school_name", "relevance_tag"],
+        question_config={
+            "entry_options": [
+                {
+                    "key": "UPLOAD",
+                    "label": "Upload Checklist CSV",
+                    "desc": "Match unique Task IDs to specific evidence_criteria.",
+                }
+            ],
+            "mandatory_columns": ["evidence_context_config.title_column", "Question"],
+            "optional_columns": [],
+        },
+        default_thresholds={"relevant": 0.8, "partial": 0.5},
+        is_active=True,
+        created_by=admin_user_id,
+        updated_by=admin_user_id,
+    )
+
+    db.add(source_type)
+    db.commit()
+    logger.info("Seeded default csv_source_type: project_report")
+
+
 def run_seed() -> None:
     """Run seed process as a standalone script."""
     db = SessionLocal()
     try:
         seed_default_users(db)
+        seed_default_csv_source_types(db)
     finally:
         db.close()
 

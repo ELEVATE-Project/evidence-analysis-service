@@ -8,8 +8,9 @@ from typing import Optional, Dict, Any
 import pandas as pd
 import logging
 
+from core.config import settings
 from models.execution import Execution
-from models.schemas import ReportResponse
+from models.schemas import ReportDownloadResponse, ReportResponse
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -83,8 +84,8 @@ class ReportService:
             logger.error(f"Failed to load input data: {str(e)}")
             return None
     
-    def get_output_csv_path(self, execution_id: UUID, user_id: str) -> Optional[str]:
-        """Get local path to output CSV file"""
+    async def get_output_download_url(self, execution_id: UUID, user_id: str) -> Optional[ReportDownloadResponse]:
+        """Return a short-lived signed download URL for the output CSV."""
         execution = self.db.query(Execution).filter(
             Execution.id == execution_id,
             Execution.created_by == user_id
@@ -92,9 +93,16 @@ class ReportService:
         
         if not execution or not execution.output_file_url:
             return None
-        
-        # Return file path (download from S3 if needed)
-        return execution.output_file_url
+
+        signed_download = await self.storage_service.generate_download_url(
+            file_path=execution.output_file_url,
+            expiration=settings.SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS,
+            response_filename=f"execution_{execution_id}_output.csv",
+        )
+        return ReportDownloadResponse(
+            download_url=signed_download["url"],
+            expires_in_seconds=signed_download["expires_in_seconds"],
+        )
     
     def generate_html_report(self, execution_id: UUID, user_id: str) -> Optional[str]:
         """Generate HTML report (evidence-analysis UI parity)"""

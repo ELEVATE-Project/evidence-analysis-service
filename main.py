@@ -10,9 +10,9 @@ import logging
 from core.config import settings
 from core.dependencies import set_background_worker
 from db.database import engine, Base, SessionLocal
-from db.seed_data import seed_default_users
+from db.seed_data import seed_default_csv_source_types, seed_default_users
 from services.background_worker import BackgroundWorker
-from routers import auth, entities, executions, reports
+from routers import auth, cloud_services, config, entities, executions, reports
 
 # Configure logging
 logging.basicConfig(
@@ -35,6 +35,7 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed_default_users(db)
+        seed_default_csv_source_types(db)
         logger.info("Default users seeded")
     except Exception as e:
         logger.error(f"Failed to seed users: {e}")
@@ -76,8 +77,10 @@ app.add_middleware(
 # Include routers
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
 app.include_router(executions.router, prefix="/api/v1/executions", tags=["Executions"])
+app.include_router(cloud_services.router, prefix="/api/v1/cloud-services", tags=["Cloud Services"])
 app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(entities.router, prefix="/api/v1", tags=["Entities"])
+app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
 
 
 @app.get("/")

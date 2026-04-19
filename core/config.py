@@ -88,6 +88,8 @@ class Settings(BaseSettings):
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
     ALLOWED_EXTENSIONS: List[str] = [".csv"]
+    SIGNED_UPLOAD_URL_EXPIRY_SECONDS: int = 900
+    SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS: int = 600
 
     @field_validator("DEBUG", mode="before")
     @classmethod

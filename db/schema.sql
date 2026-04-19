@@ -32,6 +32,49 @@ CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_code);
 
 -- ============================================
+-- CSV Source Types Table
+-- ============================================
+CREATE TABLE IF NOT EXISTS csv_source_types (
+    id SERIAL PRIMARY KEY,
+    tenant_code VARCHAR(100) NOT NULL,
+    organization_code VARCHAR(100) NOT NULL,
+
+    -- Metadata
+    type_key VARCHAR(100) NOT NULL,
+    display_name VARCHAR(255) NOT NULL,
+    description TEXT,
+
+    -- Flags
+    has_geo BOOLEAN NOT NULL DEFAULT FALSE,
+    has_program BOOLEAN NOT NULL DEFAULT FALSE,
+    has_rubric BOOLEAN NOT NULL DEFAULT FALSE,
+    has_narrative BOOLEAN NOT NULL DEFAULT FALSE,
+    max_rows_per_upload INTEGER DEFAULT 10000,
+
+    -- Config (JSONB)
+    column_mappings JSONB NOT NULL,
+    evidence_columns JSONB NOT NULL DEFAULT '[]'::jsonb,
+    evidence_context_config JSONB NOT NULL,
+    available_filters JSONB DEFAULT '[]'::jsonb,
+    question_config JSONB DEFAULT '{"entry_options":[{"key":"UPLOAD","label":"Upload CSV"},{"key":"COMMON","label":"Manual Entry"}],"mandatory_columns":[],"optional_columns":[]}'::jsonb,
+    default_thresholds JSONB DEFAULT '{"relevant":0.8,"partial":0.5}'::jsonb,
+
+    -- Status & Audit
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by VARCHAR(255) REFERENCES users(id),
+    updated_by VARCHAR(255) REFERENCES users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT uq_csv_source_types_scope_type_key UNIQUE (tenant_code, organization_code, type_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_csv_source_types_scope_active
+    ON csv_source_types(tenant_code, organization_code, is_active);
+CREATE INDEX IF NOT EXISTS idx_csv_source_types_type_key
+    ON csv_source_types(type_key);
+
+-- ============================================
 -- Executions Table (Phase 1 Complete Schema)
 -- ============================================
 CREATE TABLE IF NOT EXISTS executions (
@@ -65,7 +108,7 @@ CREATE TABLE IF NOT EXISTS executions (
     actual_cost NUMERIC(10, 4),
     estimated_cost NUMERIC(10, 4),
     
-    -- File storage fields (Phase 1)
+    -- File storage fields (store provider-agnostic absolute file paths)
     input_file_url TEXT,
     input_file_size BIGINT,
     input_file_checksum VARCHAR(64),
@@ -111,6 +154,7 @@ CREATE INDEX IF NOT EXISTS idx_executions_org ON executions(organization_code);
 -- Comments
 -- ============================================
 COMMENT ON TABLE users IS 'User accounts for authentication and authorization';
+COMMENT ON TABLE csv_source_types IS 'Configuration registry for CSV parsing and validation rules by tenant/org/type';
 COMMENT ON TABLE executions IS 'Evidence analysis execution jobs with complete Phase 1 schema';
 
 COMMENT ON COLUMN executions.status IS 'Execution status: queued, running, completed, failed';

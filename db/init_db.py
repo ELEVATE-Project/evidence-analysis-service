@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from db.database import engine, Base
 from models.user import User
 from models.execution import Execution
+from models.csv_source_type import CsvSourceType
 import logging
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import OperationalError

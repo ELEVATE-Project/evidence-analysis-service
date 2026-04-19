@@ -47,6 +47,7 @@ class UserResponse(BaseModel):
 class ExecutionCreate(BaseModel):
     """Schema for creating a new execution"""
     name: str = Field(..., min_length=1, max_length=255)
+    csv_type_id: str = Field(..., min_length=1, max_length=100)
     ai_model_id: Optional[str] = None
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
@@ -56,9 +57,89 @@ class ExecutionCreate(BaseModel):
     threshold_config: Optional[Dict[str, Any]] = None
 
 
+class FileUploadDescriptor(BaseModel):
+    """Client-declared file metadata used before signed URL generation."""
+    file_name: str = Field(..., min_length=1, max_length=255)
+    content_type: Optional[str] = None
+    size_bytes: int = Field(..., gt=0)
+
+
+class ExecutionUploadInitRequest(ExecutionCreate):
+    """Schema for creating execution and requesting signed upload URLs."""
+    input_file: FileUploadDescriptor
+    questions_file: FileUploadDescriptor
+
+
+class SignedUrlPayload(BaseModel):
+    """Signed URL payload for direct upload/download."""
+    url: str
+    method: str
+    headers: Dict[str, str] = Field(default_factory=dict)
+    expires_in_seconds: int
+
+
+class ExecutionUploadInitResponse(BaseModel):
+    """Execution creation response with signed upload URLs."""
+    execution_id: UUID
+    status: str
+    input_upload: SignedUrlPayload
+    questions_upload: SignedUrlPayload
+
+
+class ExecutionCreateRequest(ExecutionCreate):
+    """Step 1 request schema to create analysis execution draft."""
+    pass
+
+
+class FileUploadUrlRequest(BaseModel):
+    """Request signed upload URL for a file section."""
+    file: FileUploadDescriptor
+
+
+class ExecutionFileUploadUrlResponse(BaseModel):
+    """Signed upload URL response for input/questions file."""
+    execution_id: UUID
+    file_type: str
+    upload: SignedUrlPayload
+
+
+class ExecutionFileCompleteResponse(BaseModel):
+    """File upload completion response with detected CSV metadata."""
+    execution_id: UUID
+    file_type: str
+    uploaded: bool
+    rows_detected: int
+    columns_detected: list[str]
+
+
+class FileValidationResult(BaseModel):
+    """Validation result for one file section."""
+    file_type: str
+    valid: bool
+    message: Optional[str] = None
+    missing_columns: list[str] = Field(default_factory=list)
+    rows_detected: Optional[int] = None
+    columns_detected: Optional[list[str]] = None
+    preview_rows: Optional[list[Dict[str, str]]] = None
+
+
+class ExecutionValidationResponse(BaseModel):
+    """Combined validation result for both files."""
+    execution_id: UUID
+    is_valid: bool
+    input_file: FileValidationResult
+    questions_file: FileValidationResult
+
+
 class ExecutionUpdate(BaseModel):
     """Schema for updating an execution"""
-    name: Optional[str] = None
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    state: Optional[str] = None
+    district: Optional[str] = None
+    program_ref_id: Optional[str] = None
+    program_name: Optional[str] = None
+    criterias_mode: Optional[str] = None
+    threshold_config: Optional[Dict[str, Any]] = None
     status: Optional[str] = None
     failure_reason: Optional[str] = None
     processed_rows: Optional[int] = None
@@ -69,6 +150,7 @@ class ExecutionResponse(BaseModel):
     """Schema for execution response"""
     id: UUID
     name: str
+    csv_type_id: Optional[str] = None
     status: str
     state: Optional[str] = None
     district: Optional[str] = None
@@ -93,6 +175,7 @@ class ExecutionDetail(ExecutionResponse):
     """Detailed execution response with all fields"""
     tenant_code: Optional[str] = None
     organization_code: Optional[str] = None
+    csv_type_id: Optional[str] = None
     ai_model_id: Optional[str] = None
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
@@ -133,6 +216,12 @@ class ReportResponse(BaseModel):
     metadata: Optional[Dict[str, Any]] = None
 
 
+class ReportDownloadResponse(BaseModel):
+    """Signed URL response for report download."""
+    download_url: str
+    expires_in_seconds: int
+
+
 # ============ Status Schemas ============
 
 class StatusResponse(BaseModel):
@@ -143,3 +232,44 @@ class StatusResponse(BaseModel):
     total_rows: Optional[int] = None
     progress_percentage: Optional[float] = None
     failure_reason: Optional[str] = None
+
+
+# ============ Cloud Services Schemas ============
+
+class CloudSignedUrlRequestItem(BaseModel):
+    """Grouped file names for a ref id (e.g., execution id)."""
+    files: list[str] = Field(..., min_length=1)
+
+
+class CloudSignedUrlRequest(BaseModel):
+    """Common signed URL request format."""
+    request: Dict[str, CloudSignedUrlRequestItem]
+    ref: str = Field(..., min_length=1, max_length=100)
+
+
+class CloudSignedUrlFilePayload(BaseModel):
+    """Payload metadata returned with each file URL."""
+    sourcePath: str
+    fileType: Optional[str] = None
+
+
+class CloudSignedUrlFileResponse(BaseModel):
+    """Single signed URL response file entry."""
+    file: str
+    url: str
+    downloadableUrl: str
+    payload: CloudSignedUrlFilePayload
+    cloudStorage: str
+
+
+class CloudSignedUrlResultEntry(BaseModel):
+    """Per-reference grouped file URL entries."""
+    files: list[CloudSignedUrlFileResponse]
+
+
+class CloudSignedUrlResponse(BaseModel):
+    """Common signed URL response format."""
+    responseCode: str
+    message: str
+    result: Dict[str, CloudSignedUrlResultEntry]
+    meta: Dict[str, Any] = Field(default_factory=dict)

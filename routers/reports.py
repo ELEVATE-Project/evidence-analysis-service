@@ -6,10 +6,10 @@ import io
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from core.dependencies import ReportServiceDep
-from models.schemas import ReportResponse, UserResponse
+from models.schemas import ReportDownloadResponse, ReportResponse, UserResponse
 from services.auth_service import AuthService
 
 router = APIRouter()
@@ -34,7 +34,7 @@ async def get_report(
     return report
 
 
-@router.get("/{execution_id}/download")
+@router.get("/{execution_id}/download", response_model=ReportDownloadResponse)
 async def download_report(
     execution_id: UUID,
     report_service: ReportServiceDep,
@@ -51,18 +51,14 @@ async def download_report(
             detail=f"Unsupported format: {format}",
         )
 
-    file_path = report_service.get_output_csv_path(execution_id, current_user.id)
-    if not file_path:
+    signed_download = await report_service.get_output_download_url(execution_id, current_user.id)
+    if not signed_download:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Report file not found",
         )
 
-    return FileResponse(
-        file_path,
-        media_type="text/csv",
-        filename=f"execution_{execution_id}_output.csv",
-    )
+    return signed_download
 
 
 @router.get("/{execution_id}/html")

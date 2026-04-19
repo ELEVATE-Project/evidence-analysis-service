@@ -42,7 +42,7 @@ class Execution(Base):
     actual_cost = Column(Numeric(10, 4), nullable=True)
     estimated_cost = Column(Numeric(10, 4), nullable=True)
     
-    # File storage fields (Phase 1 additions)
+    # File storage fields (store provider-agnostic absolute file paths)
     input_file_url = Column(Text, nullable=True)
     input_file_size = Column(BigInteger, nullable=True)
     input_file_checksum = Column(String(64), nullable=True)

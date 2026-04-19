@@ -34,6 +34,9 @@ class BackgroundWorker:
         Process execution in background thread
         This is a placeholder - actual processor integration will be added
         """
+        print(f"hello yes its processing - Execution ID: {execution_id}")
+        logger.info(f"hello yes its processing - Execution ID: {execution_id}")
+        
         # Create new DB session for this thread
         db = SessionLocal()
         
@@ -50,6 +53,7 @@ class BackgroundWorker:
             db.commit()
             
             logger.info(f"Processing execution: {execution_id}")
+            print(f"Processing execution: {execution_id}")
             
             # Placeholder processing logic
             # TODO: Integrate actual processor from evidence-analysis-multithreaded
@@ -71,11 +75,13 @@ class BackgroundWorker:
             db.commit()
             
             logger.info(f"Completed execution: {execution_id}")
+            print(f"Completed execution: {execution_id}")
             
             # Send notification (TODO: implement email service)
             
         except Exception as e:
             logger.error(f"Failed to process execution {execution_id}: {str(e)}")
+            print(f"ERROR: Failed to process execution {execution_id}: {str(e)}")
             
             # Update status to failed
             execution = db.query(Execution).filter(Execution.id == execution_id).first()
