@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from core.config import SERVICE_ROOT, settings
 from db.database import SessionLocal
 from models.execution import Execution
+from services.gemini_runtime import build_gemini_env_overrides
 from services.storage_service import StorageService
 
 
@@ -127,15 +128,7 @@ def _inject_gemini_env(base_env: dict[str, str]) -> dict[str, str]:
     parent process loaded values via pydantic settings only.
     """
     env = dict(base_env)
-    gemini_values = {
-        "GEMINI_API_KEY_1": (settings.GEMINI_API_KEY_1 or "").strip(),
-        "GEMINI_API_KEY_2": (settings.GEMINI_API_KEY_2 or "").strip(),
-        "GEMINI_API_KEY_3": (settings.GEMINI_API_KEY_3 or "").strip(),
-        "GEMINI_MODEL": (settings.GEMINI_MODEL or "").strip(),
-    }
-    for key, value in gemini_values.items():
-        if value:
-            env[key] = value
+    env.update(build_gemini_env_overrides(base_env))
     return env
 
 

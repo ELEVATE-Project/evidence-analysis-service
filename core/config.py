@@ -108,6 +108,9 @@ class Settings(BaseSettings):
     SIGNED_UPLOAD_URL_EXPIRY_SECONDS: int = 900
     SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS: int = 600
 
+    # Interactive criteria validation
+    CRITERIA_VALIDATE_MAX_ITEMS: int = 25
+
     @field_validator("DEBUG", mode="before")
     @classmethod
     def parse_debug_value(cls, value):

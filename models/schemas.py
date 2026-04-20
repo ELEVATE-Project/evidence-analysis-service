@@ -1,10 +1,12 @@
 """
 Pydantic Schemas for Request/Response Validation
 """
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, Dict, Any
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from typing import Optional, Dict, Any, Literal
 from datetime import datetime
 from uuid import UUID
+
+from core.config import settings
 
 
 # ============ Authentication Schemas ============
@@ -230,6 +232,71 @@ class ExecutionList(BaseModel):
     page: int
     page_size: int
     items: list[ExecutionResponse]
+
+
+# ============ Criteria Validation Schemas ============
+
+class CriteriaValidationRequest(BaseModel):
+    """Request schema for one-off evidence criteria validation."""
+    evidence_url: str = Field(..., min_length=1, max_length=2048)
+    evidence_criteria: list[str] = Field(..., min_length=1)
+    prompt: Optional[str] = Field(default=None, max_length=6000)
+
+    @staticmethod
+    def _max_items() -> int:
+        raw = getattr(settings, "CRITERIA_VALIDATE_MAX_ITEMS", 25)
+        return raw if isinstance(raw, int) and raw > 0 else 25
+
+    @field_validator("evidence_url", mode="before")
+    @classmethod
+    def strip_evidence_url(cls, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("evidence_url is required")
+        return text
+
+    @field_validator("evidence_criteria", mode="before")
+    @classmethod
+    def normalize_evidence_criteria(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("evidence_criteria must be an array of strings")
+
+        normalized: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                normalized.append(text)
+        if not normalized:
+            raise ValueError("At least one non-empty evidence criteria is required")
+        max_items = CriteriaValidationRequest._max_items()
+        if len(normalized) > max_items:
+            raise ValueError(f"Maximum {max_items} evidence criteria are allowed")
+        return normalized
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def normalize_prompt(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
+class CriteriaValidationItem(BaseModel):
+    """Single evidence criteria validation output item."""
+    evidence_criteria: str
+    answer: str
+    reasoning: str
+
+
+class CriteriaValidationResponse(BaseModel):
+    """Response schema for criteria validation."""
+    source: Literal["gemini"]
+    model: str
+    relevance_tag: Literal["Relevant", "Partially Relevant", "Irrelevant"]
+    criteria_results: list[CriteriaValidationItem]
+    answers: list[str]
+    reasonings: list[str]
 
 
 # ============ Report Schemas ============
