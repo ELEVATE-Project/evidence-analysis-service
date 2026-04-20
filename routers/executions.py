@@ -13,6 +13,7 @@ from models.schemas import (
     ExecutionCreateRequest,
     ExecutionDetail,
     ExecutionFileCompleteResponse,
+    ExecutionFilePreviewResponse,
     ExecutionFileUploadUrlResponse,
     ExecutionList,
     ExecutionResponse,
@@ -20,6 +21,7 @@ from models.schemas import (
     FileUploadUrlRequest,
     ExecutionUploadInitRequest,
     ExecutionUploadInitResponse,
+    ExecutionUpdate,
     StatusResponse,
     UserResponse,
 )
@@ -195,14 +197,22 @@ async def list_executions(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=500),
     status_filter: Optional[str] = None,
+    status_group: Optional[str] = None,
+    state_filter: Optional[str] = None,
+    district_filter: Optional[str] = None,
+    search_query: Optional[str] = None,
 ):
-    """List executions with pagination and filtering"""
+    """List executions with pagination and optional server-side filters."""
     try:
         return execution_service.list_executions(
             user_id=current_user.id,
             page=page,
             page_size=page_size,
             status_filter=status_filter,
+            status_group=status_group,
+            state_filter=state_filter,
+            district_filter=district_filter,
+            search_query=search_query,
         )
     except HTTPException:
         raise
@@ -230,6 +240,23 @@ async def get_execution(
     return execution
 
 
+@router.get("/{execution_id}/files/{file_type}/preview", response_model=ExecutionFilePreviewResponse)
+async def get_execution_file_preview(
+    execution_id: UUID,
+    file_type: str,
+    execution_service: ExecutionServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+    limit: int = Query(10, ge=1, le=50),
+):
+    """Get read-only CSV preview for an uploaded execution file."""
+    return await execution_service.get_execution_file_preview(
+        execution_id=execution_id,
+        file_type=file_type,
+        user_id=current_user.id,
+        limit=limit,
+    )
+
+
 @router.get("/{execution_id}/status", response_model=StatusResponse)
 async def get_execution_status(
     execution_id: UUID,
@@ -249,7 +276,7 @@ async def get_execution_status(
 @router.patch("/{execution_id}", response_model=ExecutionResponse)
 async def update_execution(
     execution_id: UUID,
-    update_data: dict,
+    update_data: ExecutionUpdate,
     execution_service: ExecutionServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
 ):

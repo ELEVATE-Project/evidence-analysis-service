@@ -14,6 +14,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
+from sqlalchemy import func
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -25,13 +26,16 @@ from models.schemas import (
     CloudSignedUrlResponse,
     ExecutionCreateRequest,
     ExecutionDetail,
+    ExecutionFileCheckpointState,
     ExecutionFileCompleteResponse,
+    ExecutionFilePreviewResponse,
     ExecutionFileUploadUrlResponse,
     ExecutionList,
     ExecutionResponse,
     ExecutionValidationResponse,
     ExecutionUploadInitRequest,
     ExecutionUploadInitResponse,
+    ExecutionUpdate,
     FileUploadUrlRequest,
     FileValidationResult,
     SignedUrlPayload,
@@ -613,6 +617,34 @@ class ExecutionService:
                 files[file_type] = {}
         checkpoint["files"] = files
         return checkpoint
+
+    @staticmethod
+    def _checkpoint_file_status(checkpoint: dict[str, Any], file_type: str) -> ExecutionFileCheckpointState:
+        files = checkpoint.get("files")
+        if not isinstance(files, dict):
+            files = {}
+        file_data = files.get(file_type)
+        if not isinstance(file_data, dict):
+            file_data = {}
+
+        raw_columns = file_data.get("columns_detected")
+        columns_detected = [str(column).strip() for column in raw_columns if str(column).strip()] if isinstance(raw_columns, list) else []
+
+        raw_missing = file_data.get("missing_columns")
+        missing_columns = [str(column).strip() for column in raw_missing if str(column).strip()] if isinstance(raw_missing, list) else []
+
+        rows_value = file_data.get("rows_detected")
+        rows_detected = int(rows_value) if isinstance(rows_value, (int, float)) else None
+
+        return ExecutionFileCheckpointState(
+            uploaded=bool(file_data.get("uploaded")),
+            validated=bool(file_data.get("validated")),
+            rows_detected=rows_detected,
+            columns_detected=columns_detected,
+            message=str(file_data.get("message")).strip() if file_data.get("message") is not None else None,
+            missing_columns=missing_columns,
+            updated_at=str(file_data.get("updated_at")).strip() if file_data.get("updated_at") is not None else None,
+        )
 
     def _update_file_checkpoint(
         self,
@@ -1368,6 +1400,57 @@ class ExecutionService:
         # Creation-only phase: keep execution queued and defer processing integration.
         return self._to_execution_response(execution)
 
+    async def get_execution_file_preview(
+        self,
+        execution_id: UUID,
+        file_type: str,
+        user_id: str,
+        limit: int = 10,
+    ) -> ExecutionFilePreviewResponse:
+        """Return a read-only CSV preview for an uploaded execution file."""
+        normalized_file_type = (file_type or "").strip().lower()
+        if normalized_file_type not in {"input", "questions"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="file_type must be one of: input, questions",
+            )
+
+        if limit < 1 or limit > 50:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="limit must be between 1 and 50",
+            )
+
+        execution = self._get_execution_or_404(execution_id, user_id)
+        file_path = self._get_file_path_by_type(execution, normalized_file_type)
+        if not file_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{normalized_file_type} file is not uploaded yet.",
+            )
+
+        file_bytes = await self.storage_service.download_file(file_path)
+        if not file_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"{normalized_file_type} file was not found in storage.",
+            )
+
+        label = "Input file" if normalized_file_type == "input" else "Questions file"
+        headers, row_count, preview_rows, _ = self._parse_csv_preview(
+            file_bytes,
+            label,
+            preview_limit=limit,
+        )
+
+        return ExecutionFilePreviewResponse(
+            execution_id=execution.id,
+            file_type=normalized_file_type,
+            rows_detected=row_count,
+            columns_detected=headers,
+            preview_rows=preview_rows,
+        )
+
     def get_execution(self, execution_id: UUID, user_id: str) -> Optional[ExecutionDetail]:
         """Get execution by ID"""
         execution = self.db.query(Execution).filter(
@@ -1377,6 +1460,8 @@ class ExecutionService:
 
         if not execution:
             return None
+
+        checkpoint = self._checkpoint(execution)
 
         return ExecutionDetail.model_validate(
             {
@@ -1394,10 +1479,16 @@ class ExecutionService:
                 "input_file_size": execution.input_file_size,
                 "questions_file_size": execution.questions_file_size,
                 "output_file_size": execution.output_file_size,
+                "upload_completed_at": execution.upload_completed_at,
+                "checkpoint_data": checkpoint,
+                "input_file_status": self._checkpoint_file_status(checkpoint, "input"),
+                "questions_file_status": self._checkpoint_file_status(checkpoint, "questions"),
                 "worker_id": execution.worker_id,
+                "error_logs": execution.error_logs,
                 "retry_count": execution.retry_count,
                 "processing_started_at": execution.processing_started_at,
                 "processing_completed_at": execution.processing_completed_at,
+                "notification_sent_at": execution.notification_sent_at,
             }
         )
 
@@ -1406,9 +1497,13 @@ class ExecutionService:
         user_id: str,
         page: int = 1,
         page_size: int = 20,
-        status_filter: Optional[str] = None
+        status_filter: Optional[str] = None,
+        status_group: Optional[str] = None,
+        state_filter: Optional[str] = None,
+        district_filter: Optional[str] = None,
+        search_query: Optional[str] = None,
     ) -> ExecutionList:
-        """List executions with pagination"""
+        """List executions with pagination and optional server-side filters."""
         if page < 1 or page_size < 1:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1426,6 +1521,37 @@ class ExecutionService:
 
             if status_filter:
                 query = query.filter(Execution.status == status_filter)
+
+            normalized_status_group = (status_group or "").strip().lower()
+            if normalized_status_group:
+                draft_group_statuses = {"draft", "validated", "notstarted"}
+                completed_or_failed = {"completed", "failed"}
+
+                if normalized_status_group == "draft":
+                    query = query.filter(func.lower(Execution.status).in_(draft_group_statuses))
+                elif normalized_status_group in completed_or_failed:
+                    query = query.filter(func.lower(Execution.status) == normalized_status_group)
+                elif normalized_status_group == "in_progress":
+                    query = query.filter(
+                        ~func.lower(Execution.status).in_(draft_group_statuses | completed_or_failed)
+                    )
+                else:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="status_group must be one of: draft, in_progress, completed, failed",
+                    )
+
+            normalized_state_filter = (state_filter or "").strip()
+            if normalized_state_filter:
+                query = query.filter(Execution.state == normalized_state_filter)
+
+            normalized_district_filter = (district_filter or "").strip()
+            if normalized_district_filter:
+                query = query.filter(Execution.district == normalized_district_filter)
+
+            normalized_search_query = (search_query or "").strip()
+            if normalized_search_query:
+                query = query.filter(Execution.name.ilike(f"%{normalized_search_query}%"))
 
             total = query.count()
 
@@ -1479,7 +1605,7 @@ class ExecutionService:
     def update_execution(
         self,
         execution_id: UUID,
-        update_data: dict,
+        update_data: ExecutionUpdate,
         user_id: str
     ) -> ExecutionResponse:
         """Update an execution (draft and validated executions can be updated)."""
@@ -1500,15 +1626,36 @@ class ExecutionService:
                 detail="Only draft or validated executions can be updated"
             )
 
-        # Update allowed fields
-        allowed_fields = [
-            'name', 'state', 'district', 'program_ref_id', 'program_name',
-            'criterias_mode', 'threshold_config'
-        ]
-        
-        for field, value in update_data.items():
-            if field in allowed_fields and value is not None:
-                setattr(execution, field, value)
+        # Update only fields that are explicitly provided by the client.
+        payload = update_data.model_dump(exclude_unset=True)
+        provided_fields = set(update_data.model_fields_set)
+
+        allowed_fields = {
+            'name',
+            'state',
+            'district',
+            'program_ref_id',
+            'program_name',
+            'criterias_mode',
+            'threshold_config',
+        }
+
+        for field in allowed_fields:
+            if field not in provided_fields:
+                continue
+
+            value = payload.get(field)
+            if field == 'name':
+                if value is None or not str(value).strip():
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Execution name cannot be empty."
+                    )
+                execution.name = str(value).strip()
+                continue
+
+            # Optional fields support explicit clears via null.
+            setattr(execution, field, value)
         
         execution.updated_by = user_id
         
