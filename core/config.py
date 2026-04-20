@@ -84,6 +84,23 @@ class Settings(BaseSettings):
     # Background Processing
     MAX_CONCURRENT_JOBS: int = 5
     WORKER_CHECK_INTERVAL: int = 5  # seconds
+
+    # Celery + RabbitMQ queue processing
+    CELERY_BROKER_URL: str = "amqp://guest:guest@localhost:5672//"
+    CELERY_RESULT_BACKEND: str = "rpc://"
+    CELERY_TASK_QUEUE: str = "execution_queue"
+    CELERY_TASK_ROUTING_KEY: str = "execution.process"
+    CELERY_MAX_RETRIES: int = 3
+    CELERY_RETRY_BACKOFF_SECONDS: int = 30
+    CELERY_WORKER_CONCURRENCY: int = 2
+
+    # Execution workspace + script runtime
+    EXECUTION_WORKSPACE_ROOT: str = "/tmp/evidence_analysis/executions"
+    EXECUTION_CLEANUP_ON_SUCCESS: bool = True
+    PREPROCESS_SCRIPT_PATH: str = "scripts/pre-processor/1-pre-processor.py"
+    PROCESSOR_SCRIPT_PATH: str = "scripts/processor/1-main-parallel-script.py"
+    PROCESSOR_MAX_ROWS: int = 0
+    PROCESSOR_RESUME_FROM_CHECKPOINT: bool = False
     
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB

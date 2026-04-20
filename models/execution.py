@@ -33,7 +33,7 @@ class Execution(Base):
     threshold_config = Column(JSONB, nullable=True)
     
     # Status and processing
-    status = Column(String(50), nullable=False, default='queued', index=True)  # queued, running, completed, failed
+    status = Column(String(50), nullable=False, default='queued', index=True)  # queued, in_progress, completed, failed
     failure_reason = Column(Text, nullable=True)
     
     # Metrics

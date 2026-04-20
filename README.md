@@ -65,5 +65,10 @@ FastAPI backend REST API for the Evidence Analysis System.
    uvicorn main:app --reload
    ```
 
+10. **Run Celery worker (queue processor)**
+   ```bash
+   celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2
+   ```
+
 API: `http://localhost:8000`  
 Docs: `http://localhost:8000/docs`

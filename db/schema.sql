@@ -157,7 +157,7 @@ COMMENT ON TABLE users IS 'User accounts for authentication and authorization';
 COMMENT ON TABLE csv_source_types IS 'Configuration registry for CSV parsing and validation rules by tenant/org/type';
 COMMENT ON TABLE executions IS 'Evidence analysis execution jobs with complete Phase 1 schema';
 
-COMMENT ON COLUMN executions.status IS 'Execution status: queued, running, completed, failed';
+COMMENT ON COLUMN executions.status IS 'Execution status: queued, in_progress, completed, failed';
 COMMENT ON COLUMN executions.average_processing_time IS 'Average processing time per row in seconds';
 COMMENT ON COLUMN executions.notification_sent IS 'Whether email notification was sent';
 

@@ -1177,10 +1177,10 @@ class ExecutionService:
                 detail="Files are not validated. Upload valid files and run validation before starting analysis.",
             )
 
-        if execution.status == "running":
+        if execution.status in {"in_progress", "running"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Execution is already running",
+                detail="Execution is already in progress",
             )
         if execution.status == "queued":
             raise HTTPException(
@@ -1199,7 +1199,19 @@ class ExecutionService:
         self.db.commit()
         self.db.refresh(execution)
 
-        # Creation-only phase: keep execution queued and defer processing integration.
+        try:
+            self.worker.submit_job(execution.id)
+        except Exception as exc:
+            logger.exception("Failed to enqueue execution %s", execution.id)
+            execution.status = "failed"
+            execution.failure_reason = f"Failed to enqueue execution: {exc}"
+            self.db.commit()
+            self.db.refresh(execution)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Execution could not be queued. Please try again.",
+            ) from exc
+
         return self._to_execution_response(execution)
 
     async def init_execution_upload(
@@ -1317,10 +1329,10 @@ class ExecutionService:
                 detail="Execution not found",
             )
 
-        if execution.status == "running":
+        if execution.status in {"in_progress", "running"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Execution is already running",
+                detail="Execution is already in progress",
             )
 
         if execution.upload_completed_at is not None:
@@ -1397,7 +1409,19 @@ class ExecutionService:
         self.db.commit()
         self.db.refresh(execution)
 
-        # Creation-only phase: keep execution queued and defer processing integration.
+        try:
+            self.worker.submit_job(execution.id)
+        except Exception as exc:
+            logger.exception("Failed to enqueue execution %s", execution.id)
+            execution.status = "failed"
+            execution.failure_reason = f"Failed to enqueue execution: {exc}"
+            self.db.commit()
+            self.db.refresh(execution)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Execution could not be queued. Please try again.",
+            ) from exc
+
         return self._to_execution_response(execution)
 
     async def get_execution_file_preview(
@@ -1673,7 +1697,7 @@ class ExecutionService:
         return self._to_execution_response(execution)
 
     def delete_execution(self, execution_id: UUID, user_id: str) -> bool:
-        """Delete an execution (only if not running)"""
+        """Delete an execution (only if not in progress)."""
         execution = self.db.query(Execution).filter(
             Execution.id == execution_id,
             Execution.created_by == user_id
@@ -1682,10 +1706,10 @@ class ExecutionService:
         if not execution:
             return False
 
-        if execution.status == 'running':
+        if execution.status in {'in_progress', 'running'}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete running execution"
+                detail="Cannot delete execution in progress"
             )
 
         self.db.delete(execution)

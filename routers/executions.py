@@ -294,7 +294,7 @@ async def delete_execution(
     execution_service: ExecutionServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
 ):
-    """Delete an execution (only if not running)"""
+    """Delete an execution (only if not in progress)."""
     success = execution_service.delete_execution(execution_id, current_user.id)
     if not success:
         raise HTTPException(
