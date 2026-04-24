@@ -1,0 +1,120 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: evidence-postgres
+    environment:
+      POSTGRES_DB: evidence_analysis
+      POSTGRES_USER: evidence_user
+      POSTGRES_PASSWORD: evidence_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evidence_user -d evidence_analysis"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - evidence-backend-net
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: evidence-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - evidence-backend-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: evidence-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - evidence-backend-net
+
+  backend:
+    image: python:3.12-slim
+    container_name: evidence-backend
+    working_dir: /app
+    env_file:
+      - ./.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      DATABASE_URL: postgresql://evidence_user:evidence_password@postgres:5432/evidence_analysis
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+      CORS_ORIGINS: '["http://localhost:5173","http://localhost:3000"]'
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             python db/init_db.py &&
+             uvicorn main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - evidence-backend-net
+
+  celery-worker:
+    image: python:3.12-slim
+    container_name: evidence-celery-worker
+    working_dir: /app
+    env_file:
+      - ./.env
+    environment:
+      PYTHONUNBUFFERED: "1"
+      DATABASE_URL: postgresql://evidence_user:evidence_password@postgres:5432/evidence_analysis
+      CELERY_BROKER_URL: amqp://guest:guest@rabbitmq:5672//
+    volumes:
+      - ./:/app
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - evidence-backend-net
+
+  frontend:
+    image: node:20-alpine
+    container_name: evidence-frontend
+    working_dir: /app
+    environment:
+      APPLICATION_PORT: "5173"
+      APPLICATION_BASE_URL: "/api/v1"
+      API_ENDPOINT: "http://backend:8000"
+    volumes:
+      - ../evidence-analysis-portal-p1:/app
+      - frontend_node_modules:/app/node_modules
+    command: >
+      sh -c "npm install &&
+             npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+    networks:
+      - evidence-backend-net
+
+volumes:
+  postgres_data:
+  frontend_node_modules:
+
+networks:
+  evidence-backend-net:
+    driver: bridge

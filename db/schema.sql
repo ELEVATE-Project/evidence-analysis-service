@@ -107,13 +107,12 @@ CREATE TABLE IF NOT EXISTS executions (
     processed_rows INTEGER DEFAULT 0,
     actual_cost NUMERIC(10, 4),
     estimated_cost NUMERIC(10, 4),
+    estimated_time_seconds INTEGER,
     
     -- File storage fields (store provider-agnostic absolute file paths)
     input_file_url TEXT,
     input_file_size BIGINT,
-    input_file_checksum VARCHAR(64),
-    questions_file_url TEXT,
-    questions_file_size BIGINT,
+    criterias_file_size BIGINT,
     output_file_url TEXT,
     output_file_size BIGINT,
     

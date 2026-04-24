@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from core.config import SERVICE_ROOT, settings
 from db.database import SessionLocal
+from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from services.gemini_runtime import build_gemini_env_overrides
 from services.storage_service import StorageService
@@ -100,6 +101,52 @@ def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
         checkpoint_file=processor_output_dir / ".processing_checkpoint.json",
         api_usage_log_file=processor_output_dir / "api_usage_log.csv",
     )
+
+
+def _resolve_processor_columns_from_config(db: Session, execution: Execution) -> dict[str, str]:
+    columns: dict[str, str] = {}
+    csv_type_id = (execution.csv_type_id or "").strip()
+    if not csv_type_id:
+        return columns
+
+    source_type = (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == execution.tenant_code,
+            CsvSourceType.organization_code == execution.organization_code,
+            CsvSourceType.type_key == csv_type_id,
+            CsvSourceType.is_active.is_(True),
+        )
+        .first()
+    )
+    if not source_type:
+        return columns
+
+    evidence_context_config = (
+        source_type.evidence_context_config if isinstance(source_type.evidence_context_config, dict) else {}
+    )
+    title_column = str(evidence_context_config.get("title_column", "")).strip()
+    if title_column:
+        columns["task_column"] = title_column
+
+    question_config = source_type.question_config if isinstance(source_type.question_config, dict) else {}
+    question_text_column = str(question_config.get("question_column", "")).strip()
+    if not question_text_column:
+        mandatory_columns = question_config.get("mandatory_columns", [])
+        if isinstance(mandatory_columns, list):
+            for column in mandatory_columns:
+                column_str = str(column or "").strip()
+                if not column_str:
+                    continue
+                if column_str == "evidence_context_config.title_column":
+                    continue
+                question_text_column = column_str
+                break
+
+    if question_text_column:
+        columns["question_text_column"] = question_text_column
+
+    return columns
 
 
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
@@ -274,7 +321,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         execution = _claim_execution(db, execution_id=execution_uuid, worker_id=worker_id)
         storage_service = StorageService()
 
-        if not execution.input_file_url or not execution.questions_file_url:
+        if not execution.input_file_url or not execution.criterias_file_url:
             raise ExecutionProcessingError(
                 "Execution is missing input/questions file URLs."
             )
@@ -282,7 +329,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         workspace = _build_workspace(execution.id)
 
         input_bytes = _run_async(storage_service.download_file(execution.input_file_url))
-        questions_bytes = _run_async(storage_service.download_file(execution.questions_file_url))
+        questions_bytes = _run_async(storage_service.download_file(execution.criterias_file_url))
         if not input_bytes:
             raise ExecutionProcessingError("Input file could not be downloaded from storage.")
         if not questions_bytes:
@@ -299,6 +346,12 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             **base_env,
             "PYTHONUNBUFFERED": "1",
         }
+        configured_columns = _resolve_processor_columns_from_config(db, execution)
+        question_task_column = configured_columns.get("task_column", "")
+        question_text_column = configured_columns.get("question_text_column", "")
+        if question_task_column:
+            preprocessor_env["PREPROCESS_QUESTION_TASK_COLUMN"] = question_task_column
+
         preprocessor_cmd = [
             sys.executable,
             str(preprocessor_script),
@@ -331,6 +384,12 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "RESUME_FROM_CHECKPOINT": str(settings.PROCESSOR_RESUME_FROM_CHECKPOINT),
             "CHECKPOINT_CLEANUP_ON_SUCCESS": "True",
         }
+        if question_task_column:
+            processor_env["PROCESSOR_QUESTION_TASK_COLUMN"] = question_task_column
+            processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = question_task_column
+        if question_text_column:
+            processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
+
         processor_cmd = [
             sys.executable,
             str(processor_script),

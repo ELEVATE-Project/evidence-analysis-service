@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import List
+from env_variables import validate_environment
 
 SERVICE_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE_PATH = SERVICE_ROOT / ".env"
@@ -22,10 +23,10 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     
     # Database
-    DATABASE_URL: str
+    DATABASE_URL: str = ""
     
     # JWT Authentication
-    JWT_SECRET_KEY: str
+    JWT_SECRET_KEY: str = ""
     JWT_ALGORITHM: str = "HS256"
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     
@@ -46,23 +47,15 @@ class Settings(BaseSettings):
     ENTITY_MGMT_CACHE_ENABLED: bool = True
     ENTITY_MGMT_STATES_CACHE_TTL_SECONDS: int = 900
     
-    # File Storage
-    STORAGE_TYPE: str = "gcp"  # "gcp", "s3", or "local"
-    CLOUD_STORAGE_PROVIDER: str = "gcloud"  # "gcloud" or "aws"
-    
-    # GCP Storage
+    # File Storage (standardized across AWS/GCP)
+    CLOUD_ENDPOINT: str = ""
     CLOUD_STORAGE: str = "GCP"
     CLOUD_STORAGE_ACCOUNTNAME: str = ""
     CLOUD_STORAGE_BUCKETNAME: str = ""
-    CLOUD_STORAGE_BUCKET_TYPE: str = "private"
-    CLOUD_STORAGE_PROJECT: str = ""
+    CLOUD_STORAGE_PROVIDER: str = "gcp"  # gcp or aws
+    CLOUD_STORAGE_REGION: str = ""
     CLOUD_STORAGE_SECRET: str = ""
-    
-    # AWS S3 Storage
-    AWS_ACCESS_KEY_ID: str = ""
-    AWS_SECRET_ACCESS_KEY: str = ""
-    AWS_REGION: str = "us-east-1"
-    S3_BUCKET_NAME: str = ""
+    CLOUD_STORAGE_BUCKET_TYPE: str = "private"
     
     # Local Storage
     LOCAL_STORAGE_PATH: str = "./uploads"
@@ -71,7 +64,7 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_1: str = ""
     GEMINI_API_KEY_2: str = ""
     GEMINI_API_KEY_3: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-pro"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
     
     # Email (SMTP)
     SMTP_HOST: str = ""
@@ -101,6 +94,8 @@ class Settings(BaseSettings):
     PROCESSOR_SCRIPT_PATH: str = "scripts/processor/1-main-parallel-script.py"
     PROCESSOR_MAX_ROWS: int = 0
     PROCESSOR_RESUME_FROM_CHECKPOINT: bool = False
+    ESTIMATED_COST_PER_INPUT_ROW: float = 0.001
+    ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
     
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
@@ -149,11 +144,13 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(ENV_FILE_PATH)
         case_sensitive = True
+        extra = "ignore"
 
 
 # Initialize settings
 settings = Settings()
+validate_environment(settings=settings, env_file_path=ENV_FILE_PATH)
 
 # Create local storage directory if using local storage
-if settings.STORAGE_TYPE == "local":
+if (settings.CLOUD_STORAGE_PROVIDER or "").strip().lower() == "local":
     Path(settings.LOCAL_STORAGE_PATH).mkdir(parents=True, exist_ok=True)

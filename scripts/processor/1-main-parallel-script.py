@@ -39,6 +39,14 @@ def _parse_args():
     parser.add_argument("--checkpoint-file", default=None, help="Checkpoint file path")
     parser.add_argument("--api-usage-log-file", default=None, help="API usage log CSV path")
     parser.add_argument("--questions-file", default=None, help="Questions CSV path")
+    parser.add_argument("--question-task-column", default=None, help="Task column in questions CSV (from config)")
+    parser.add_argument("--question-text-column", default=None, help="Question text column in questions CSV (from config)")
+    parser.add_argument("--input-task-column", default=None, help="Task column in input CSV (from config)")
+    parser.add_argument(
+        "--input-task-question-column",
+        default=None,
+        help="Input CSV column that holds mapped question text",
+    )
     parser.add_argument("--max-processed-rows", type=int, default=None, help="Row cap; <=0 means no cap")
     return parser.parse_args()
 
@@ -80,6 +88,26 @@ STATE_NAME = os.getenv("STATE_NAME", "HARYANA")  # Default: HARYANA
 # Path to the CSV containing standard task names and their evaluation questions.
 # Relative to the processor/ directory. Defaults to the Haryana question sheet.
 QUESTIONS_FILE = ARGS.questions_file or os.getenv("PROCESSOR_QUESTIONS_FILE") or os.getenv("QUESTIONS_FILE", "../input/question.csv")
+QUESTION_TASK_COLUMN = (
+    (ARGS.question_task_column or "").strip()
+    or (os.getenv("PROCESSOR_QUESTION_TASK_COLUMN", "") or "").strip()
+)
+QUESTION_TEXT_COLUMN = (
+    (ARGS.question_text_column or "").strip()
+    or (os.getenv("PROCESSOR_QUESTION_TEXT_COLUMN", "") or "").strip()
+)
+INPUT_TASK_COLUMN = (
+    (ARGS.input_task_column or "").strip()
+    or (os.getenv("PROCESSOR_INPUT_TASK_COLUMN", "") or "").strip()
+    or "Tasks"
+)
+INPUT_TASK_QUESTION_COLUMN = (
+    (ARGS.input_task_question_column or "").strip()
+    or (os.getenv("PROCESSOR_INPUT_TASK_QUESTION_COLUMN", "") or "").strip()
+    or "Task Evidence Question"
+)
+DEFAULT_QUESTION_TASK_COLUMN = "TASK NAME"
+DEFAULT_QUESTION_TEXT_COLUMN = "Question"
 
 # === RELEVANCE SCORING CONFIGURATION ===
 # BIHAR: Use "strict" mode (YES/NO answers only, descriptive content ignored)
@@ -190,7 +218,7 @@ def generate_row_hash(row):
     """
     try:
         school_id = str(row.get("School ID", "")).strip()
-        task = str(row.get("Tasks", "")).strip()
+        task = str(row.get(INPUT_TASK_COLUMN, "")).strip()
         evidence = str(row.get("Task Evidence", "")).strip()
         
         # Create unique string
@@ -484,6 +512,74 @@ def _normalize_task_name(name):
     return s.lower()
 
 
+def _normalize_column_name(name):
+    return " ".join(str(name).strip().lower().split())
+
+
+def _is_valid_column_name(name):
+    return bool(re.fullmatch(r"[A-Za-z0-9 _().+\-]+", str(name or "").strip()))
+
+
+def _resolve_column(
+    columns,
+    configured_column,
+    default_column,
+    *,
+    label,
+    compatibility_fallbacks=None,
+):
+    normalized_to_actual = {
+        _normalize_column_name(col): str(col)
+        for col in columns
+    }
+
+    configured = (configured_column or "").strip()
+    if configured:
+        if not _is_valid_column_name(configured):
+            logging.warning(
+                "[Columns] Invalid configured %s column '%s'. Falling back to default '%s'.",
+                label,
+                configured,
+                default_column,
+            )
+        else:
+            configured_resolved = normalized_to_actual.get(_normalize_column_name(configured))
+            if configured_resolved:
+                return configured_resolved
+            logging.warning(
+                "[Columns] Configured %s column '%s' not found. Falling back to default '%s'.",
+                label,
+                configured,
+                default_column,
+            )
+    else:
+        logging.warning(
+            "[Columns] Missing configured %s column. Falling back to default '%s'.",
+            label,
+            default_column,
+        )
+
+    default_resolved = normalized_to_actual.get(_normalize_column_name(default_column))
+    if default_resolved:
+        return default_resolved
+
+    for fallback in compatibility_fallbacks or []:
+        fallback_resolved = normalized_to_actual.get(_normalize_column_name(fallback))
+        if fallback_resolved:
+            logging.warning(
+                "[Columns] Default %s column '%s' not found. Using compatibility fallback '%s'.",
+                label,
+                default_column,
+                fallback_resolved,
+            )
+            return fallback_resolved
+
+    raise KeyError(
+        f"Could not resolve {label} column. Configured='{configured or '(missing)'}', "
+        f"default='{default_column}', available={list(columns)}"
+    )
+
+
 def load_questions_mapping(questions_file):
     """Load questions mapping from CSV file.
 
@@ -495,9 +591,28 @@ def load_questions_mapping(questions_file):
     questions_map_raw = {}  # raw cleaned key -> question (for exact-match fast path)
     try:
         df_questions = pd.read_csv(questions_file)
+        task_column = _resolve_column(
+            df_questions.columns,
+            QUESTION_TASK_COLUMN,
+            DEFAULT_QUESTION_TASK_COLUMN,
+            label="question-task",
+            compatibility_fallbacks=["Tasks"],
+        )
+        question_column = _resolve_column(
+            df_questions.columns,
+            QUESTION_TEXT_COLUMN,
+            DEFAULT_QUESTION_TEXT_COLUMN,
+            label="question-text",
+            compatibility_fallbacks=[
+                "Refined questions using tool and webpage",
+                "QUESTIONS FOR METRICS",
+                "Evidence Criteria",
+            ],
+        )
+
         for _, row in df_questions.iterrows():
-            task_name_raw = str(row["TASK NAME"]).strip()
-            question = str(row["Refined questions using tool and webpage"]).strip()
+            task_name_raw = str(row.get(task_column, "")).strip()
+            question = str(row.get(question_column, "")).strip()
 
             if not question or question.lower() in ("nan", "none"):
                 logging.debug(f"[Questions] Skipping task with empty question: '{task_name_raw}'")
@@ -512,6 +627,11 @@ def load_questions_mapping(questions_file):
                 questions_map[norm_key] = question
 
         logging.info(f"[Questions] Loaded {len(df_questions)} standard tasks from questions.csv")
+        logging.info(
+            "[Questions] Using columns: task='%s', question='%s'",
+            task_column,
+            question_column,
+        )
         logging.info(f"[Questions] Unique normalized keys: {len(questions_map)} | raw keys: {len(questions_map_raw)}")
     except Exception as e:
         logging.warning(f"Could not load questions file {questions_file}: {e}")
@@ -568,6 +688,64 @@ GEMINI_TOKENS = get_gemini_tokens_from_env()
 
 current_token_index = 0
 
+def _build_generation_config():
+    """
+    Keep generation config compatible with pinned google-generativeai==0.3.1.
+    Newer response schema keys (response_mime_type/response_schema) are not
+    supported in this SDK version and fail every request.
+    """
+    return {
+        "temperature": 0.0,
+    }
+
+
+def _parse_model_json_response(response_text):
+    """
+    Parse model output into JSON object with graceful handling of markdown
+    wrappers and extra prose around the JSON payload.
+    """
+    text = str(response_text or "").strip()
+    if not text:
+        raise ValueError("Model returned empty response text")
+
+    # Common pattern: fenced markdown JSON block.
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE).strip()
+        text = re.sub(r"\s*```$", "", text).strip()
+
+    candidates = [text]
+    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if match:
+        candidates.append(match.group(0))
+
+    last_error = None
+    for candidate in candidates:
+        try:
+            parsed = json.loads(candidate)
+            if not isinstance(parsed, dict):
+                raise ValueError("Model response JSON is not an object")
+            return parsed
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+
+    raise ValueError(f"Failed to parse model JSON response: {last_error}")
+
+
+def _ensure_required_qa_fields(response_json):
+    """Normalize and validate required keys expected by downstream logic."""
+    if not isinstance(response_json, dict):
+        raise ValueError("Model response must be a JSON object")
+
+    answers = response_json.get("answers")
+    reasonings = response_json.get("reasonings")
+    if not isinstance(answers, list) or not isinstance(reasonings, list):
+        raise ValueError("Model response must include list fields: answers, reasonings")
+
+    response_json["answers"] = [str(item).strip() for item in answers]
+    response_json["reasonings"] = [str(item).strip() for item in reasonings]
+    return response_json
+
+
 def get_next_gemini_token():
     global current_token_index
     if current_token_index < len(GEMINI_TOKENS):
@@ -585,13 +763,14 @@ def switch_to_next_token():
     token = get_next_gemini_token()
     if token:
         genai.configure(api_key=token)
-        global model
+        global model, enrollment_model
         model = genai.GenerativeModel(
             model_name=GEMINI_MODEL_NAME,
-            generation_config={
-                "response_mime_type": "application/json",
-                "response_schema": AnalysisResponse,
-            },
+            generation_config=_build_generation_config(),
+        )
+        enrollment_model = genai.GenerativeModel(
+            model_name=GEMINI_MODEL_NAME,
+            generation_config=_build_generation_config(),
         )
         return token
     return None
@@ -617,19 +796,13 @@ genai.configure(api_key=initial_token)
 # Standard model for regular tasks
 model = genai.GenerativeModel(
     model_name=GEMINI_MODEL_NAME,
-    generation_config={
-        "response_mime_type": "application/json",
-        "response_schema": AnalysisResponse,
-    },
+    generation_config=_build_generation_config(),
 )
 
 # Enrollment model with enhanced schema
 enrollment_model = genai.GenerativeModel(
     model_name=GEMINI_MODEL_NAME,
-    generation_config={
-        "response_mime_type": "application/json",
-        "response_schema": EnrollmentAnalysisResponse,
-    },
+    generation_config=_build_generation_config(),
 )
 
 # === 🆕 Extra Keys Extraction Function ===
@@ -1180,7 +1353,9 @@ CORRECT JSON Response:
                 {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
                 prompt,
             ])
-            response_json = json.loads(response.text)
+            response_json = _ensure_required_qa_fields(
+                _parse_model_json_response(getattr(response, "text", ""))
+            )
             
             # Log API usage
             api_call_type = "enrollment_analysis" if is_enrollment_task else "image_analysis"
@@ -1359,7 +1534,9 @@ Focus on:
                 {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
                 prompt,
             ])
-            response_json = json.loads(response.text)
+            response_json = _ensure_required_qa_fields(
+                _parse_model_json_response(getattr(response, "text", ""))
+            )
             
             # Log API usage
             api_call_type = "enrollment_analysis" if is_enrollment_task else "pdf_analysis"
@@ -1482,7 +1659,9 @@ Focus on:
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
             response = selected_model.generate_content([prompt])
-            response_json = json.loads(response.text)
+            response_json = _ensure_required_qa_fields(
+                _parse_model_json_response(getattr(response, "text", ""))
+            )
             
             # Log API usage
             api_call_type = "enrollment_analysis" if is_enrollment_task else "excel_analysis"
@@ -1641,12 +1820,20 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
         df = pd.read_excel(input_file) if input_file.endswith(".xlsx") else pd.read_csv(input_file)
 
-        # Filter: Keep rows with Task Evidence, but allow Null Task Evidence Question for user-owned tasks
+        required_input_columns = ["Task Evidence", INPUT_TASK_COLUMN, INPUT_TASK_QUESTION_COLUMN]
+        missing_input_columns = [column for column in required_input_columns if column not in df.columns]
+        if missing_input_columns:
+            raise KeyError(
+                f"Missing required input columns: {missing_input_columns}. "
+                f"Detected columns: {list(df.columns)}"
+            )
+
+        # Filter: Keep rows with Task Evidence, but allow null mapped-question column for user-owned tasks.
         df_filtered = df[
             ~df["Task Evidence"].isin([None, "Null"])
         ].dropna(subset=["Task Evidence"])
 
-        # Don't filter out rows with Null Task Evidence Question - they might be user-owned tasks
+        # Don't filter out rows with null mapped-question value - they might be user-owned tasks.
         logging.info(f"[Worker {worker_id}] Total rows after filtering: {len(df_filtered)}")
 
         # ===== CHECKPOINT: Filter out already-processed rows BEFORE processing =====
@@ -1703,9 +1890,9 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             
             # ===== PROCESS ROW (all rows here need processing) =====
             task_evidence = str(row["Task Evidence"]).strip()
-            task_question_raw = row.get("Task Evidence Question", "")
+            task_question_raw = row.get(INPUT_TASK_QUESTION_COLUMN, "")
             task_question = str(task_question_raw).strip() if pd.notna(task_question_raw) and task_question_raw != "Null" else ""
-            task_name_raw = str(row.get("Tasks", "")).strip()
+            task_name_raw = str(row.get(INPUT_TASK_COLUMN, "")).strip()
             school_id = str(row.get("School ID", "unknown")).strip()
 
             # Normalize task name for matching (handles all stray-quote / prefix variants)
@@ -2023,6 +2210,19 @@ if __name__ == "__main__":
     logging.info(f"[Main] Relevant Threshold: >= {RELEVANT_THRESHOLD}")
     logging.info(f"[Main] Partially Relevant Threshold: >= {PARTIALLY_RELEVANT_THRESHOLD}")
     logging.info(f"[Main] ===============================================")
+
+    logging.info("[Main] ===== COLUMN CONFIGURATION =====")
+    logging.info(
+        "[Main] Questions CSV task column (config/default): %s",
+        QUESTION_TASK_COLUMN or DEFAULT_QUESTION_TASK_COLUMN,
+    )
+    logging.info(
+        "[Main] Questions CSV question column (config/default): %s",
+        QUESTION_TEXT_COLUMN or DEFAULT_QUESTION_TEXT_COLUMN,
+    )
+    logging.info("[Main] Input CSV task column: %s", INPUT_TASK_COLUMN)
+    logging.info("[Main] Input CSV mapped-question column: %s", INPUT_TASK_QUESTION_COLUMN)
+    logging.info("[Main] ===============================================")
     
     # 🆕 Log extra keys configuration
     if ENABLE_EXTRA_KEYS:

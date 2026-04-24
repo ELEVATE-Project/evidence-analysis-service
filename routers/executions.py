@@ -19,6 +19,7 @@ from models.schemas import (
     ExecutionResponse,
     ExecutionValidationResponse,
     FileUploadUrlRequest,
+    HTTPErrorResponse,
     ExecutionUploadInitRequest,
     ExecutionUploadInitResponse,
     ExecutionUpdate,
@@ -30,8 +31,19 @@ from services.auth_service import AuthService
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
+EXECUTION_COMMON_ERROR_RESPONSES = {
+    400: {"model": HTTPErrorResponse, "description": "Invalid execution request"},
+    401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+    404: {"model": HTTPErrorResponse, "description": "Execution not found"},
+}
 
-@router.post("/", response_model=ExecutionResponse, status_code=status.HTTP_201_CREATED)
+
+@router.post(
+    "/",
+    response_model=ExecutionResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def create_execution(
     request: ExecutionCreateRequest,
     execution_service: ExecutionServiceDep,
@@ -41,7 +53,11 @@ async def create_execution(
     return await execution_service.create_execution_draft(request, current_user)
 
 
-@router.post("/{execution_id}/files/{file_type}/upload-url", response_model=ExecutionFileUploadUrlResponse)
+@router.post(
+    "/{execution_id}/files/{file_type}/upload-url",
+    response_model=ExecutionFileUploadUrlResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def get_file_upload_url(
     execution_id: UUID,
     file_type: str,
@@ -58,7 +74,11 @@ async def get_file_upload_url(
     )
 
 
-@router.post("/{execution_id}/files/{file_type}/complete", response_model=ExecutionFileCompleteResponse)
+@router.post(
+    "/{execution_id}/files/{file_type}/complete",
+    response_model=ExecutionFileCompleteResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def complete_file_upload(
     execution_id: UUID,
     file_type: str,
@@ -73,7 +93,11 @@ async def complete_file_upload(
     )
 
 
-@router.post("/{execution_id}/files/{file_type}/upload", response_model=ExecutionFileCompleteResponse)
+@router.post(
+    "/{execution_id}/files/{file_type}/upload",
+    response_model=ExecutionFileCompleteResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def direct_upload_file(
     execution_id: UUID,
     file_type: str,
@@ -93,7 +117,11 @@ async def direct_upload_file(
     )
 
 
-@router.post("/{execution_id}/upload", response_model=ExecutionValidationResponse)
+@router.post(
+    "/{execution_id}/upload",
+    response_model=ExecutionValidationResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def upload_both_files(
     execution_id: UUID,
     execution_service: ExecutionServiceDep,
@@ -136,7 +164,11 @@ async def upload_both_files(
     )
 
 
-@router.post("/{execution_id}/validate", response_model=ExecutionValidationResponse)
+@router.post(
+    "/{execution_id}/validate",
+    response_model=ExecutionValidationResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def validate_execution_files(
     execution_id: UUID,
     execution_service: ExecutionServiceDep,
@@ -149,7 +181,14 @@ async def validate_execution_files(
     )
 
 
-@router.post("/{execution_id}/start", response_model=ExecutionResponse)
+@router.post(
+    "/{execution_id}/start",
+    response_model=ExecutionResponse,
+    responses={
+        **EXECUTION_COMMON_ERROR_RESPONSES,
+        409: {"model": HTTPErrorResponse, "description": "Execution validation failed or execution not startable"},
+    },
+)
 async def start_execution(
     execution_id: UUID,
     execution_service: ExecutionServiceDep,
@@ -162,7 +201,12 @@ async def start_execution(
     )
 
 
-@router.post("/init-upload", response_model=ExecutionUploadInitResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/init-upload",
+    response_model=ExecutionUploadInitResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def init_execution_upload(
     request: ExecutionUploadInitRequest,
     execution_service: ExecutionServiceDep,
@@ -177,7 +221,11 @@ async def init_execution_upload(
         current_user=current_user,
     )
 
-@router.post("/{execution_id}/complete-upload", response_model=ExecutionResponse)
+@router.post(
+    "/{execution_id}/complete-upload",
+    response_model=ExecutionResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def complete_execution_upload(
     execution_id: UUID,
     execution_service: ExecutionServiceDep,
@@ -190,7 +238,15 @@ async def complete_execution_upload(
     )
 
 
-@router.get("/", response_model=ExecutionList)
+@router.get(
+    "/",
+    response_model=ExecutionList,
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Invalid list filters"},
+        401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+        500: {"model": HTTPErrorResponse, "description": "Failed to list executions"},
+    },
+)
 async def list_executions(
     execution_service: ExecutionServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
@@ -224,7 +280,11 @@ async def list_executions(
         )
 
 
-@router.get("/{execution_id}", response_model=ExecutionDetail)
+@router.get(
+    "/{execution_id}",
+    response_model=ExecutionDetail,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def get_execution(
     execution_id: UUID,
     execution_service: ExecutionServiceDep,
@@ -240,7 +300,11 @@ async def get_execution(
     return execution
 
 
-@router.get("/{execution_id}/files/{file_type}/preview", response_model=ExecutionFilePreviewResponse)
+@router.get(
+    "/{execution_id}/files/{file_type}/preview",
+    response_model=ExecutionFilePreviewResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def get_execution_file_preview(
     execution_id: UUID,
     file_type: str,
@@ -257,7 +321,11 @@ async def get_execution_file_preview(
     )
 
 
-@router.get("/{execution_id}/status", response_model=StatusResponse)
+@router.get(
+    "/{execution_id}/status",
+    response_model=StatusResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def get_execution_status(
     execution_id: UUID,
     execution_service: ExecutionServiceDep,
@@ -273,7 +341,11 @@ async def get_execution_status(
     return status_info
 
 
-@router.patch("/{execution_id}", response_model=ExecutionResponse)
+@router.patch(
+    "/{execution_id}",
+    response_model=ExecutionResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def update_execution(
     execution_id: UUID,
     update_data: ExecutionUpdate,
@@ -288,7 +360,11 @@ async def update_execution(
     )
 
 
-@router.delete("/{execution_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{execution_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
 async def delete_execution(
     execution_id: UUID,
     execution_service: ExecutionServiceDep,

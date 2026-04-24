@@ -41,13 +41,12 @@ class Execution(Base):
     processed_rows = Column(Integer, default=0)
     actual_cost = Column(Numeric(10, 4), nullable=True)
     estimated_cost = Column(Numeric(10, 4), nullable=True)
+    estimated_time_seconds = Column(Integer, nullable=True)
     
     # File storage fields (store provider-agnostic absolute file paths)
     input_file_url = Column(Text, nullable=True)
     input_file_size = Column(BigInteger, nullable=True)
-    input_file_checksum = Column(String(64), nullable=True)
-    questions_file_url = Column(Text, nullable=True)
-    questions_file_size = Column(BigInteger, nullable=True)
+    criterias_file_size = Column(BigInteger, nullable=True)
     output_file_url = Column(Text, nullable=True)
     output_file_size = Column(BigInteger, nullable=True)
     

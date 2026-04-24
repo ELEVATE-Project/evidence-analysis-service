@@ -8,6 +8,7 @@ from core.dependencies import CriteriaValidationServiceDep
 from models.schemas import (
     CriteriaValidationRequest,
     CriteriaValidationResponse,
+    HTTPErrorResponse,
     UserResponse,
 )
 from services.auth_service import AuthService
@@ -15,7 +16,14 @@ from services.auth_service import AuthService
 router = APIRouter()
 
 
-@router.post("/validate", response_model=CriteriaValidationResponse)
+@router.post(
+    "/validate",
+    response_model=CriteriaValidationResponse,
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Invalid criteria validation request"},
+        401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+    },
+)
 async def validate_criteria(
     request: CriteriaValidationRequest,
     criteria_validation_service: CriteriaValidationServiceDep,

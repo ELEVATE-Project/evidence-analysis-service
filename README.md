@@ -1,74 +1,111 @@
-# Evidence Analysis Service - Phase 1
+# Evidence Analysis Service - Setup Guide
 
-FastAPI backend REST API for the Evidence Analysis System.
+This README contains setup information only.
 
-## Setup
+## Official Dependency Installation Docs
 
-### Prerequisites
-- Python 3.12+
-- pip
-- PostgreSQL 14+
+- Python: https://www.python.org/downloads/
+- pip: https://pip.pypa.io/en/stable/installation/
+- PostgreSQL: https://www.postgresql.org/download/
+- RabbitMQ: https://www.rabbitmq.com/download.html
+- Redis: https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/
+- Celery (installation): https://docs.celeryq.dev/en/stable/getting-started/introduction.html#installation
+- Node.js + npm (for frontend): https://nodejs.org/en/download
+- Docker Desktop / Docker Engine: https://docs.docker.com/get-docker/
+- Docker Compose: https://docs.docker.com/compose/install/
 
-### Installation
-1. **Navigate to backend directory**
-   ```bash
-   cd evidence-analysis-service-p1
-   ```
+## Local Setup (Backend)
 
-2. **Create virtual environment**
-   ```bash
-   python3 -m venv venv
-   ```
+1. Navigate to backend directory:
 
-3. **Activate virtual environment**
-   ```bash
-   # Linux/macOS
-   source venv/bin/activate
+```bash
+cd evidence-analysis-service-p1
+```
 
-   # Windows
-   venv\Scripts\activate
-   ```
+2. Create and activate virtual environment:
 
-4. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
 
-5. **Configure environment variables**
-   ```bash
-   cp .env.example .env
-   ```
+3. Install Python dependencies:
 
-6. **Update required `.env` values**
-   - `DATABASE_URL`
-   - `JWT_SECRET_KEY`
-   - `CORS_ORIGINS`
-   - `DEFAULT_TENANT_CODE`
-   - `DEFAULT_ORGANIZATION_CODE`
-   - `STORAGE_TYPE`
-   - `ENTITY_MGMT_BASE_URL`
-   - `ENTITY_MGMT_TENANT_ID`
-   - `ENTITY_MGMT_ORIGIN`
+```bash
+pip install -r requirements.txt
+```
 
-7. **Initialize database**
-   ```bash
-   python db/init_db.py
-   ```
+4. Configure environment:
 
-8. **Seed default users**
-   ```bash
-   python db/seed_data.py
-   ```
+```bash
+cp .env.example .env
+```
 
-9. **Run development server**
-   ```bash
-   uvicorn main:app --reload
-   ```
+5. Update required `.env` values:
 
-10. **Run Celery worker (queue processor)**
-   ```bash
-   celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2
-   ```
+- `DATABASE_URL`
+- `JWT_SECRET_KEY`
+- `CLOUD_STORAGE_PROVIDER`
+- `CLOUD_STORAGE`
+- `CLOUD_STORAGE_BUCKETNAME`
+- `CLOUD_STORAGE_ACCOUNTNAME`
+- `CLOUD_STORAGE_SECRET`
+- `ENTITY_MGMT_BASE_URL`
+- `ENTITY_MGMT_TENANT_ID`
+- `ENTITY_MGMT_ORIGIN`
+- `GEMINI_API_KEY_1` (or equivalent Gemini key config)
 
-API: `http://localhost:8000`  
-Docs: `http://localhost:8000/docs`
+6. Initialize database:
+
+```bash
+python db/init_db.py
+python db/seed_data.py
+```
+
+7. Start API server:
+
+```bash
+uvicorn main:app --reload
+```
+
+8. Start Celery worker (separate terminal):
+
+```bash
+celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2
+```
+
+Backend URL: `http://localhost:8000`  
+Swagger Docs: `http://localhost:8000/docs`
+
+## Local Setup (Frontend)
+
+1. Open a new terminal and navigate:
+
+```bash
+cd evidence-analysis-portal-p1
+```
+
+2. Install dependencies and run:
+
+```bash
+npm install
+npm run dev
+```
+
+Frontend URL: `http://localhost:5173`
+
+## Docker Compose Setup (Frontend + Backend on Same Network)
+
+From project root (`Phase1`):
+
+```bash
+docker compose up -d
+```
+
+Services:
+
+- Frontend: `http://localhost:5173`
+- Backend: `http://localhost:8000`
+- PostgreSQL: `localhost:5432`
+- RabbitMQ: `localhost:5672` (Management UI: `http://localhost:15672`)
+- Redis: `localhost:6379`

@@ -155,7 +155,7 @@ def seed_default_csv_source_types(db: Session) -> None:
             "mandatory_columns": ["evidence_context_config.title_column", "Question"],
             "optional_columns": [],
         },
-        default_thresholds={"relevant": 0.8, "partial": 0.5},
+        default_thresholds={"relevant": 0.7, "partial": 0.5},
         is_active=True,
         created_by=admin_user_id,
         updated_by=admin_user_id,

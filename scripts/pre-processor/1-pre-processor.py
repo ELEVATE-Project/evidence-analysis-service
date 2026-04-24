@@ -2,6 +2,7 @@ import os
 import csv
 import math
 import argparse
+import re
 from urllib.parse import urlparse
 from tqdm import tqdm  # Import tqdm for the progress bar
 from dotenv import load_dotenv
@@ -18,6 +19,11 @@ def _parse_args():
     parser = argparse.ArgumentParser(description="Pre-process execution CSV input.")
     parser.add_argument("--input-csv", default=None, help="Input CSV path")
     parser.add_argument("--question-csv", default=None, help="Questions CSV path")
+    parser.add_argument(
+        "--question-task-column",
+        default=None,
+        help="Configured task column name in questions CSV (from CSV config)",
+    )
     parser.add_argument("--filter-csv", default=None, help="Optional school filter CSV path")
     parser.add_argument("--output-dir", default=None, help="Output directory path")
     parser.add_argument("--split-files", default=None, choices=["yes", "no"], help="Split output files or not")
@@ -34,8 +40,14 @@ DEFAULT_FILTER_CSV = "/home/dell/workspace/EVIDENCE_ANALYSIS/evidence-analysis-m
 
 INPUT_CSV = ARGS.input_csv or os.getenv("PREPROCESS_INPUT_CSV") or DEFAULT_INPUT_CSV
 QUESTION_CSV = ARGS.question_csv or os.getenv("PREPROCESS_QUESTION_CSV") or DEFAULT_QUESTION_CSV
+TASK_MATCH_COLUMN_CONFIG = (
+    (ARGS.question_task_column or "").strip()
+    or (os.getenv("PREPROCESS_QUESTION_TASK_COLUMN", "") or "").strip()
+)
 FILTER_CSV = ARGS.filter_csv or os.getenv("PREPROCESS_FILTER_CSV") or DEFAULT_FILTER_CSV
 OUTPUT_DIR = ARGS.output_dir or os.getenv("PREPROCESS_OUTPUT_DIR") or "output-pre-processor"
+DEFAULT_QUESTION_TASK_COLUMN = "TASK NAME"
+DEFAULT_INPUT_TASK_COLUMN = "Tasks"
 
 use_school_filter_value = (
     ARGS.use_school_filter
@@ -53,6 +65,9 @@ print(f"🔧 Configuration Loaded:")
 print(f"   SPLIT_FILES: {SPLIT_FILES}")
 print(f"   ROWS_PER_FILE: {ROWS_PER_FILE}")
 print(f"   USE_SCHOOL_FILTER: {USE_SCHOOL_FILTER}")
+print(f"   TASK_MATCH_COLUMN_CONFIG: {TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
+print(f"   QUESTION_TASK_COLUMN_FALLBACK: {DEFAULT_QUESTION_TASK_COLUMN}")
+print(f"   INPUT_TASK_COLUMN_FALLBACK: {DEFAULT_INPUT_TASK_COLUMN}")
 print()
 
 # === EVIDENCE FORMATS ===
@@ -94,6 +109,121 @@ def clean_cell(value):
         return ""
     # Strip whitespace, then strip both single and double quotes
     return value.strip().strip("'\"")
+
+# === Header resolver helpers ===
+def _normalize_header_name(name):
+    if not isinstance(name, str):
+        return ""
+    return " ".join(name.strip().lower().split())
+
+
+def _resolve_header_name(fieldnames, candidates):
+    normalized_to_actual = {
+        _normalize_header_name(field): field
+        for field in (fieldnames or [])
+        if isinstance(field, str) and field.strip()
+    }
+    for candidate in candidates:
+        resolved = normalized_to_actual.get(_normalize_header_name(candidate))
+        if resolved:
+            return resolved
+    return None
+
+
+def _is_valid_column_name(column_name):
+    if not isinstance(column_name, str):
+        return False
+    normalized = column_name.strip()
+    if not normalized:
+        return False
+    # Keep validation strict to catch malformed config quickly.
+    return bool(re.fullmatch(r"[A-Za-z0-9 _().+\-]+", normalized))
+
+
+def _resolve_questions_task_column(fieldnames, configured_column):
+    normalized_to_actual = {
+        _normalize_header_name(field): field
+        for field in (fieldnames or [])
+        if isinstance(field, str) and field.strip()
+    }
+
+    configured = (configured_column or "").strip()
+    if configured:
+        if not _is_valid_column_name(configured):
+            print(
+                "⚠️  Invalid configured task column name in CSV config: "
+                f"'{configured}'. Falling back to '{DEFAULT_QUESTION_TASK_COLUMN}'."
+            )
+        else:
+            resolved = normalized_to_actual.get(_normalize_header_name(configured))
+            if resolved:
+                print(f"✅ Using configured task column from CSV config: '{resolved}'")
+                return resolved
+            print(
+                "⚠️  Configured task column "
+                f"'{configured}' not found in Questions CSV. "
+                f"Falling back to '{DEFAULT_QUESTION_TASK_COLUMN}'."
+            )
+    else:
+        print(
+            "⚠️  Missing task column in CSV config. "
+            f"Falling back to '{DEFAULT_QUESTION_TASK_COLUMN}'."
+        )
+
+    fallback = normalized_to_actual.get(_normalize_header_name(DEFAULT_QUESTION_TASK_COLUMN))
+    if fallback:
+        print(f"✅ Using fallback task column: '{fallback}'")
+        return fallback
+
+    raise ValueError(
+        "Could not resolve task column in Questions CSV. "
+        f"Configured column: '{configured or '(missing)'}'; "
+        f"fallback '{DEFAULT_QUESTION_TASK_COLUMN}' was also not found. "
+        f"Detected columns: {list(fieldnames or [])}"
+    )
+
+
+def _resolve_input_task_column(fieldnames, configured_column):
+    normalized_to_actual = {
+        _normalize_header_name(field): field
+        for field in (fieldnames or [])
+        if isinstance(field, str) and field.strip()
+    }
+
+    configured = (configured_column or "").strip()
+    if configured:
+        if not _is_valid_column_name(configured):
+            print(
+                "⚠️  Invalid configured input-match column in CSV config: "
+                f"'{configured}'. Falling back to '{DEFAULT_INPUT_TASK_COLUMN}'."
+            )
+        else:
+            resolved = normalized_to_actual.get(_normalize_header_name(configured))
+            if resolved:
+                print(f"✅ Using configured input task column: '{resolved}'")
+                return resolved
+            print(
+                "⚠️  Configured input-match column "
+                f"'{configured}' not found in Input CSV. "
+                f"Falling back to '{DEFAULT_INPUT_TASK_COLUMN}'."
+            )
+    else:
+        print(
+            "⚠️  Missing input-match column in CSV config. "
+            f"Falling back to '{DEFAULT_INPUT_TASK_COLUMN}'."
+        )
+
+    fallback = normalized_to_actual.get(_normalize_header_name(DEFAULT_INPUT_TASK_COLUMN))
+    if fallback:
+        print(f"✅ Using fallback input task column: '{fallback}'")
+        return fallback
+
+    raise ValueError(
+        "Could not resolve input task column for matching. "
+        f"Configured column: '{configured or '(missing)'}'; "
+        f"fallback '{DEFAULT_INPUT_TASK_COLUMN}' was also not found. "
+        f"Detected columns: {list(fieldnames or [])}"
+    )
 
 # === Robust task name normalizer (lookup-only — never written to CSV) ===
 def normalize_task_name(name):
@@ -167,11 +297,34 @@ lookup_dict = {}         # raw/cleaned key  → question
 lookup_dict_norm = {}    # normalized key   → question
 with open(QUESTION_CSV, newline='', encoding="utf-8") as f:
     reader = csv.DictReader(f)
+    task_column = _resolve_questions_task_column(
+        reader.fieldnames,
+        TASK_MATCH_COLUMN_CONFIG,
+    )
+    question_column = _resolve_header_name(
+        reader.fieldnames,
+        [
+            "Refined questions using tool and webpage",
+            "Question",
+            "QUESTION",
+            "Questions",
+            "QUESTIONS FOR METRICS",
+            "Evidence Criteria",
+        ],
+    )
+    if not question_column:
+        print(
+            "⚠️  Could not resolve question CSV headers. "
+            f"Detected columns: {reader.fieldnames or []}"
+        )
+
     for row in reader:
-        task_name_raw = row.get("TASK NAME", "")
+        task_name_raw = row.get(task_column, "") if task_column else ""
         task_name = clean_cell(task_name_raw)
         task_norm  = normalize_task_name(task_name_raw)
-        refined_question = row.get("Refined questions using tool and webpage", "").strip()
+        refined_question = (
+            row.get(question_column, "").strip() if question_column else ""
+        )
         if task_name and refined_question:
             lookup_dict[task_name] = refined_question
         if task_norm and refined_question:
@@ -211,6 +364,7 @@ if header is None:
 print(f"Loaded {total_input_rows} data rows to process.")
 # --- END NEW ---
 
+input_task_column = _resolve_input_task_column(header, TASK_MATCH_COLUMN_CONFIG)
 
 filtered_rows = []
 
@@ -233,8 +387,9 @@ for col in new_columns:
 for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
     
     school_id = row.get("School ID", "").strip()
-    task = clean_cell(row.get("Tasks", ""))           # Clean task for exact lookup
-    task_norm = normalize_task_name(row.get("Tasks", ""))  # Normalized for fuzzy fallback lookup
+    task_raw = row.get(input_task_column, "")
+    task = clean_cell(task_raw)           # Clean task for exact lookup
+    task_norm = normalize_task_name(task_raw)  # Normalized for fuzzy fallback lookup
     evidence = row.get("Task Evidence", "") # Get raw evidence
 
     # Rule 0: Skip if School ID not in FILTER_CSV (only if USE_SCHOOL_FILTER is enabled)
