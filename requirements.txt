@@ -31,3 +31,6 @@ aiosmtplib==3.0.1
 # Utilities
 python-dotenv==1.0.0
 httpx==0.25.2
+
+# Queue Processing
+celery==5.4.0

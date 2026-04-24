@@ -11,8 +11,9 @@ from core.config import settings
 from core.dependencies import set_background_worker
 from db.database import engine, Base, SessionLocal
 from db.seed_data import seed_default_csv_source_types, seed_default_users
+from models.schemas import HealthResponse, RootResponse
 from services.background_worker import BackgroundWorker
-from routers import auth, cloud_services, config, entities, executions, reports
+from routers import auth, cloud_services, config, criteria, entities, executions, reports
 
 # Configure logging
 logging.basicConfig(
@@ -81,22 +82,23 @@ app.include_router(cloud_services.router, prefix="/api/v1/cloud-services", tags=
 app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(entities.router, prefix="/api/v1", tags=["Entities"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
+app.include_router(criteria.router, prefix="/api/v1/criteria", tags=["Criteria Validation"])
 
 
-@app.get("/")
+@app.get("/", response_model=RootResponse, include_in_schema=False)
 async def root():
     """Root endpoint"""
-    return {
-        "message": "Evidence Analysis API",
-        "version": "1.0.0",
-        "status": "running"
-    }
+    return RootResponse(
+        message="Evidence Analysis API",
+        version="1.0.0",
+        status="running",
+    )
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthResponse, include_in_schema=False)
 async def health_check():
     """Health check endpoint"""
-    return {"status": "healthy"}
+    return HealthResponse(status="healthy")
 
 
 if __name__ == "__main__":

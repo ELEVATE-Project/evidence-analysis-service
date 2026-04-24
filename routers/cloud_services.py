@@ -8,9 +8,12 @@ from fastapi import APIRouter, Depends, File, Form, UploadFile
 
 from core.dependencies import ExecutionServiceDep
 from models.schemas import (
+    CloudDownloadableUrlRequest,
+    CloudDownloadableUrlResponse,
     CloudSignedUrlRequest,
     CloudSignedUrlResponse,
     ExecutionFileCompleteResponse,
+    HTTPErrorResponse,
     UserResponse,
 )
 from services.auth_service import AuthService
@@ -18,7 +21,15 @@ from services.auth_service import AuthService
 router = APIRouter()
 
 
-@router.post("/getSignedUrl", response_model=CloudSignedUrlResponse)
+@router.post(
+    "/getSignedUrl",
+    response_model=CloudSignedUrlResponse,
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Invalid request payload or reference"},
+        401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+        404: {"model": HTTPErrorResponse, "description": "Execution not found"},
+    },
+)
 async def get_signed_url(
     request: CloudSignedUrlRequest,
     execution_service: ExecutionServiceDep,
@@ -31,7 +42,38 @@ async def get_signed_url(
     )
 
 
-@router.post("/upload", response_model=ExecutionFileCompleteResponse)
+@router.post(
+    "/getDownloadableUrl",
+    response_model=CloudDownloadableUrlResponse,
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Invalid file path pattern or request payload"},
+        401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+        403: {"model": HTTPErrorResponse, "description": "File path outside authorized scope"},
+        404: {"model": HTTPErrorResponse, "description": "File not found in storage"},
+        500: {"model": HTTPErrorResponse, "description": "Storage metadata/signing failure"},
+    },
+)
+async def get_downloadable_url(
+    request: CloudDownloadableUrlRequest,
+    execution_service: ExecutionServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+):
+    """Generate short-lived downloadable URLs for files already stored in cloud storage."""
+    return await execution_service.get_bulk_downloadable_urls(
+        request_data=request,
+        current_user=current_user,
+    )
+
+
+@router.post(
+    "/upload",
+    response_model=ExecutionFileCompleteResponse,
+    responses={
+        400: {"model": HTTPErrorResponse, "description": "Invalid file upload metadata"},
+        401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+        404: {"model": HTTPErrorResponse, "description": "Execution not found"},
+    },
+)
 async def upload_file(
     execution_service: ExecutionServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),

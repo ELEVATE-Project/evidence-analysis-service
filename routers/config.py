@@ -3,6 +3,7 @@ Config Router
 Provides generic configuration list APIs.
 """
 import logging
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
@@ -16,11 +17,19 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-@router.get("/list", response_model=StandardAPIResponse)
+@router.get(
+    "/list",
+    response_model=StandardAPIResponse,
+    responses={
+        400: {"model": StandardAPIResponse, "description": "Invalid config type"},
+        401: {"model": StandardAPIResponse, "description": "Unauthorized"},
+        500: {"model": StandardAPIResponse, "description": "Unexpected internal error"},
+    },
+)
 async def list(
     config_service: ConfigServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
-    type: str = Query(...),
+    type: Literal["project"] = Query(...),
 ):
     """List config values by type. Current support: type=project."""
     try:

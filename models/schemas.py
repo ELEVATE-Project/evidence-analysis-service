@@ -1,10 +1,12 @@
 """
 Pydantic Schemas for Request/Response Validation
 """
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional, Dict, Any
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from typing import Optional, Dict, Any, Literal
 from datetime import datetime
 from uuid import UUID
+
+from core.config import settings
 
 
 # ============ Authentication Schemas ============
@@ -42,6 +44,28 @@ class UserResponse(BaseModel):
         from_attributes = True
 
 
+class MessageResponse(BaseModel):
+    """Simple message response schema."""
+    message: str
+
+
+class RootResponse(BaseModel):
+    """Root endpoint response schema."""
+    message: str
+    version: str
+    status: str
+
+
+class HealthResponse(BaseModel):
+    """Health endpoint response schema."""
+    status: str
+
+
+class HTTPErrorResponse(BaseModel):
+    """Standard HTTP error response body used by FastAPI HTTPException."""
+    detail: Any
+
+
 # ============ Execution Schemas ============
 
 class ExecutionCreate(BaseModel):
@@ -53,8 +77,6 @@ class ExecutionCreate(BaseModel):
     program_name: Optional[str] = None
     state: Optional[str] = None
     district: Optional[str] = None
-    criterias_mode: Optional[str] = None
-    threshold_config: Optional[Dict[str, Any]] = None
 
 
 class FileUploadDescriptor(BaseModel):
@@ -158,8 +180,6 @@ class ExecutionUpdate(BaseModel):
     district: Optional[str] = None
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
-    criterias_mode: Optional[str] = None
-    threshold_config: Optional[Dict[str, Any]] = None
     status: Optional[str] = None
     failure_reason: Optional[str] = None
     processed_rows: Optional[int] = None
@@ -181,8 +201,10 @@ class ExecutionResponse(BaseModel):
     total_rows: Optional[int] = None
     processed_rows: Optional[int] = None
     input_file_url: Optional[str] = None
-    questions_file_url: Optional[str] = None
+    criterias_file_url: Optional[str] = None
     output_file_url: Optional[str] = None
+    estimated_cost: Optional[float] = None
+    estimated_time_seconds: Optional[int] = None
     failure_reason: Optional[str] = None
     average_processing_time: Optional[float] = None
     notification_sent: bool = False
@@ -205,9 +227,8 @@ class ExecutionDetail(ExecutionResponse):
     criterias_config: Optional[Dict[str, Any]] = None
     threshold_config: Optional[Dict[str, Any]] = None
     actual_cost: Optional[float] = None
-    estimated_cost: Optional[float] = None
     input_file_size: Optional[int] = None
-    questions_file_size: Optional[int] = None
+    criterias_file_size: Optional[int] = None
     output_file_size: Optional[int] = None
     upload_completed_at: Optional[datetime] = None
     checkpoint_data: Optional[Dict[str, Any]] = None
@@ -230,6 +251,71 @@ class ExecutionList(BaseModel):
     page: int
     page_size: int
     items: list[ExecutionResponse]
+
+
+# ============ Criteria Validation Schemas ============
+
+class CriteriaValidationRequest(BaseModel):
+    """Request schema for one-off evidence criteria validation."""
+    evidence_url: str = Field(..., min_length=1, max_length=2048)
+    evidence_criteria: list[str] = Field(..., min_length=1)
+    prompt: Optional[str] = Field(default=None, max_length=6000)
+
+    @staticmethod
+    def _max_items() -> int:
+        raw = getattr(settings, "CRITERIA_VALIDATE_MAX_ITEMS", 25)
+        return raw if isinstance(raw, int) and raw > 0 else 25
+
+    @field_validator("evidence_url", mode="before")
+    @classmethod
+    def strip_evidence_url(cls, value: Any) -> str:
+        text = str(value or "").strip()
+        if not text:
+            raise ValueError("evidence_url is required")
+        return text
+
+    @field_validator("evidence_criteria", mode="before")
+    @classmethod
+    def normalize_evidence_criteria(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            raise ValueError("evidence_criteria must be an array of strings")
+
+        normalized: list[str] = []
+        for item in value:
+            text = str(item or "").strip()
+            if text:
+                normalized.append(text)
+        if not normalized:
+            raise ValueError("At least one non-empty evidence criteria is required")
+        max_items = CriteriaValidationRequest._max_items()
+        if len(normalized) > max_items:
+            raise ValueError(f"Maximum {max_items} evidence criteria are allowed")
+        return normalized
+
+    @field_validator("prompt", mode="before")
+    @classmethod
+    def normalize_prompt(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
+
+
+class CriteriaValidationItem(BaseModel):
+    """Single evidence criteria validation output item."""
+    evidence_criteria: str
+    answer: str
+    reasoning: str
+
+
+class CriteriaValidationResponse(BaseModel):
+    """Response schema for criteria validation."""
+    source: Literal["gemini"]
+    model: str
+    relevance_tag: Literal["Relevant", "Partially Relevant", "Irrelevant"]
+    criteria_results: list[CriteriaValidationItem]
+    answers: list[str]
+    reasonings: list[str]
 
 
 # ============ Report Schemas ============
@@ -299,3 +385,62 @@ class CloudSignedUrlResponse(BaseModel):
     message: str
     result: Dict[str, CloudSignedUrlResultEntry]
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+
+class CloudDownloadableUrlRequest(BaseModel):
+    """Request downloadable URLs for already-uploaded cloud files."""
+    filePaths: list[str] = Field(..., min_length=1)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "filePaths": [
+                    "tenant_code/org_code/userId/executions/file1.csv",
+                    "tenant_code/org_code/userId/executions/file2.csv",
+                ]
+            }
+        }
+    }
+
+    @field_validator("filePaths")
+    @classmethod
+    def validate_file_paths(cls, value: list[str]) -> list[str]:
+        normalized_paths: list[str] = []
+        for index, raw_path in enumerate(value):
+            cleaned = (raw_path or "").strip()
+            if not cleaned:
+                raise ValueError(f"filePaths[{index}] cannot be empty.")
+            normalized_paths.append(cleaned.lstrip("/"))
+        return normalized_paths
+
+
+class CloudDownloadableUrlResultItem(BaseModel):
+    """Downloadable URL payload for one file path."""
+    cloudStorage: str
+    filePath: str
+    url: str
+
+
+class CloudDownloadableUrlResponse(BaseModel):
+    """Downloadable URL response format for cloud-services API."""
+    responseCode: str
+    message: str
+    result: list[CloudDownloadableUrlResultItem]
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "responseCode": "OK",
+                "message": "Download Url Generated Successfully.",
+                "result": [
+                    {
+                        "cloudStorage": "AWS",
+                        "filePath": "tenant_code/org_code/userId/executions/file1.csv",
+                        "url": "https://<cloud-storage-url>/tenant_code/org_code/userId/executions/file1.csv?...",
+                    }
+                ],
+                "meta": {},
+            }
+        }
+    }

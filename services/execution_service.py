@@ -5,6 +5,7 @@ Handles execution business logic, file management, and background processing
 import csv
 import io
 import logging
+import re
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
@@ -22,6 +23,8 @@ from core.config import settings
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from models.schemas import (
+    CloudDownloadableUrlRequest,
+    CloudDownloadableUrlResponse,
     CloudSignedUrlRequest,
     CloudSignedUrlResponse,
     ExecutionCreateRequest,
@@ -59,6 +62,9 @@ _FILE_TYPE_HINTS = {
     "questions": ("question", "questions", "criteria", "checklist"),
     "input": ("input", "evidence", "data"),
 }
+_DOWNLOADABLE_PATH_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_DEFAULT_ESTIMATED_COST_PER_ROW = Decimal("0.0010")
+_DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS = 0.5
 
 
 class ExecutionService:
@@ -92,8 +98,10 @@ class ExecutionService:
             total_rows=execution.total_rows,
             processed_rows=execution.processed_rows,
             input_file_url=execution.input_file_url,
-            questions_file_url=execution.questions_file_url,
+            criterias_file_url=execution.criterias_file_url,
             output_file_url=execution.output_file_url,
+            estimated_cost=ExecutionService._to_float(execution.estimated_cost),
+            estimated_time_seconds=execution.estimated_time_seconds,
             failure_reason=execution.failure_reason,
             average_processing_time=ExecutionService._to_float(execution.average_processing_time),
             notification_sent=bool(execution.notification_sent) if execution.notification_sent is not None else False,
@@ -203,6 +211,85 @@ class ExecutionService:
             )
         return tenant_code, organization_code
 
+    @staticmethod
+    def _cloud_storage_label() -> str:
+        raw_value = (
+            (settings.CLOUD_STORAGE_PROVIDER or "").strip()
+            or (settings.CLOUD_STORAGE or "").strip()
+            or "gcp"
+        ).lower()
+        labels = {
+            "aws": "AWS",
+            "gcp": "GCP",
+            "azure": "AZURE",
+            "local": "LOCAL",
+        }
+        return labels.get(raw_value, raw_value.upper())
+
+    @classmethod
+    def _validate_downloadable_file_path(cls, file_path: str) -> tuple[str, str, str, str]:
+        normalized = (file_path or "").strip().lstrip("/")
+        if not normalized:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="filePath cannot be empty.",
+            )
+
+        segments = normalized.split("/")
+        if len(segments) != 5 or segments[3] != "executions":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Invalid filePath pattern. Expected: "
+                    "tenant_code/org_code/userId/executions/fileName.ext"
+                ),
+            )
+
+        tenant_code, organization_code, user_id, _, file_name = segments
+        for segment_label, segment_value in (
+            ("tenant_code", tenant_code),
+            ("org_code", organization_code),
+            ("userId", user_id),
+            ("fileName", file_name),
+        ):
+            if not _DOWNLOADABLE_PATH_SEGMENT_PATTERN.fullmatch(segment_value):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid {segment_label} in filePath: {normalized}",
+                )
+
+        if "." not in file_name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"filePath must include a file extension: {normalized}",
+            )
+
+        return normalized, tenant_code, organization_code, user_id
+
+    @classmethod
+    def _enforce_download_path_scope(
+        cls,
+        *,
+        tenant_code: str,
+        organization_code: str,
+        current_user_id: str,
+        path_tenant: str,
+        path_organization: str,
+        path_user_id: str,
+        file_path: str,
+    ) -> None:
+        if path_tenant != tenant_code or path_organization != organization_code:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Not allowed to access filePath outside your tenant/org scope: {file_path}",
+            )
+
+        if path_user_id != (current_user_id or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Not allowed to access another user's filePath: {file_path}",
+            )
+
     def _get_csv_source_type(self, tenant_code: str, organization_code: str, type_key: str) -> Optional[CsvSourceType]:
         normalized_type_key = (type_key or "").strip()
         if not normalized_type_key:
@@ -218,6 +305,49 @@ class ExecutionService:
             )
             .first()
         )
+
+    @staticmethod
+    def _resolve_criterias_mode(source_type: CsvSourceType) -> Optional[str]:
+        question_config = source_type.question_config if isinstance(source_type.question_config, dict) else {}
+
+        for field_name in ("criterias_mode", "mode"):
+            value = str(question_config.get(field_name, "")).strip()
+            if value:
+                return value
+
+        entry_options = question_config.get("entry_options")
+        if isinstance(entry_options, list):
+            for option in entry_options:
+                if not isinstance(option, dict):
+                    continue
+                value = str(option.get("key", "")).strip() or str(option.get("value", "")).strip()
+                if value:
+                    return value
+        return None
+
+    @staticmethod
+    def _resolve_threshold_config(source_type: CsvSourceType) -> dict[str, Any]:
+        if isinstance(source_type.default_thresholds, dict):
+            return deepcopy(source_type.default_thresholds)
+        return {}
+
+    @staticmethod
+    def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
+        if row_count <= 0:
+            return None, None
+
+        cost_per_row = Decimal(
+            str(getattr(settings, "ESTIMATED_COST_PER_INPUT_ROW", _DEFAULT_ESTIMATED_COST_PER_ROW))
+        )
+        time_per_row_seconds = float(
+            getattr(settings, "ESTIMATED_TIME_SECONDS_PER_INPUT_ROW", _DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS)
+        )
+        if time_per_row_seconds <= 0:
+            time_per_row_seconds = float(_DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS)
+
+        estimated_cost = (Decimal(row_count) * cost_per_row).quantize(Decimal("0.0001"))
+        estimated_time_seconds = max(1, int(round(row_count * time_per_row_seconds)))
+        return estimated_cost, estimated_time_seconds
 
     @staticmethod
     def _flatten_column_mapping_headers(value: Any) -> list[str]:
@@ -572,11 +702,23 @@ class ExecutionService:
         )
 
     @staticmethod
+    def _normalize_file_type(file_type: str) -> str:
+        normalized = (file_type or "").strip().lower()
+        if normalized == "criterias":
+            return "questions"
+        if normalized in {"input", "questions"}:
+            return normalized
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="file_type must be one of: input, questions, criterias",
+        )
+
+    @staticmethod
     def _get_file_path_by_type(execution: Execution, file_type: str) -> Optional[str]:
         if file_type == "input":
             return execution.input_file_url
-        if file_type == "questions":
-            return execution.questions_file_url
+        if file_type in {"questions", "criterias"}:
+            return execution.criterias_file_url
         return None
 
     @staticmethod
@@ -584,8 +726,8 @@ class ExecutionService:
         if file_type == "input":
             execution.input_file_url = file_path
             return
-        if file_type == "questions":
-            execution.questions_file_url = file_path
+        if file_type in {"questions", "criterias"}:
+            execution.criterias_file_url = file_path
             return
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -597,8 +739,8 @@ class ExecutionService:
         if file_type == "input":
             execution.input_file_size = size_bytes
             return
-        if file_type == "questions":
-            execution.questions_file_size = size_bytes
+        if file_type in {"questions", "criterias"}:
+            execution.criterias_file_size = size_bytes
             return
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -677,6 +819,34 @@ class ExecutionService:
         file_checkpoint["updated_at"] = datetime.utcnow().isoformat()
         execution.checkpoint_data = checkpoint
 
+    async def _resolve_input_rows_for_estimation(self, execution: Execution) -> Optional[int]:
+        checkpoint = self._checkpoint(execution)
+        input_rows = checkpoint["files"]["input"].get("rows_detected")
+        if isinstance(input_rows, (int, float)) and int(input_rows) > 0:
+            return int(input_rows)
+
+        if not execution.input_file_url:
+            return None
+
+        input_bytes = await self.storage_service.download_file(execution.input_file_url)
+        if not input_bytes:
+            return None
+
+        _, row_count = self._extract_headers_and_row_count(input_bytes, "Input file")
+        return row_count if row_count > 0 else None
+
+    async def _apply_execution_estimates(self, execution: Execution) -> None:
+        input_rows = await self._resolve_input_rows_for_estimation(execution)
+        if input_rows is None:
+            execution.estimated_cost = None
+            execution.estimated_time_seconds = None
+            return
+
+        estimated_cost, estimated_time_seconds = self._build_estimates(input_rows)
+        execution.total_rows = input_rows
+        execution.estimated_cost = estimated_cost
+        execution.estimated_time_seconds = estimated_time_seconds
+
     def _get_execution_or_404(self, execution_id: UUID, user_id: str) -> Execution:
         execution = self.db.query(Execution).filter(
             Execution.id == execution_id,
@@ -708,6 +878,8 @@ class ExecutionService:
                 detail="Invalid or inactive csv_type_id for this tenant/organization.",
             )
         self._validate_scope_metadata(request_data, source_type)
+        criterias_mode = self._resolve_criterias_mode(source_type)
+        threshold_config = self._resolve_threshold_config(source_type)
 
         execution = Execution(
             tenant_code=tenant_code,
@@ -719,8 +891,8 @@ class ExecutionService:
             program_name=request_data.program_name,
             state=request_data.state,
             district=request_data.district,
-            criterias_mode=request_data.criterias_mode,
-            threshold_config=request_data.threshold_config,
+            criterias_mode=criterias_mode,
+            threshold_config=threshold_config,
             status="draft",
             created_by=current_user.id,
             checkpoint_data={"files": {"input": {}, "questions": {}}},
@@ -729,6 +901,95 @@ class ExecutionService:
         self.db.commit()
         self.db.refresh(execution)
         return self._to_execution_response(execution)
+
+    async def get_bulk_downloadable_urls(
+        self,
+        request_data: CloudDownloadableUrlRequest,
+        current_user: UserResponse,
+    ) -> CloudDownloadableUrlResponse:
+        """
+        Generate signed downloadable URLs for existing files.
+        Contract:
+        {
+          "filePaths": [
+            "tenant_code/org_code/userId/executions/file1.csv"
+          ]
+        }
+        """
+        tenant_code, organization_code = self._resolve_scope(current_user)
+        current_user_id = (current_user.id or "").strip()
+        if not current_user_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Current user id is required to generate downloadable URLs.",
+            )
+
+        result: list[dict[str, str]] = []
+        for raw_file_path in request_data.filePaths:
+            (
+                normalized_file_path,
+                path_tenant,
+                path_organization,
+                path_user_id,
+            ) = self._validate_downloadable_file_path(raw_file_path)
+
+            self._enforce_download_path_scope(
+                tenant_code=tenant_code,
+                organization_code=organization_code,
+                current_user_id=current_user_id,
+                path_tenant=path_tenant,
+                path_organization=path_organization,
+                path_user_id=path_user_id,
+                file_path=normalized_file_path,
+            )
+
+            absolute_file_path = f"/{normalized_file_path}"
+            try:
+                file_metadata = await self.storage_service.get_file_metadata(absolute_file_path)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.exception("Failed to load metadata for filePath=%s", normalized_file_path)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to read file metadata for: {normalized_file_path}",
+                ) from exc
+
+            if file_metadata is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"File not found in cloud storage: {normalized_file_path}",
+                )
+
+            try:
+                signed_download = await self.storage_service.generate_download_url(
+                    file_path=absolute_file_path,
+                    expiration=settings.SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS,
+                    response_filename=Path(normalized_file_path).name,
+                )
+            except HTTPException:
+                raise
+            except Exception as exc:
+                logger.exception("Failed to generate downloadable URL for filePath=%s", normalized_file_path)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Failed to generate downloadable URL for: {normalized_file_path}",
+                ) from exc
+
+            result.append(
+                {
+                    "cloudStorage": self._cloud_storage_label(),
+                    "filePath": normalized_file_path,
+                    "url": signed_download["url"],
+                }
+            )
+
+        return CloudDownloadableUrlResponse(
+            responseCode="OK",
+            message="Download Url Generated Successfully.",
+            result=result,
+            meta={},
+        )
 
     async def get_bulk_signed_upload_urls(
         self,
@@ -823,7 +1084,7 @@ class ExecutionService:
                             "sourcePath": normalized_path,
                             "fileType": file_type,
                         },
-                        "cloudStorage": (settings.CLOUD_STORAGE or settings.STORAGE_TYPE or "GCP").upper(),
+                        "cloudStorage": self._cloud_storage_label(),
                     }
                 )
 
@@ -849,12 +1110,7 @@ class ExecutionService:
         user_id: str,
     ) -> ExecutionFileUploadUrlResponse:
         """Step 2: create signed upload URL for one file section."""
-        normalized_file_type = (file_type or "").strip().lower()
-        if normalized_file_type not in {"input", "questions"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="file_type must be one of: input, questions",
-            )
+        normalized_file_type = self._normalize_file_type(file_type)
 
         execution = self._get_execution_or_404(execution_id, user_id)
         self._ensure_not_started_for_file_changes(execution)
@@ -907,12 +1163,7 @@ class ExecutionService:
         user_id: str,
     ) -> ExecutionFileCompleteResponse:
         """Step 2: confirm upload, detect rows/columns and persist preview metadata."""
-        normalized_file_type = (file_type or "").strip().lower()
-        if normalized_file_type not in {"input", "questions"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="file_type must be one of: input, questions",
-            )
+        normalized_file_type = self._normalize_file_type(file_type)
 
         execution = self._get_execution_or_404(execution_id, user_id)
         self._ensure_not_started_for_file_changes(execution)
@@ -975,12 +1226,7 @@ class ExecutionService:
         user_id: str,
     ) -> ExecutionFileCompleteResponse:
         """Direct upload through backend (fallback when browser-to-cloud CORS fails)."""
-        normalized_file_type = (file_type or "").strip().lower()
-        if normalized_file_type not in {"input", "questions"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="file_type must be one of: input, questions",
-            )
+        normalized_file_type = self._normalize_file_type(file_type)
 
         execution = self._get_execution_or_404(execution_id, user_id)
         self._ensure_not_started_for_file_changes(execution)
@@ -1056,7 +1302,7 @@ class ExecutionService:
         questions_result = FileValidationResult(file_type="questions", valid=False)
 
         input_path = execution.input_file_url
-        questions_path = execution.questions_file_url
+        questions_path = execution.criterias_file_url
         evidence_context_config = source_type.evidence_context_config or {}
         title_column = str(evidence_context_config.get("title_column", "")).strip()
         input_tasks: set[str] = set()
@@ -1177,10 +1423,10 @@ class ExecutionService:
                 detail="Files are not validated. Upload valid files and run validation before starting analysis.",
             )
 
-        if execution.status == "running":
+        if execution.status in {"in_progress", "running"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Execution is already running",
+                detail="Execution is already in progress",
             )
         if execution.status == "queued":
             raise HTTPException(
@@ -1193,13 +1439,26 @@ class ExecutionService:
                 detail="Execution is already completed.",
             )
 
+        await self._apply_execution_estimates(execution)
         execution.status = "queued"
         execution.upload_completed_at = datetime.utcnow()
         execution.failure_reason = None
         self.db.commit()
         self.db.refresh(execution)
 
-        # Creation-only phase: keep execution queued and defer processing integration.
+        try:
+            self.worker.submit_job(execution.id)
+        except Exception as exc:
+            logger.exception("Failed to enqueue execution %s", execution.id)
+            execution.status = "failed"
+            execution.failure_reason = f"Failed to enqueue execution: {exc}"
+            self.db.commit()
+            self.db.refresh(execution)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Execution could not be queued. Please try again.",
+            ) from exc
+
         return self._to_execution_response(execution)
 
     async def init_execution_upload(
@@ -1234,6 +1493,8 @@ class ExecutionService:
                 detail="Invalid or inactive csv_type_id for this tenant/organization.",
             )
         self._validate_scope_metadata(request_data, source_type)
+        criterias_mode = self._resolve_criterias_mode(source_type)
+        threshold_config = self._resolve_threshold_config(source_type)
 
         execution = Execution(
             tenant_code=tenant_code,
@@ -1245,12 +1506,12 @@ class ExecutionService:
             program_name=request_data.program_name,
             state=request_data.state,
             district=request_data.district,
-            criterias_mode=request_data.criterias_mode,
-            threshold_config=request_data.threshold_config,
+            criterias_mode=criterias_mode,
+            threshold_config=threshold_config,
             status="draft",
             created_by=current_user.id,
             input_file_size=request_data.input_file.size_bytes,
-            questions_file_size=request_data.questions_file.size_bytes,
+            criterias_file_size=request_data.questions_file.size_bytes,
         )
 
         self.db.add(execution)
@@ -1270,7 +1531,7 @@ class ExecutionService:
             )
 
             execution.input_file_url = input_file_path
-            execution.questions_file_url = questions_file_path
+            execution.criterias_file_url = questions_file_path
             self.db.commit()
             self.db.refresh(execution)
 
@@ -1317,16 +1578,16 @@ class ExecutionService:
                 detail="Execution not found",
             )
 
-        if execution.status == "running":
+        if execution.status in {"in_progress", "running"}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Execution is already running",
+                detail="Execution is already in progress",
             )
 
         if execution.upload_completed_at is not None:
             return self._to_execution_response(execution)
 
-        if not execution.input_file_url or not execution.questions_file_url:
+        if not execution.input_file_url or not execution.criterias_file_url:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Execution file paths are missing",
@@ -1340,7 +1601,7 @@ class ExecutionService:
             )
         self._validate_uploaded_metadata(input_metadata, "Input file")
 
-        questions_metadata = await self.storage_service.get_file_metadata(execution.questions_file_url)
+        questions_metadata = await self.storage_service.get_file_metadata(execution.criterias_file_url)
         if not questions_metadata:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1370,7 +1631,7 @@ class ExecutionService:
                 )
             self._validate_input_csv_against_source(input_file_bytes, source_type)
 
-            questions_file_bytes = await self.storage_service.download_file(execution.questions_file_url)
+            questions_file_bytes = await self.storage_service.download_file(execution.criterias_file_url)
             if not questions_file_bytes:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -1388,8 +1649,9 @@ class ExecutionService:
                 detail=failure_reason,
             ) from exc
 
+        await self._apply_execution_estimates(execution)
         execution.input_file_size = int(input_metadata.get("size_bytes", execution.input_file_size or 0))
-        execution.questions_file_size = int(questions_metadata.get("size_bytes", execution.questions_file_size or 0))
+        execution.criterias_file_size = int(questions_metadata.get("size_bytes", execution.criterias_file_size or 0))
         execution.status = "queued"
         execution.upload_completed_at = datetime.utcnow()
         execution.failure_reason = None
@@ -1397,7 +1659,19 @@ class ExecutionService:
         self.db.commit()
         self.db.refresh(execution)
 
-        # Creation-only phase: keep execution queued and defer processing integration.
+        try:
+            self.worker.submit_job(execution.id)
+        except Exception as exc:
+            logger.exception("Failed to enqueue execution %s", execution.id)
+            execution.status = "failed"
+            execution.failure_reason = f"Failed to enqueue execution: {exc}"
+            self.db.commit()
+            self.db.refresh(execution)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Execution could not be queued. Please try again.",
+            ) from exc
+
         return self._to_execution_response(execution)
 
     async def get_execution_file_preview(
@@ -1408,12 +1682,7 @@ class ExecutionService:
         limit: int = 10,
     ) -> ExecutionFilePreviewResponse:
         """Return a read-only CSV preview for an uploaded execution file."""
-        normalized_file_type = (file_type or "").strip().lower()
-        if normalized_file_type not in {"input", "questions"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="file_type must be one of: input, questions",
-            )
+        normalized_file_type = self._normalize_file_type(file_type)
 
         if limit < 1 or limit > 50:
             raise HTTPException(
@@ -1477,7 +1746,7 @@ class ExecutionService:
                 "actual_cost": self._to_float(execution.actual_cost),
                 "estimated_cost": self._to_float(execution.estimated_cost),
                 "input_file_size": execution.input_file_size,
-                "questions_file_size": execution.questions_file_size,
+                "criterias_file_size": execution.criterias_file_size,
                 "output_file_size": execution.output_file_size,
                 "upload_completed_at": execution.upload_completed_at,
                 "checkpoint_data": checkpoint,
@@ -1636,8 +1905,6 @@ class ExecutionService:
             'district',
             'program_ref_id',
             'program_name',
-            'criterias_mode',
-            'threshold_config',
         }
 
         for field in allowed_fields:
@@ -1673,7 +1940,7 @@ class ExecutionService:
         return self._to_execution_response(execution)
 
     def delete_execution(self, execution_id: UUID, user_id: str) -> bool:
-        """Delete an execution (only if not running)"""
+        """Delete an execution (only if not in progress)."""
         execution = self.db.query(Execution).filter(
             Execution.id == execution_id,
             Execution.created_by == user_id
@@ -1682,10 +1949,10 @@ class ExecutionService:
         if not execution:
             return False
 
-        if execution.status == 'running':
+        if execution.status in {'in_progress', 'running'}:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Cannot delete running execution"
+                detail="Cannot delete execution in progress"
             )
 
         self.db.delete(execution)

@@ -1,12 +1,13 @@
 """
 Storage Service
-Handles file storage abstraction (GCP, S3, or local filesystem)
+Handles file storage abstraction (GCP/AWS)
 """
-from pathlib import Path, PurePosixPath
-from typing import Optional
+import json
 import logging
 import re
 import tempfile
+from pathlib import Path, PurePosixPath
+from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -16,49 +17,103 @@ from core.config import settings
 logger = logging.getLogger(__name__)
 
 _ALLOWED_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+_PROVIDER_ALIASES = {
+    "gcp": "gcp",
+    "aws": "aws",
+}
 
 
 class StorageService:
     """Service for provider-agnostic file storage operations."""
 
     def __init__(self):
-        self.storage_type = settings.STORAGE_TYPE
+        self.storage_provider = self._resolve_storage_provider()
         self.local_path = Path(settings.LOCAL_STORAGE_PATH)
+        self.bucket_name = (settings.CLOUD_STORAGE_BUCKETNAME or "").strip()
 
-        if self.storage_type == "gcp":
-            from google.cloud import storage
-            from google.oauth2 import service_account
-
-            credentials_dict = {
-                "type": "service_account",
-                "project_id": settings.CLOUD_STORAGE_PROJECT,
-                "private_key": settings.CLOUD_STORAGE_SECRET.replace("\\n", "\n"),
-                "client_email": settings.CLOUD_STORAGE_ACCOUNTNAME,
-                "token_uri": "https://oauth2.googleapis.com/token",
-            }
-
-            credentials = service_account.Credentials.from_service_account_info(credentials_dict)
-            self.gcs_client = storage.Client(
-                credentials=credentials,
-                project=settings.CLOUD_STORAGE_PROJECT,
-            )
-            self.bucket_name = settings.CLOUD_STORAGE_BUCKETNAME
-            self.bucket = self.gcs_client.bucket(self.bucket_name)
+        if self.storage_provider == "gcp":
+            self._init_gcp_client()
             logger.info("Initialized cloud storage provider=gcp")
 
-        elif self.storage_type == "s3":
-            self.s3_client = boto3.client(
-                "s3",
-                aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-                aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
-                region_name=settings.AWS_REGION,
-            )
-            self.bucket_name = settings.S3_BUCKET_NAME
-            logger.info("Initialized cloud storage provider=s3")
+        elif self.storage_provider == "aws":
+            self._init_aws_client()
+            logger.info("Initialized cloud storage provider=aws")
 
         else:
             self.local_path.mkdir(parents=True, exist_ok=True)
             logger.info("Initialized local storage")
+
+    @staticmethod
+    def _resolve_storage_provider() -> str:
+        provider = (settings.CLOUD_STORAGE_PROVIDER or "").strip().lower()
+        if not provider:
+            provider = (settings.CLOUD_STORAGE or "").strip().lower()
+        normalized = _PROVIDER_ALIASES.get(provider, "")
+        if not normalized:
+            raise ValueError(
+                "Unsupported CLOUD_STORAGE_PROVIDER. Supported values: gcp, aws."
+            )
+        return normalized
+
+    def _init_aws_client(self) -> None:
+        if not self.bucket_name:
+            raise ValueError("CLOUD_STORAGE_BUCKETNAME is required for AWS storage.")
+
+        client_kwargs = {
+            "aws_access_key_id": (settings.CLOUD_STORAGE_ACCOUNTNAME or "").strip(),
+            "aws_secret_access_key": (settings.CLOUD_STORAGE_SECRET or "").strip(),
+        }
+
+        region = (settings.CLOUD_STORAGE_REGION or "").strip()
+        if region:
+            client_kwargs["region_name"] = region
+
+        endpoint = (settings.CLOUD_ENDPOINT or "").strip()
+        if endpoint:
+            client_kwargs["endpoint_url"] = endpoint
+
+        self.s3_client = boto3.client("s3", **client_kwargs)
+
+    def _build_gcp_credentials_info(self) -> dict:
+        secret_value = (settings.CLOUD_STORAGE_SECRET or "").strip()
+        if not secret_value:
+            raise ValueError("CLOUD_STORAGE_SECRET is required for GCP storage.")
+
+        # Preferred: full service-account JSON in CLOUD_STORAGE_SECRET.
+        if secret_value.startswith("{"):
+            credentials_info = json.loads(secret_value)
+            if "private_key" in credentials_info:
+                credentials_info["private_key"] = str(credentials_info["private_key"]).replace("\\n", "\n")
+            return credentials_info
+
+        # Backward-compatible: private key only; rest from standardized env vars.
+        return {
+            "type": "service_account",
+            "private_key": secret_value.replace("\\n", "\n"),
+            "client_email": (settings.CLOUD_STORAGE_ACCOUNTNAME or "").strip(),
+            "token_uri": (settings.CLOUD_ENDPOINT or "").strip() or "https://oauth2.googleapis.com/token",
+            "project_id": (settings.CLOUD_STORAGE_REGION or "").strip() or None,
+        }
+
+    def _init_gcp_client(self) -> None:
+        if not self.bucket_name:
+            raise ValueError("CLOUD_STORAGE_BUCKETNAME is required for GCP storage.")
+
+        from google.cloud import storage
+        from google.oauth2 import service_account
+
+        credentials_info = self._build_gcp_credentials_info()
+        credentials = service_account.Credentials.from_service_account_info(credentials_info)
+        project_id = (
+            credentials_info.get("project_id")
+            or (settings.CLOUD_STORAGE_REGION or "").strip()
+            or None
+        )
+        self.gcs_client = storage.Client(
+            credentials=credentials,
+            project=project_id,
+        )
+        self.bucket = self.gcs_client.bucket(self.bucket_name)
 
     @staticmethod
     def sanitize_filename(file_name: str) -> str:
@@ -125,10 +180,10 @@ class StorageService:
         """Upload content to configured storage and return absolute file path."""
         absolute_file_path = self._normalize_absolute_file_path(file_path)
 
-        if self.storage_type == "gcp":
+        if self.storage_provider == "gcp":
             return await self._upload_to_gcp(file_content, absolute_file_path, content_type)
-        if self.storage_type == "s3":
-            return await self._upload_to_s3(file_content, absolute_file_path, content_type)
+        if self.storage_provider == "aws":
+            return await self._upload_to_aws(file_content, absolute_file_path, content_type)
         return await self._upload_to_local(file_content, absolute_file_path)
 
     async def _upload_to_gcp(self, file_content: bytes, file_path: str, content_type: str) -> str:
@@ -141,7 +196,7 @@ class StorageService:
             logger.error("Failed to upload to GCP: %s", exc)
             raise Exception(f"GCP upload failed: {exc}")
 
-    async def _upload_to_s3(self, file_content: bytes, file_path: str, content_type: str) -> str:
+    async def _upload_to_aws(self, file_content: bytes, file_path: str, content_type: str) -> str:
         try:
             key = self._object_key(file_path)
             self.s3_client.put_object(
@@ -152,8 +207,8 @@ class StorageService:
             )
             return self._normalize_absolute_file_path(file_path)
         except ClientError as exc:
-            logger.error("Failed to upload to S3: %s", exc)
-            raise Exception(f"S3 upload failed: {exc}")
+            logger.error("Failed to upload to AWS: %s", exc)
+            raise Exception(f"AWS upload failed: {exc}")
 
     async def _upload_to_local(self, file_content: bytes, file_path: str) -> str:
         local_file_path = self._local_file_path(file_path)
@@ -164,10 +219,10 @@ class StorageService:
 
     async def download_file(self, file_path: str) -> Optional[bytes]:
         """Download file bytes from configured storage."""
-        if self.storage_type == "gcp":
+        if self.storage_provider == "gcp":
             return await self._download_from_gcp(file_path)
-        if self.storage_type == "s3":
-            return await self._download_from_s3(file_path)
+        if self.storage_provider == "aws":
+            return await self._download_from_aws(file_path)
         return await self._download_from_local(file_path)
 
     async def _download_from_gcp(self, file_path: str) -> Optional[bytes]:
@@ -181,13 +236,13 @@ class StorageService:
             logger.error("Failed to download from GCP: %s", exc)
             return None
 
-    async def _download_from_s3(self, file_path: str) -> Optional[bytes]:
+    async def _download_from_aws(self, file_path: str) -> Optional[bytes]:
         try:
             key = self._object_key(file_path)
             response = self.s3_client.get_object(Bucket=self.bucket_name, Key=key)
             return response["Body"].read()
         except ClientError as exc:
-            logger.error("Failed to download from S3: %s", exc)
+            logger.error("Failed to download from AWS: %s", exc)
             return None
 
     async def _download_from_local(self, file_path: str) -> Optional[bytes]:
@@ -203,7 +258,7 @@ class StorageService:
         """Get local file-system path for processing."""
         absolute_file_path = self._normalize_absolute_file_path(file_path)
 
-        if self.storage_type == "local":
+        if self.storage_provider == "local":
             return str(self._local_file_path(absolute_file_path))
 
         content = await self.download_file(absolute_file_path)
@@ -224,7 +279,7 @@ class StorageService:
         """Return object metadata if file exists, otherwise None."""
         absolute_file_path = self._normalize_absolute_file_path(file_path)
 
-        if self.storage_type == "gcp":
+        if self.storage_provider == "gcp":
             key = self._object_key(absolute_file_path)
             blob = self.bucket.blob(key)
             if not blob.exists():
@@ -235,7 +290,7 @@ class StorageService:
                 "content_type": blob.content_type,
             }
 
-        if self.storage_type == "s3":
+        if self.storage_provider == "aws":
             key = self._object_key(absolute_file_path)
             try:
                 response = self.s3_client.head_object(Bucket=self.bucket_name, Key=key)
@@ -273,10 +328,10 @@ class StorageService:
         # Browser/runtime differences in Content-Type emission can otherwise invalidate signatures.
         _ = content_type or "application/octet-stream"
 
-        if self.storage_type == "local":
-            raise Exception("Signed upload URLs require cloud storage (s3 or gcp)")
+        if self.storage_provider == "local":
+            raise Exception("Signed upload URLs require cloud storage (aws or gcp)")
 
-        if self.storage_type == "gcp":
+        if self.storage_provider == "gcp":
             from datetime import timedelta
 
             blob = self.bucket.blob(key)
@@ -319,10 +374,10 @@ class StorageService:
         absolute_file_path = self._normalize_absolute_file_path(file_path)
         key = self._object_key(absolute_file_path)
 
-        if self.storage_type == "local":
-            raise Exception("Signed download URLs require cloud storage (s3 or gcp)")
+        if self.storage_provider == "local":
+            raise Exception("Signed download URLs require cloud storage (aws or gcp)")
 
-        if self.storage_type == "gcp":
+        if self.storage_provider == "gcp":
             from datetime import timedelta
 
             blob = self.bucket.blob(key)

@@ -34,7 +34,13 @@ def _error_response(
     )
 
 
-@router.get("/states", response_model=StandardAPIResponse)
+@router.get(
+    "/states",
+    response_model=StandardAPIResponse,
+    responses={
+        500: {"model": StandardAPIResponse, "description": "Unexpected internal error"},
+    },
+)
 async def get_states(entity_service: EntityServiceDep):
     """Fetch all states from external Entity Management service."""
     try:
@@ -67,7 +73,14 @@ async def get_states(entity_service: EntityServiceDep):
     )
 
 
-@router.get("/districts", response_model=StandardAPIResponse)
+@router.get(
+    "/districts",
+    response_model=StandardAPIResponse,
+    responses={
+        400: {"model": StandardAPIResponse, "description": "Invalid stateId"},
+        500: {"model": StandardAPIResponse, "description": "Unexpected internal error"},
+    },
+)
 async def get_districts(
     entity_service: EntityServiceDep,
     state_id: str = Query(..., alias="stateId"),
@@ -100,4 +113,3 @@ async def get_districts(
             "stateId": state_id.strip(),
         },
     )
-

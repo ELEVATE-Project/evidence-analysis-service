@@ -5,14 +5,20 @@ Handles login, token generation, and user authentication
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 
-from models.schemas import Token, UserResponse
+from models.schemas import HTTPErrorResponse, MessageResponse, Token, UserResponse
 from services.auth_service import AuthService
 from core.dependencies import AuthServiceDep
 
 router = APIRouter()
 
 
-@router.post("/login", response_model=Token)
+@router.post(
+    "/login",
+    response_model=Token,
+    responses={
+        401: {"model": HTTPErrorResponse, "description": "Incorrect username or password"},
+    },
+)
 async def login(
     auth_service: AuthServiceDep,
     form_data: OAuth2PasswordRequestForm = Depends()
@@ -34,7 +40,13 @@ async def login(
     return auth_service.create_token_response(user.username)
 
 
-@router.post("/refresh", response_model=Token)
+@router.post(
+    "/refresh",
+    response_model=Token,
+    responses={
+        401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+    },
+)
 async def refresh_token(
     auth_service: AuthServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user)
@@ -43,7 +55,13 @@ async def refresh_token(
     return auth_service.create_token_response(current_user.username)
 
 
-@router.get("/me", response_model=UserResponse)
+@router.get(
+    "/me",
+    response_model=UserResponse,
+    responses={
+        401: {"model": HTTPErrorResponse, "description": "Unauthorized"},
+    },
+)
 async def get_current_user_info(
     current_user: UserResponse = Depends(AuthService.get_current_user)
 ):
@@ -51,7 +69,7 @@ async def get_current_user_info(
     return current_user
 
 
-@router.post("/logout")
+@router.post("/logout", response_model=MessageResponse)
 async def logout():
     """Logout endpoint (JWT is stateless, so this is informational)"""
-    return {"message": "Successfully logged out"}
+    return MessageResponse(message="Successfully logged out")

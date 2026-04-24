@@ -107,13 +107,12 @@ CREATE TABLE IF NOT EXISTS executions (
     processed_rows INTEGER DEFAULT 0,
     actual_cost NUMERIC(10, 4),
     estimated_cost NUMERIC(10, 4),
+    estimated_time_seconds INTEGER,
     
     -- File storage fields (store provider-agnostic absolute file paths)
     input_file_url TEXT,
     input_file_size BIGINT,
-    input_file_checksum VARCHAR(64),
-    questions_file_url TEXT,
-    questions_file_size BIGINT,
+    criterias_file_size BIGINT,
     output_file_url TEXT,
     output_file_size BIGINT,
     
@@ -157,7 +156,7 @@ COMMENT ON TABLE users IS 'User accounts for authentication and authorization';
 COMMENT ON TABLE csv_source_types IS 'Configuration registry for CSV parsing and validation rules by tenant/org/type';
 COMMENT ON TABLE executions IS 'Evidence analysis execution jobs with complete Phase 1 schema';
 
-COMMENT ON COLUMN executions.status IS 'Execution status: queued, running, completed, failed';
+COMMENT ON COLUMN executions.status IS 'Execution status: queued, in_progress, completed, failed';
 COMMENT ON COLUMN executions.average_processing_time IS 'Average processing time per row in seconds';
 COMMENT ON COLUMN executions.notification_sent IS 'Whether email notification was sent';
 

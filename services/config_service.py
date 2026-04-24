@@ -32,7 +32,30 @@ class ConfigService:
         return tenant_code, organization_code
 
     @staticmethod
+    def _resolve_criterias_mode(question_config: Any) -> str | None:
+        if not isinstance(question_config, dict):
+            return None
+
+        for key in ("criterias_mode", "mode"):
+            candidate = str(question_config.get(key, "")).strip()
+            if candidate:
+                return candidate
+
+        entry_options = question_config.get("entry_options")
+        if isinstance(entry_options, list):
+            for entry in entry_options:
+                if not isinstance(entry, dict):
+                    continue
+                for option_key in ("key", "value"):
+                    candidate = str(entry.get(option_key, "")).strip()
+                    if candidate:
+                        return candidate
+        return None
+
+    @staticmethod
     def _serialize_csv_source_type(source_type: CsvSourceType) -> dict[str, Any]:
+        question_config = source_type.question_config or {}
+        default_thresholds = source_type.default_thresholds or {}
         return {
             "id": source_type.id,
             "type_key": source_type.type_key,
@@ -44,8 +67,10 @@ class ConfigService:
             "has_narrative": bool(source_type.has_narrative),
             "max_rows_per_upload": source_type.max_rows_per_upload,
             "available_filters": source_type.available_filters or [],
-            "question_config": source_type.question_config or {},
-            "default_thresholds": source_type.default_thresholds or {},
+            "question_config": question_config,
+            "default_thresholds": default_thresholds,
+            "criterias_mode": ConfigService._resolve_criterias_mode(question_config),
+            "threshold_config": default_thresholds,
         }
 
     def list(self, config_type: str, current_user: UserResponse) -> list[dict[str, Any]]:
