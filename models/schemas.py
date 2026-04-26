@@ -346,6 +346,19 @@ class StatusResponse(BaseModel):
     failure_reason: Optional[str] = None
 
 
+# ============ Notification Schemas ============
+
+class ExecutionNotificationResponse(BaseModel):
+    """Manual execution email notification trigger response."""
+    execution_id: UUID
+    execution_status: str
+    recipient_email: str
+    sent: bool
+    notification_sent: bool
+    notification_sent_at: Optional[datetime] = None
+    message: str
+
+
 # ============ Cloud Services Schemas ============
 
 class CloudSignedUrlRequestItem(BaseModel):

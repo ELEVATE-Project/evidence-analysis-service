@@ -13,7 +13,7 @@ from db.database import engine, Base, SessionLocal
 from db.seed_data import seed_default_csv_source_types, seed_default_users
 from models.schemas import HealthResponse, RootResponse
 from services.background_worker import BackgroundWorker
-from routers import auth, cloud_services, config, criteria, entities, executions, reports
+from routers import auth, cloud_services, config, criteria, entities, executions, notifications, reports
 
 # Configure logging
 logging.basicConfig(
@@ -83,6 +83,7 @@ app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
 app.include_router(entities.router, prefix="/api/v1", tags=["Entities"])
 app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
 app.include_router(criteria.router, prefix="/api/v1/criteria", tags=["Criteria Validation"])
+app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["Notifications"])
 
 
 @app.get("/", response_model=RootResponse, include_in_schema=False)

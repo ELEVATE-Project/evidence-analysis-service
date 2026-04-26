@@ -43,17 +43,7 @@ cp .env.example .env
 
 5. Update required `.env` values:
 
-- `DATABASE_URL`
-- `JWT_SECRET_KEY`
-- `CLOUD_STORAGE_PROVIDER`
-- `CLOUD_STORAGE`
-- `CLOUD_STORAGE_BUCKETNAME`
-- `CLOUD_STORAGE_ACCOUNTNAME`
-- `CLOUD_STORAGE_SECRET`
-- `ENTITY_MGMT_BASE_URL`
-- `ENTITY_MGMT_TENANT_ID`
-- `ENTITY_MGMT_ORIGIN`
-- `GEMINI_API_KEY_1` (or equivalent Gemini key config)
+- Check all the env keys in .env.sample and add values in .env
 
 6. Initialize database:
 

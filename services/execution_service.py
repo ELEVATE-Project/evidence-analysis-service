@@ -4,6 +4,7 @@ Handles execution business logic, file management, and background processing
 """
 import csv
 import io
+import json
 import logging
 import re
 from copy import deepcopy
@@ -34,6 +35,7 @@ from models.schemas import (
     ExecutionFilePreviewResponse,
     ExecutionFileUploadUrlResponse,
     ExecutionList,
+    ExecutionNotificationResponse,
     ExecutionResponse,
     ExecutionValidationResponse,
     ExecutionUploadInitRequest,
@@ -46,6 +48,7 @@ from models.schemas import (
     UserResponse,
 )
 from services.background_worker import BackgroundWorker
+from services.email_service import EmailService
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -84,6 +87,15 @@ class ExecutionService:
     @staticmethod
     def _to_execution_response(execution: Execution) -> ExecutionResponse:
         """Build API response with safe fallbacks for nullable legacy fields."""
+        # For in-progress executions, try to get real-time progress from checkpoint file
+        processed_rows = execution.processed_rows or 0
+        if (execution.status or "").strip().lower() == "in_progress":
+            checkpoint_progress = ExecutionService._read_processor_checkpoint_file(execution.id)
+            checkpoint_processed = checkpoint_progress.get('total_processed', 0)
+            # Use checkpoint value if it's more recent (higher) than DB value
+            if checkpoint_processed > processed_rows:
+                processed_rows = checkpoint_processed
+        
         return ExecutionResponse(
             id=execution.id,
             name=execution.name or "Untitled execution",
@@ -96,7 +108,7 @@ class ExecutionService:
             updated_at=execution.updated_at,
             completed_at=execution.completed_at,
             total_rows=execution.total_rows,
-            processed_rows=execution.processed_rows,
+            processed_rows=processed_rows,
             input_file_url=execution.input_file_url,
             criterias_file_url=execution.criterias_file_url,
             output_file_url=execution.output_file_url,
@@ -682,9 +694,14 @@ class ExecutionService:
             )
 
     def _mark_execution_failed(self, execution: Execution, reason: str) -> None:
+        failed_at = datetime.utcnow()
         execution.status = "failed"
         execution.failure_reason = reason
+        execution.processing_completed_at = failed_at
+        execution.completed_at = failed_at
         self.db.commit()
+        self.db.refresh(execution)
+        EmailService.notify_execution_status(self.db, execution)
 
     @staticmethod
     def _ensure_not_started_for_file_changes(execution: Execution) -> None:
@@ -746,6 +763,32 @@ class ExecutionService:
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Unsupported file type.",
         )
+
+    @staticmethod
+    def _read_processor_checkpoint_file(execution_id: UUID) -> dict[str, Any]:
+        """
+        Read the processor's checkpoint file to get real-time progress.
+        Returns dict with 'total_processed' and 'total_files' if checkpoint exists.
+        """
+        try:
+            checkpoint_dir = Path(settings.EXECUTION_WORKSPACE_ROOT) / str(execution_id) / "processor_output"
+            checkpoint_file = checkpoint_dir / ".processing_checkpoint.json"
+            
+            if not checkpoint_file.exists():
+                return {}
+            
+            with open(checkpoint_file, 'r') as f:
+                checkpoint_data = json.load(f)
+            
+            metadata = checkpoint_data.get('_metadata', {})
+            return {
+                'total_processed': metadata.get('total_processed', 0),
+                'total_files': metadata.get('total_files', 0),
+                'last_updated': metadata.get('last_updated')
+            }
+        except Exception as e:
+            logger.debug(f"Could not read processor checkpoint for execution {execution_id}: {e}")
+            return {}
 
     @staticmethod
     def _checkpoint(execution: Execution) -> dict[str, Any]:
@@ -1443,6 +1486,8 @@ class ExecutionService:
         execution.status = "queued"
         execution.upload_completed_at = datetime.utcnow()
         execution.failure_reason = None
+        execution.notification_sent = False
+        execution.notification_sent_at = None
         self.db.commit()
         self.db.refresh(execution)
 
@@ -1450,10 +1495,7 @@ class ExecutionService:
             self.worker.submit_job(execution.id)
         except Exception as exc:
             logger.exception("Failed to enqueue execution %s", execution.id)
-            execution.status = "failed"
-            execution.failure_reason = f"Failed to enqueue execution: {exc}"
-            self.db.commit()
-            self.db.refresh(execution)
+            self._mark_execution_failed(execution, f"Failed to enqueue execution: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Execution could not be queued. Please try again.",
@@ -1557,9 +1599,7 @@ class ExecutionService:
         except HTTPException:
             raise
         except Exception as exc:
-            execution.status = "failed"
-            execution.failure_reason = f"Upload initialization failed: {exc}"
-            self.db.commit()
+            self._mark_execution_failed(execution, f"Upload initialization failed: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to initialize upload: {exc}",
@@ -1655,6 +1695,8 @@ class ExecutionService:
         execution.status = "queued"
         execution.upload_completed_at = datetime.utcnow()
         execution.failure_reason = None
+        execution.notification_sent = False
+        execution.notification_sent_at = None
 
         self.db.commit()
         self.db.refresh(execution)
@@ -1663,10 +1705,7 @@ class ExecutionService:
             self.worker.submit_job(execution.id)
         except Exception as exc:
             logger.exception("Failed to enqueue execution %s", execution.id)
-            execution.status = "failed"
-            execution.failure_reason = f"Failed to enqueue execution: {exc}"
-            self.db.commit()
-            self.db.refresh(execution)
+            self._mark_execution_failed(execution, f"Failed to enqueue execution: {exc}")
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Execution could not be queued. Please try again.",
@@ -1759,6 +1798,64 @@ class ExecutionService:
                 "processing_completed_at": execution.processing_completed_at,
                 "notification_sent_at": execution.notification_sent_at,
             }
+        )
+
+    def send_execution_notification(
+        self,
+        execution_id: UUID,
+        user_id: str,
+        force_resend: bool = False,
+    ) -> ExecutionNotificationResponse:
+        """Manually trigger status email notification for one execution."""
+        if not settings.IS_NOTIFICATION_ENABLED:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Email notifications are disabled. Please enable IS_NOTIFICATION_ENABLED in configuration.",
+            )
+        
+        execution = self._get_execution_or_404(execution_id, user_id)
+        normalized_status = (execution.status or "").strip().lower()
+        if normalized_status not in {"completed", "failed"}:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Notification can only be sent when execution status is completed or failed.",
+            )
+
+        recipient_email = EmailService._resolve_recipient_email(self.db, execution)
+        if not recipient_email:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No recipient email found for this execution.",
+            )
+
+        if not EmailService._is_smtp_configured():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="SMTP is not configured. Please configure SMTP settings and retry.",
+            )
+
+        if force_resend:
+            execution.notification_sent = False
+            execution.notification_sent_at = None
+            self.db.commit()
+            self.db.refresh(execution)
+
+        sent = EmailService.notify_execution_status(self.db, execution)
+        if not sent:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="Email notification failed after retries.",
+            )
+
+        self.db.refresh(execution)
+        return ExecutionNotificationResponse(
+            execution_id=execution.id,
+            execution_status=execution.status or normalized_status,
+            recipient_email=recipient_email,
+            sent=True,
+            notification_sent=bool(execution.notification_sent),
+            notification_sent_at=execution.notification_sent_at,
+            message="Email notification sent successfully.",
         )
 
     def list_executions(
@@ -1858,14 +1955,22 @@ class ExecutionService:
         if not execution:
             return None
 
+        # Get real-time progress for in-progress executions
+        processed_rows = execution.processed_rows or 0
+        if (execution.status or "").strip().lower() == "in_progress":
+            checkpoint_progress = self._read_processor_checkpoint_file(execution.id)
+            checkpoint_processed = checkpoint_progress.get('total_processed', 0)
+            if checkpoint_processed > processed_rows:
+                processed_rows = checkpoint_processed
+
         progress_percentage = None
         if execution.total_rows and execution.total_rows > 0:
-            progress_percentage = (execution.processed_rows / execution.total_rows) * 100
+            progress_percentage = (processed_rows / execution.total_rows) * 100
 
         return StatusResponse(
             id=execution.id,
             status=execution.status,
-            processed_rows=execution.processed_rows,
+            processed_rows=processed_rows,
             total_rows=execution.total_rows,
             progress_percentage=progress_percentage,
             failure_reason=execution.failure_reason

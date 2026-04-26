@@ -187,32 +187,88 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "default": "gemini-2.5-flash",
     },
 
-    # SMTP
-    "SMTP_HOST": {
-        "message": "SMTP host",
+    # Notification control
+    "IS_NOTIFICATION_ENABLED": {
+        "message": "Enable email notifications",
         "optional": True,
+        "default": True,
+    },
+
+    # SMTP (required when IS_NOTIFICATION_ENABLED=true)
+    "SMTP_HOST": {
+        "message": "SMTP host (required when notifications enabled)",
+        "optional": True,
+        "required_if": {
+            "key": "IS_NOTIFICATION_ENABLED",
+            "operator": "EQUALS",
+            "value": "true",
+        },
     },
     "SMTP_PORT": {
         "message": "SMTP port",
         "optional": True,
         "default": 587,
     },
-    "SMTP_USER": {
-        "message": "SMTP user",
+    "SMTP_API_KEY": {
+        "message": "SMTP API key (SendGrid compatible)",
         "optional": True,
+    },
+    "SMTP_USER": {
+        "message": "SMTP user (required when notifications enabled)",
+        "optional": True,
+        "required_if": {
+            "key": "IS_NOTIFICATION_ENABLED",
+            "operator": "EQUALS",
+            "value": "true",
+        },
     },
     "SMTP_PASSWORD": {
-        "message": "SMTP password",
+        "message": "SMTP password (required when notifications enabled)",
         "optional": True,
+        "required_if": {
+            "key": "IS_NOTIFICATION_ENABLED",
+            "operator": "EQUALS",
+            "value": "true",
+        },
+    },
+    "SMTP_USE_TLS": {
+        "message": "Enable SMTP STARTTLS",
+        "optional": True,
+        "default": True,
+    },
+    "SMTP_TIMEOUT_SECONDS": {
+        "message": "SMTP connection timeout seconds",
+        "optional": True,
+        "default": 30,
+    },
+    "SMTP_MAX_RETRIES": {
+        "message": "SMTP retry attempts (max 3)",
+        "optional": True,
+        "default": 3,
+    },
+    "SMTP_RETRY_BACKOFF_SECONDS": {
+        "message": "SMTP retry base backoff seconds",
+        "optional": True,
+        "default": 1,
     },
     "SMTP_FROM_EMAIL": {
-        "message": "SMTP from email",
+        "message": "SMTP from email (required when notifications enabled)",
         "optional": True,
+        "required_if": {
+            "key": "IS_NOTIFICATION_ENABLED",
+            "operator": "EQUALS",
+            "value": "true",
+        },
     },
     "SMTP_FROM_NAME": {
         "message": "SMTP from name",
         "optional": True,
         "default": "Evidence Analysis System",
+    },
+    "PORTAL_BASE_URL": {
+        "message": "Portal base URL for execution/report links in emails",
+        "optional": True,
+        "default": "http://localhost:5173",
     },
 
     # Runtime and limits
