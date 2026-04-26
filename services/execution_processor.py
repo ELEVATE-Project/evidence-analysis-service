@@ -24,6 +24,7 @@ from core.config import SERVICE_ROOT, settings
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
+from services.email_service import EmailService
 from services.gemini_runtime import build_gemini_env_overrides
 from services.storage_service import StorageService
 
@@ -210,6 +211,8 @@ def _claim_execution(
     execution.completed_at = None
     execution.failure_reason = None
     execution.error_logs = None
+    execution.notification_sent = False
+    execution.notification_sent_at = None
     db.commit()
     db.refresh(execution)
     return execution
@@ -247,6 +250,8 @@ def _mark_execution_completed(
         if processed_rows > 0:
             execution.average_processing_time = elapsed_seconds / processed_rows
         db.commit()
+        db.refresh(execution)
+        EmailService.notify_execution_status(db, execution)
     finally:
         db.close()
 
@@ -274,6 +279,8 @@ def mark_execution_for_retry(
         execution.retry_count = retry_count
         execution.failure_reason = reason
         execution.error_logs = error_logs
+        execution.notification_sent = False
+        execution.notification_sent_at = None
         db.commit()
     finally:
         db.close()
@@ -306,6 +313,8 @@ def mark_execution_failed(
         execution.processing_completed_at = failed_at
         execution.completed_at = failed_at
         db.commit()
+        db.refresh(execution)
+        EmailService.notify_execution_status(db, execution)
     finally:
         db.close()
 

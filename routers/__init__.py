@@ -1,4 +1,4 @@
 """Routers module initialization"""
-from . import auth, cloud_services, config, criteria, entities, executions, reports
+from . import auth, cloud_services, config, criteria, entities, executions, notifications, reports
 
-__all__ = ["auth", "executions", "reports", "entities", "config", "cloud_services", "criteria"]
+__all__ = ["auth", "executions", "reports", "entities", "config", "cloud_services", "criteria", "notifications"]

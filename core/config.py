@@ -66,13 +66,22 @@ class Settings(BaseSettings):
     GEMINI_API_KEY_3: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
     
+    # Notification control
+    IS_NOTIFICATION_ENABLED: bool = True
+    
     # Email (SMTP)
     SMTP_HOST: str = ""
     SMTP_PORT: int = 587
+    SMTP_API_KEY: str = ""
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
+    SMTP_USE_TLS: bool = True
+    SMTP_TIMEOUT_SECONDS: int = 30
+    SMTP_MAX_RETRIES: int = 3
+    SMTP_RETRY_BACKOFF_SECONDS: int = 1
     SMTP_FROM_EMAIL: str = ""
     SMTP_FROM_NAME: str = "Evidence Analysis System"
+    PORTAL_BASE_URL: str = "http://localhost:5173"
     
     # Background Processing
     MAX_CONCURRENT_JOBS: int = 5
@@ -106,18 +115,18 @@ class Settings(BaseSettings):
     # Interactive criteria validation
     CRITERIA_VALIDATE_MAX_ITEMS: int = 25
 
-    @field_validator("DEBUG", mode="before")
+    @field_validator("DEBUG", "IS_NOTIFICATION_ENABLED", mode="before")
     @classmethod
     def parse_debug_value(cls, value):
-        """Allow bool-like and environment-style DEBUG values."""
+        """Allow bool-like and environment-style DEBUG/IS_NOTIFICATION_ENABLED values."""
         if isinstance(value, bool):
             return value
 
         if isinstance(value, str):
             raw = value.strip().lower()
-            if raw in {"true", "1", "yes", "on", "debug", "development", "dev"}:
+            if raw in {"true", "1", "yes", "on", "debug", "development", "dev", "enabled"}:
                 return True
-            if raw in {"false", "0", "no", "off", "release", "production", "prod"}:
+            if raw in {"false", "0", "no", "off", "release", "production", "prod", "disabled"}:
                 return False
 
         return value
