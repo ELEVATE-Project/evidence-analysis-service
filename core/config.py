@@ -106,6 +106,20 @@ class Settings(BaseSettings):
     ESTIMATED_COST_PER_INPUT_ROW: float = 0.001
     ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
     
+    # File Splitting Configuration
+    # Manual mode: Set SPLIT_FILES and ROWS_PER_FILE to specific values
+    # Dynamic mode: Leave unset or empty, system will calculate optimal splits
+    SPLIT_FILES: str = ""  # "yes", "no", or "" for dynamic
+    ROWS_PER_FILE: int = 0  # >0 for manual, 0 for dynamic
+    
+    # Dynamic Splitting Settings (used when manual settings not provided)
+    ENABLE_DYNAMIC_SPLITTING: bool = True  # Master switch for dynamic logic
+    MAX_SPLIT_FILES: int = 100  # Hard cap on number of splits
+    MIN_ROWS_FOR_SPLITTING: int = 200  # Files below this use single file (lowered from 1000)
+    TARGET_ROWS_PER_SPLIT_MIN: int = 100  # Optimal range lower bound (lowered from 500)
+    TARGET_ROWS_PER_SPLIT_MAX: int = 500  # Optimal range upper bound (lowered from 2000)
+    OPTIMAL_ROWS_PER_SPLIT: int = 200  # Default target rows per split (lowered from 1000)
+    
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
     ALLOWED_EXTENSIONS: List[str] = [".csv"]

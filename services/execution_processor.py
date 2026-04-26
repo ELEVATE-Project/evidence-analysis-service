@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import logging
 import os
 import shutil
 import socket
@@ -27,6 +28,8 @@ from models.execution import Execution
 from services.email_service import EmailService
 from services.gemini_runtime import build_gemini_env_overrides
 from services.storage_service import StorageService
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutionSkipError(Exception):
@@ -70,11 +73,189 @@ def _resolve_script_path(raw_path: str) -> Path:
     return candidate
 
 
-def _count_csv_rows(file_path: Path) -> int:
-    with file_path.open("r", encoding="utf-8", newline="") as csv_file:
-        reader = csv.reader(csv_file)
-        next(reader, None)  # skip header
-        return sum(1 for row in reader if any((cell or "").strip() for cell in row))
+def _count_csv_rows(file_path: Path, sample_size: int = 10000) -> tuple[int, bool]:
+    """
+    Fast row counting with estimation for large files.
+    
+    Args:
+        file_path: Path to CSV file
+        sample_size: Number of rows to read before estimating (default 10000)
+    
+    Returns:
+        Tuple of (row_count, is_estimate)
+        - row_count: Estimated or exact number of data rows (excluding header)
+        - is_estimate: True if row count is estimated, False if exact
+    """
+    try:
+        file_size = file_path.stat().st_size
+        
+        # Files under 5MB: exact count (fast enough)
+        if file_size < 5 * 1024 * 1024:
+            with file_path.open("r", encoding="utf-8", newline="") as csv_file:
+                reader = csv.reader(csv_file)
+                next(reader, None)  # skip header
+                count = sum(1 for row in reader if any((cell or "").strip() for cell in row))
+                logger.info(f"Exact row count: {count:,} rows ({file_size:,} bytes)")
+                return count, False
+        
+        # Large files: estimate from sample
+        with file_path.open("r", encoding="utf-8", newline="") as csv_file:
+            reader = csv.reader(csv_file)
+            header = next(reader, None)
+            if header is None:
+                return 0, False
+            
+            header_pos = csv_file.tell()
+            
+            # Read sample rows
+            sample_count = 0
+            for i, row in enumerate(reader):
+                if i >= sample_size:
+                    break
+                if any((cell or "").strip() for cell in row):
+                    sample_count += 1
+            
+            sample_end_pos = csv_file.tell()
+            
+            if sample_count == 0:
+                return 0, False
+            
+            # If we read all rows, return exact count
+            if sample_count < sample_size:
+                logger.info(f"Exact row count: {sample_count:,} rows ({file_size:,} bytes)")
+                return sample_count, False
+            
+            # Estimate total rows from sample
+            data_size = file_size - header_pos
+            sample_size_bytes = sample_end_pos - header_pos
+            
+            if sample_size_bytes > 0:
+                estimated_rows = int((data_size / sample_size_bytes) * sample_count)
+                logger.info(
+                    f"Estimated row count: ~{estimated_rows:,} rows "
+                    f"(sampled {sample_count:,} rows, {file_size:,} bytes)"
+                )
+                return estimated_rows, True
+            
+            return sample_count, True
+            
+    except Exception as exc:
+        logger.warning(f"Error counting CSV rows: {exc}. Returning estimate of 1000.")
+        return 1000, True
+
+
+def _calculate_optimal_split_count(
+    row_count: int,
+) -> tuple[bool, int, int, str]:
+    """
+    Calculate optimal file splitting strategy based on row count.
+    
+    Strategy:
+    - Very small files (< MIN_ROWS_FOR_SPLITTING): No splitting (overhead too high)
+    - Small files (200-2000 rows): Split to ~100-200 rows per file for parallelization
+    - Medium files (2000-10000 rows): Split to ~200-300 rows per file
+    - Large files (>= 10000 rows): Split to ~200-500 rows per file, capped at MAX_SPLIT_FILES
+    
+    Args:
+        row_count: Number of data rows in input file
+    
+    Returns:
+        Tuple of (enable_split, num_splits, rows_per_file, strategy_name)
+        - enable_split: True to split, False to use single file
+        - num_splits: Number of split files to create (1 if not splitting)
+        - rows_per_file: Target rows per split file
+        - strategy_name: Human-readable strategy name
+    """
+    import math
+    
+    # Check if manual configuration is set
+    manual_split_files = (settings.SPLIT_FILES or "").strip().lower()
+    manual_rows_per_file = settings.ROWS_PER_FILE
+    
+    # Manual mode: respect explicit configuration
+    if manual_split_files in ("yes", "true", "1", "enable", "enabled"):
+        if manual_rows_per_file > 0:
+            num_splits = max(1, math.ceil(row_count / manual_rows_per_file))
+            # Cap at MAX_SPLIT_FILES
+            if num_splits > settings.MAX_SPLIT_FILES:
+                num_splits = settings.MAX_SPLIT_FILES
+                manual_rows_per_file = math.ceil(row_count / num_splits)
+            
+            logger.info(
+                f"Manual splitting enabled: {num_splits} splits of ~{manual_rows_per_file} rows "
+                f"(total: {row_count:,} rows)"
+            )
+            return True, num_splits, manual_rows_per_file, "manual_split"
+        else:
+            logger.info(f"Manual splitting enabled but ROWS_PER_FILE not set, using dynamic logic")
+    
+    elif manual_split_files in ("no", "false", "0", "disable", "disabled"):
+        logger.info(f"Splitting manually disabled: single file (total: {row_count:,} rows)")
+        return False, 1, row_count, "no_split_manual"
+    
+    # Dynamic mode: intelligent calculation
+    if not settings.ENABLE_DYNAMIC_SPLITTING:
+        logger.info(f"Dynamic splitting disabled: single file (total: {row_count:,} rows)")
+        return False, 1, row_count, "no_split_disabled"
+    
+    # Very small files: no splitting (overhead too high)
+    if row_count < settings.MIN_ROWS_FOR_SPLITTING:
+        logger.info(
+            f"Very small file detected: {row_count:,} rows < {settings.MIN_ROWS_FOR_SPLITTING:,} threshold → "
+            "single file (strategy: no_split)"
+        )
+        return False, 1, row_count, "no_split"
+    
+    # Small files (200-2000 rows): optimize for parallelization with ~100-200 rows per split
+    if row_count < 2000:
+        # Target rows between MIN and optimal, aim for 5-10 splits
+        target_rows = max(settings.TARGET_ROWS_PER_SPLIT_MIN, row_count // 10)
+        target_rows = min(target_rows, settings.OPTIMAL_ROWS_PER_SPLIT)
+        num_splits = max(2, math.ceil(row_count / target_rows))
+        rows_per_file = math.ceil(row_count / num_splits)
+        
+        logger.info(
+            f"Small file detected: {row_count:,} rows → "
+            f"{num_splits} splits of ~{rows_per_file} rows each (strategy: small_split)"
+        )
+        return True, num_splits, rows_per_file, "small_split"
+    
+    # Medium files (2000-10000 rows): balanced splitting with ~200-300 rows per split
+    if row_count < 10000:
+        target_rows = settings.OPTIMAL_ROWS_PER_SPLIT
+        num_splits = math.ceil(row_count / target_rows)
+        # Cap at 50 splits for medium files to avoid too many workers
+        num_splits = min(50, num_splits)
+        rows_per_file = math.ceil(row_count / num_splits)
+        
+        logger.info(
+            f"Medium file detected: {row_count:,} rows → "
+            f"{num_splits} splits of ~{rows_per_file} rows each (strategy: medium_split)"
+        )
+        return True, num_splits, rows_per_file, "medium_split"
+    
+    # Large files (>=10000 rows): aggressive splitting with target ~200-500 rows per split
+    # Use optimal target but allow up to max range for very large files
+    target_rows = settings.OPTIMAL_ROWS_PER_SPLIT
+    num_splits = math.ceil(row_count / target_rows)
+    
+    # Cap at MAX_SPLIT_FILES
+    if num_splits > settings.MAX_SPLIT_FILES:
+        num_splits = settings.MAX_SPLIT_FILES
+        rows_per_file = math.ceil(row_count / num_splits)
+        logger.info(
+            f"Large file detected: {row_count:,} rows → "
+            f"{num_splits} splits of ~{rows_per_file} rows each "
+            f"(capped at {settings.MAX_SPLIT_FILES}, strategy: large_split_capped)"
+        )
+        return True, num_splits, rows_per_file, "large_split_capped"
+    
+    rows_per_file = math.ceil(row_count / num_splits)
+    logger.info(
+        f"Large file detected: {row_count:,} rows → "
+        f"{num_splits} splits of ~{rows_per_file} rows each (strategy: large_split)"
+    )
+    return True, num_splits, rows_per_file, "large_split"
 
 
 def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
@@ -347,6 +528,21 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         workspace.input_csv.write_bytes(input_bytes)
         workspace.questions_csv.write_bytes(questions_bytes)
 
+        # === Dynamic Splitting Logic ===
+        # Count rows in input file
+        logger.info(f"Analyzing input file for splitting strategy: {workspace.input_csv}")
+        row_count, is_estimate = _count_csv_rows(workspace.input_csv)
+        
+        # Calculate optimal splitting strategy
+        enable_split, num_splits, rows_per_file, strategy_name = _calculate_optimal_split_count(row_count)
+        
+        logger.info(
+            f"Splitting strategy selected: {strategy_name} | "
+            f"Input rows: {row_count:,}{' (estimated)' if is_estimate else ''} | "
+            f"Splits: {num_splits if enable_split else 1} | "
+            f"Rows per split: ~{rows_per_file}"
+        )
+
         preprocessor_script = _resolve_script_path(settings.PREPROCESS_SCRIPT_PATH)
         processor_script = _resolve_script_path(settings.PROCESSOR_SCRIPT_PATH)
 
@@ -371,21 +567,52 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "--output-dir",
             str(workspace.preprocessor_output_dir),
             "--split-files",
-            "no",
+            "yes" if enable_split else "no",
+        ]
+        
+        # Add rows-per-file parameter if splitting is enabled
+        if enable_split:
+            preprocessor_cmd.extend(["--rows-per-file", str(rows_per_file)])
+        
+        preprocessor_cmd.extend([
             "--use-school-filter",
             "false",
-        ]
+        ])
+        
         _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
 
-        if not workspace.preprocessed_csv.exists():
-            raise ExecutionProcessingError(
-                f"Pre-processed file not found: {workspace.preprocessed_csv}"
+        # Handle split files or single file based on strategy
+        if enable_split:
+            # Multiple split files expected
+            split_files = sorted(
+                workspace.preprocessor_output_dir.glob("split_*.csv"),
+                key=lambda p: p.name
             )
-
-        shutil.copy2(
-            workspace.preprocessed_csv,
-            workspace.processor_input_dir / "input.csv",
-        )
+            
+            if not split_files:
+                raise ExecutionProcessingError(
+                    f"No split files found in {workspace.preprocessor_output_dir} after splitting enabled"
+                )
+            
+            logger.info(f"Found {len(split_files)} split files, copying to processor input directory")
+            
+            # Copy all split files to processor input directory
+            for split_file in split_files:
+                shutil.copy2(
+                    split_file,
+                    workspace.processor_input_dir / split_file.name,
+                )
+        else:
+            # Single file expected
+            if not workspace.preprocessed_csv.exists():
+                raise ExecutionProcessingError(
+                    f"Pre-processed file not found: {workspace.preprocessed_csv}"
+                )
+            
+            shutil.copy2(
+                workspace.preprocessed_csv,
+                workspace.processor_input_dir / "input.csv",
+            )
 
         processor_env = {
             **base_env,
