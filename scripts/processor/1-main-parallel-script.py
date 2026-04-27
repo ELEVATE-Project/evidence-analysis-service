@@ -1,5 +1,6 @@
 import os
 import argparse
+import ast
 import concurrent.futures
 import pandas as pd
 import json
@@ -107,7 +108,7 @@ INPUT_TASK_QUESTION_COLUMN = (
     or "Task Evidence Question"
 )
 DEFAULT_QUESTION_TASK_COLUMN = "TASK NAME"
-DEFAULT_QUESTION_TEXT_COLUMN = "Question"
+DEFAULT_QUESTION_TEXT_COLUMN = "Refined questions using tool and webpage"
 
 # === RELEVANCE SCORING CONFIGURATION ===
 # BIHAR: Use "strict" mode (YES/NO answers only, descriptive content ignored)
@@ -718,31 +719,124 @@ def _parse_model_json_response(response_text):
     if match:
         candidates.append(match.group(0))
 
+    list_match = re.search(r"\[.*\]", text, flags=re.DOTALL)
+    if list_match:
+        candidates.append(list_match.group(0))
+
     last_error = None
     for candidate in candidates:
         try:
-            parsed = json.loads(candidate)
-            if not isinstance(parsed, dict):
-                raise ValueError("Model response JSON is not an object")
-            return parsed
+            normalized_candidate = re.sub(r"(?m)(?<!https:)(?<!http:)//.*$", "", candidate)
+            normalized_candidate = re.sub(r",\s*([}\]])", r"\1", normalized_candidate)
+            parsed = json.loads(normalized_candidate)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"answers": parsed, "reasonings": []}
         except Exception as exc:  # noqa: BLE001
             last_error = exc
+
+        try:
+            python_candidate = normalized_candidate
+            python_candidate = re.sub(r"\bnull\b", "None", python_candidate)
+            python_candidate = re.sub(r"\btrue\b", "True", python_candidate, flags=re.IGNORECASE)
+            python_candidate = re.sub(r"\bfalse\b", "False", python_candidate, flags=re.IGNORECASE)
+            parsed = ast.literal_eval(python_candidate)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"answers": parsed, "reasonings": []}
+        except Exception as exc:  # noqa: BLE001
+            last_error = exc
+
+    # Last-resort extraction from loose text outputs.
+    inferred_answers = []
+    inferred_reasonings = []
+    lower_text = text.lower()
+    if "no" in lower_text and ("evidence" in lower_text or "not" in lower_text):
+        inferred_answers.append("NO")
+    elif text:
+        inferred_answers.append(text)
+    if text:
+        inferred_reasonings.append(text)
+    if inferred_answers or inferred_reasonings:
+        return {"answers": inferred_answers, "reasonings": inferred_reasonings}
 
     raise ValueError(f"Failed to parse model JSON response: {last_error}")
 
 
-def _ensure_required_qa_fields(response_json):
+def _estimate_question_count(task_evidence_question):
+    text = str(task_evidence_question or "").strip()
+    if not text:
+        return 1
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return 1
+
+    numbered = [line for line in lines if re.match(r"^(?:q\s*\d+|\d+[\).:-]|[-*•])\s*", line, flags=re.IGNORECASE)]
+    question_like = [line for line in lines if "?" in line]
+    count = max(len(numbered), len(question_like), 1)
+    return min(count, 25)
+
+
+def _coerce_to_text_list(value):
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+
+    text = str(value).strip()
+    if not text:
+        return []
+
+    if text.startswith("[") and text.endswith("]"):
+        for parser in (json.loads, ast.literal_eval):
+            try:
+                parsed = parser(text)
+                if isinstance(parsed, list):
+                    return [str(item).strip() for item in parsed if str(item).strip()]
+            except Exception:  # noqa: BLE001
+                continue
+
+    split_pattern = r"\n+(?=(?:q\s*\d+|\d+[\).:-]|[-*•])\s*)|;\s+"
+    parts = [part.strip() for part in re.split(split_pattern, text, flags=re.IGNORECASE) if part.strip()]
+    return parts if parts else [text]
+
+
+def _ensure_required_qa_fields(response_json, expected_questions=1):
     """Normalize and validate required keys expected by downstream logic."""
     if not isinstance(response_json, dict):
         raise ValueError("Model response must be a JSON object")
 
     answers = response_json.get("answers")
-    reasonings = response_json.get("reasonings")
-    if not isinstance(answers, list) or not isinstance(reasonings, list):
-        raise ValueError("Model response must include list fields: answers, reasonings")
+    if answers is None:
+        answers = response_json.get("answer")
 
-    response_json["answers"] = [str(item).strip() for item in answers]
-    response_json["reasonings"] = [str(item).strip() for item in reasonings]
+    reasonings = response_json.get("reasonings")
+    if reasonings is None:
+        reasonings = response_json.get("reasoning") or response_json.get("reasons")
+
+    answers_list = _coerce_to_text_list(answers)
+    reasonings_list = _coerce_to_text_list(reasonings)
+
+    if not answers_list and not reasonings_list:
+        raise ValueError("Model response must include answers/reasonings content")
+
+    target_len = max(
+        1,
+        int(expected_questions or 1),
+        len(answers_list),
+        len(reasonings_list),
+    )
+    if len(answers_list) < target_len:
+        answers_list.extend([answers_list[-1] if answers_list else ""] * (target_len - len(answers_list)))
+    if len(reasonings_list) < target_len:
+        reasonings_list.extend([reasonings_list[-1] if reasonings_list else ""] * (target_len - len(reasonings_list)))
+
+    response_json["answers"] = answers_list[:target_len]
+    response_json["reasonings"] = reasonings_list[:target_len]
     return response_json
 
 
@@ -1028,7 +1122,7 @@ def validate_and_fix_enrollment_data(enr_2024, enr_2025, enr_pct, answers_text, 
     return enr_2024, enr_2025, enr_pct
 
 # === Utility functions ===
-def calculate_relevance_tag(answers, mode=None):
+def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=None):
     """
     Calculate relevance tag based on answers with configurable scoring modes.
     
@@ -1058,6 +1152,7 @@ def calculate_relevance_tag(answers, mode=None):
 
     yes_no_answers = []
     descriptive_answers = []
+    reasonings = reasonings if isinstance(reasonings, list) else []
 
     # Categorize answers
     for answer in answers:
@@ -1148,6 +1243,50 @@ def calculate_relevance_tag(answers, mode=None):
             combined_score = 0
             logging.debug(f"[Relevance-Mixed] No valid answers found")
 
+    combined_text = " ".join(
+        [
+            " ".join(descriptive_answers),
+            " ".join(str(item).strip() for item in reasonings if str(item).strip()),
+        ]
+    ).lower()
+
+    negative_markers = [
+        "no evidence",
+        "not visible",
+        "cannot determine",
+        "not available",
+        "does not show",
+        "no table",
+        "no graph",
+        "no numerical data",
+        "no enrollment",
+        "no enrolment",
+        "not related",
+        "unrelated",
+        "not relevant",
+    ]
+    has_negative_signal = any(marker in combined_text for marker in negative_markers)
+    if has_negative_signal:
+        # Strongly penalize long but explicitly negative narratives.
+        combined_score = min(combined_score, 0.2)
+
+    question_lower = str(question_text or "").lower()
+    if question_lower:
+        question_tokens = set(re.findall(r"[a-zA-Z]{4,}", question_lower))
+        answer_tokens = set(re.findall(r"[a-zA-Z]{4,}", combined_text))
+        overlap_ratio = (
+            (len(question_tokens & answer_tokens) / len(question_tokens))
+            if question_tokens else 0.0
+        )
+        # If descriptive content has very weak lexical overlap with question intent,
+        # avoid classifying it as Relevant by length alone.
+        if not yes_no_answers and overlap_ratio < 0.15:
+            combined_score = min(combined_score, 0.35)
+
+        enrollment_keywords = {"enrollment", "enrolment", "नामांकन"}
+        if any(keyword in question_lower for keyword in enrollment_keywords) and has_negative_signal:
+            combined_score = min(combined_score, 0.1)
+
     # Determine relevance tag based on combined score and configurable thresholds
     if combined_score >= RELEVANT_THRESHOLD:
         tag = 'Relevant'
@@ -1187,6 +1326,7 @@ def process_image(task_evidence_link, task_evidence_question, task_name=None, ma
                   worker_id=None, input_file=None, row_number=None, school_id=None):
     global current_token_index
     retries = 0
+    expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
             rate_limiter()
@@ -1211,10 +1351,11 @@ IMPORTANT RESPONSE FORMAT:
 - The answer can be either:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The school has organized activities...")
+- Return ONLY valid JSON (no markdown, no code fences, no comments)
 
 Example for 1 question:
 {{
-  "answers": ["YES"],  // or ["The enrollment increased from 120 to 144"]
+  "answers": ["YES"],
   "reasonings": ["The image clearly shows enrollment data with increasing trend"]
 }}
 
@@ -1241,6 +1382,7 @@ IMPORTANT RESPONSE FORMAT:
 - The answer can be either:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The school has organized activities...")
+- Return ONLY valid JSON (no markdown, no code fences, no comments)
 
 Example for 1 question with enrollment data:
 {{
@@ -1354,7 +1496,8 @@ CORRECT JSON Response:
                 prompt,
             ])
             response_json = _ensure_required_qa_fields(
-                _parse_model_json_response(getattr(response, "text", ""))
+                _parse_model_json_response(getattr(response, "text", "")),
+                expected_questions=expected_questions,
             )
             
             # Log API usage
@@ -1457,6 +1600,7 @@ def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_
     """Process PDF evidence using Gemini API with usage tracking"""
     global current_token_index
     retries = 0
+    expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
             rate_limiter()
@@ -1482,10 +1626,11 @@ IMPORTANT RESPONSE FORMAT:
 - The answer can be either:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The school has organized activities...")
+- Return ONLY valid JSON (no markdown, no code fences, no comments)
 
 Example for 1 question:
 {{
-  "answers": ["YES"],  // or ["The enrollment increased from 120 to 144"]
+  "answers": ["YES"],
   "reasonings": ["The document clearly shows enrollment data with increasing trend"]
 }}
 
@@ -1511,6 +1656,7 @@ IMPORTANT RESPONSE FORMAT:
 - The answer can be either:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The school has organized activities...")
+- Return ONLY valid JSON (no markdown, no code fences, no comments)
 
 Example for 1 question with enrollment data:
 {{
@@ -1535,7 +1681,8 @@ Focus on:
                 prompt,
             ])
             response_json = _ensure_required_qa_fields(
-                _parse_model_json_response(getattr(response, "text", ""))
+                _parse_model_json_response(getattr(response, "text", "")),
+                expected_questions=expected_questions,
             )
             
             # Log API usage
@@ -1576,6 +1723,7 @@ def process_excel(task_evidence_link, task_evidence_question, task_name=None, ma
     """Process Excel evidence - download and convert to text for Gemini with usage tracking"""
     global current_token_index
     retries = 0
+    expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
             rate_limiter()
@@ -1607,10 +1755,11 @@ IMPORTANT RESPONSE FORMAT:
 - The answer can be either:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
+- Return ONLY valid JSON (no markdown, no code fences, no comments)
 
 Example for 1 question:
 {{
-  "answers": ["YES"],  // or ["The data shows increasing enrollment trend"]
+  "answers": ["YES"],
   "reasonings": ["The spreadsheet clearly shows enrollment data with upward trend"]
 }}
 
@@ -1639,6 +1788,7 @@ IMPORTANT RESPONSE FORMAT:
 - The answer can be either:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
+- Return ONLY valid JSON (no markdown, no code fences, no comments)
 
 Example for 1 question with enrollment data:
 {{
@@ -1660,7 +1810,8 @@ Focus on:
             
             response = selected_model.generate_content([prompt])
             response_json = _ensure_required_qa_fields(
-                _parse_model_json_response(getattr(response, "text", ""))
+                _parse_model_json_response(getattr(response, "text", "")),
+                expected_questions=expected_questions,
             )
             
             # Log API usage
@@ -1966,7 +2117,11 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                     reasonings = response["reasonings"]
                     task_evidence_qa.append(answers)
                     task_evidence_qa_reason.append(reasonings)
-                    relevance_tag = calculate_relevance_tag(answers)
+                    relevance_tag = calculate_relevance_tag(
+                        answers,
+                        question_text=task_question,
+                        reasonings=reasonings,
+                    )
                     relevance_tags.append(relevance_tag)
                     
                     # ===== CHECKPOINT: Mark row as processed =====
