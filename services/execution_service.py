@@ -1371,7 +1371,7 @@ class ExecutionService:
                 input_result.preview_rows = preview_rows
                 self._validate_input_csv_metadata(headers, row_count, source_type)
                 input_result.valid = True
-                input_result.message = "Input file looks good."
+                input_result.message = f"✓ Input file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
                 input_result.missing_columns = []
             except HTTPException as exc:
                 detail = str(exc.detail)
@@ -1394,7 +1394,7 @@ class ExecutionService:
                 questions_result.preview_rows = preview_rows
                 self._validate_questions_csv_metadata(headers, source_type)
                 questions_result.valid = True
-                questions_result.message = "Criteria file looks good."
+                questions_result.message = f"✓ Criteria file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
                 questions_result.missing_columns = []
             except HTTPException as exc:
                 detail = str(exc.detail)
