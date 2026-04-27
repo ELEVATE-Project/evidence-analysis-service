@@ -2172,16 +2172,61 @@ if __name__ == "__main__":
         logging.error(f"[Main] Input directory does not exist: {INPUT_DIR}")
         raise SystemExit(1)
 
+    # Read input files
     input_files = [
         os.path.join(INPUT_DIR, file)
         for file in os.listdir(INPUT_DIR)
         if file.endswith((".xlsx", ".csv"))
     ]
+    
+    # Sort input files for consistent processing order
+    # For split files (split_001.csv, split_002.csv), this ensures proper ordering
+    input_files.sort()
 
     logging.info(f"[Main] Found {len(input_files)} input files to process.")
     if not input_files:
         logging.error(f"[Main] No input CSV/XLSX files found in: {INPUT_DIR}")
         raise SystemExit(1)
+    
+    # Check for split manifest and validate
+    manifest_file = os.path.join(INPUT_DIR, "..", "preprocessor_output", "split_manifest.json")
+    if os.path.exists(manifest_file):
+        try:
+            with open(manifest_file, "r", encoding="utf-8") as mf:
+                manifest = json.load(mf)
+            
+            expected_splits = manifest.get("total_splits", 1)
+            split_enabled = manifest.get("split_enabled", False)
+            total_rows = manifest.get("total_rows", 0)
+            
+            if split_enabled:
+                logging.info(f"[Main] Split manifest detected:")
+                logging.info(f"[Main]   - Expected splits: {expected_splits}")
+                logging.info(f"[Main]   - Total rows: {total_rows:,}")
+                logging.info(f"[Main]   - Actual files found: {len(input_files)}")
+                
+                if len(input_files) != expected_splits:
+                    logging.warning(
+                        f"[Main] ⚠️  File count mismatch! Expected {expected_splits} splits, "
+                        f"found {len(input_files)} files"
+                    )
+            else:
+                logging.info(f"[Main] Single file mode (total rows: {total_rows:,})")
+        except Exception as exc:
+            logging.warning(f"[Main] Could not read split manifest: {exc}")
+    
+    # Cap thread pool to prevent resource exhaustion
+    # Get MAX_SPLIT_FILES from environment or use default of 100
+    MAX_SPLIT_FILES = int(os.getenv("MAX_SPLIT_FILES", "100"))
+    max_workers = min(len(input_files), MAX_SPLIT_FILES)
+    
+    if len(input_files) > MAX_SPLIT_FILES:
+        logging.warning(
+            f"[Main] File count ({len(input_files)}) exceeds MAX_SPLIT_FILES ({MAX_SPLIT_FILES}). "
+            f"Capping thread pool to {max_workers} workers."
+        )
+    else:
+        logging.info(f"[Main] Spawning {max_workers} workers for {len(input_files)} split files")
     
     # ===== CHECKPOINT: Load existing checkpoint =====
     global_checkpoint = load_checkpoint()
@@ -2247,7 +2292,7 @@ if __name__ == "__main__":
     total_standard_count = 0
 
     processed_files = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(input_files)) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(process_file_parallel, f, idx + 1, global_checkpoint): f
             for idx, f in enumerate(input_files)

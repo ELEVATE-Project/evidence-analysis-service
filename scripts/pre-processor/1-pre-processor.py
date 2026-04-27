@@ -1,5 +1,6 @@
 import os
 import csv
+import json
 import math
 import argparse
 import re
@@ -443,24 +444,62 @@ if SPLIT_FILES.lower() == "no":
     print(f"✅ Created: {output_file} ({len(filtered_rows)} rows)")
     print(f"Mode: Single file output")
     
+    # Create manifest for single file mode
+    manifest = {
+        "total_splits": 1,
+        "rows_per_file": len(filtered_rows),
+        "total_rows": len(filtered_rows),
+        "split_enabled": False
+    }
+    manifest_file = os.path.join(OUTPUT_DIR, "split_manifest.json")
+    with open(manifest_file, "w", encoding="utf-8") as mf:
+        json.dump(manifest, mf, indent=2)
+    print(f"✅ Created manifest: {manifest_file}")
+    
 else:
     # Split into multiple files
     total_files = math.ceil(len(filtered_rows) / ROWS_PER_FILE)
+    
+    # Calculate padding width for filenames (e.g., 3 digits for up to 999 files)
+    padding_width = len(str(total_files))
+    
+    actual_rows_written = 0
     
     for i in range(total_files):
         start_index = i * ROWS_PER_FILE
         end_index = start_index + ROWS_PER_FILE
         chunk = filtered_rows[start_index:end_index]
 
-        output_file = os.path.join(OUTPUT_DIR, f"split_{i+1}.csv")
+        # Zero-padded filename (e.g., split_001.csv, split_002.csv)
+        output_file = os.path.join(OUTPUT_DIR, f"split_{str(i+1).zfill(padding_width)}.csv")
         with open(output_file, "w", newline='', encoding="utf-8") as outfile:
             writer = csv.writer(outfile)
             writer.writerow(final_header)
             writer.writerows(chunk)
-
-        print(f"✅ Created: {output_file} ({len(chunk)} rows)")
+        
+        actual_rows_written += len(chunk)
+        print(f"✅ Created: {output_file} (rows {start_index+1}-{start_index+len(chunk)}, {len(chunk)} rows)")
     
-    print(f"Mode: Split into {total_files} files ({ROWS_PER_FILE} rows per file)")
+    # Create split manifest
+    manifest = {
+        "total_splits": total_files,
+        "rows_per_file": ROWS_PER_FILE,
+        "total_rows": len(filtered_rows),
+        "split_enabled": True,
+        "actual_rows_written": actual_rows_written
+    }
+    manifest_file = os.path.join(OUTPUT_DIR, "split_manifest.json")
+    with open(manifest_file, "w", encoding="utf-8") as mf:
+        json.dump(manifest, mf, indent=2)
+    
+    # Validate no data loss
+    if actual_rows_written != len(filtered_rows):
+        print(f"⚠️  WARNING: Row count mismatch! Expected {len(filtered_rows)}, wrote {actual_rows_written}")
+    else:
+        print(f"✅ Validated: All {actual_rows_written} rows written across {total_files} splits")
+    
+    print(f"✅ Created manifest: {manifest_file}")
+    print(f"Mode: Split into {total_files} files (~{ROWS_PER_FILE} rows per file)")
 
 # === Summary ===
 print(f"\n{'='*70}")
