@@ -202,6 +202,23 @@ async def start_execution(
 
 
 @router.post(
+    "/{execution_id}/rerun",
+    response_model=ExecutionResponse,
+    responses=EXECUTION_COMMON_ERROR_RESPONSES,
+)
+async def rerun_execution(
+    execution_id: UUID,
+    execution_service: ExecutionServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+):
+    """Rerun a failed analysis after resetting runtime state."""
+    return await execution_service.rerun_execution(
+        execution_id=execution_id,
+        user_id=current_user.id,
+    )
+
+
+@router.post(
     "/init-upload",
     response_model=ExecutionUploadInitResponse,
     status_code=status.HTTP_201_CREATED,

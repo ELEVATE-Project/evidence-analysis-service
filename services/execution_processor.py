@@ -285,6 +285,20 @@ def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
     )
 
 
+def _cleanup_workspace_root(execution_id: UUID) -> None:
+    root_dir = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution_id)
+    if not root_dir.exists():
+        return
+
+    try:
+        shutil.rmtree(root_dir)
+    except Exception as exc:
+        raise ExecutionProcessingError(
+            message=f"Failed to clean execution workspace before run: {exc}",
+            error_logs=traceback.format_exc(),
+        ) from exc
+
+
 def _resolve_processor_columns_from_config(db: Session, execution: Execution) -> dict[str, str]:
     columns: dict[str, str] = {}
     csv_type_id = (execution.csv_type_id or "").strip()
@@ -516,6 +530,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "Execution is missing input/questions file URLs."
             )
 
+        _cleanup_workspace_root(execution.id)
         workspace = _build_workspace(execution.id)
 
         input_bytes = _run_async(storage_service.download_file(execution.input_file_url))
@@ -652,7 +667,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             )
 
         output_bytes = workspace.final_output_csv.read_bytes()
-        processed_rows = _count_csv_rows(workspace.final_output_csv)
+        processed_rows, _ = _count_csv_rows(workspace.final_output_csv)
         output_file_name = f"output_{execution.id}.csv"
         output_file_path = storage_service.build_execution_file_path(
             user_id=execution.created_by or "system",
