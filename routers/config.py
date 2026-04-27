@@ -5,12 +5,12 @@ Provides generic configuration list APIs.
 import logging
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import JSONResponse
 
 from core.dependencies import ConfigServiceDep
 from models.entity_schemas import ErrorDetails, StandardAPIResponse
-from models.schemas import UserResponse
+from models.schemas import ReportDownloadResponse, UserResponse
 from services.auth_service import AuthService
 
 router = APIRouter()
@@ -55,3 +55,32 @@ async def list(
             error=ErrorDetails(code=code, details=detail),
         )
         return JSONResponse(status_code=status_code, content=payload.model_dump(exclude_none=True))
+
+
+@router.get(
+    "/csv-source-types/{type_id}/sample/{file_type}",
+    response_model=ReportDownloadResponse,
+    responses={
+        400: {"model": StandardAPIResponse, "description": "Invalid file_type parameter"},
+        404: {"model": StandardAPIResponse, "description": "Sample file not found"},
+        401: {"model": StandardAPIResponse, "description": "Unauthorized"},
+        500: {"model": StandardAPIResponse, "description": "Failed to generate download URL"},
+    },
+)
+async def get_sample_csv_url(
+    config_service: ConfigServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+    type_id: int = Path(..., description="CSV source type ID"),
+    file_type: Literal["input", "criteria"] = Path(..., description="Sample file type"),
+):
+    """
+    Get signed download URL for sample CSV file.
+    
+    Args:
+        type_id: CSV source type ID
+        file_type: Either 'input' or 'criteria'
+        
+    Returns:
+        Signed download URL with expiration time
+    """
+    return await config_service.get_sample_file_url(type_id, file_type, current_user)

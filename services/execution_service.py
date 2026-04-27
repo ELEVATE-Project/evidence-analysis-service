@@ -1481,6 +1481,11 @@ class ExecutionService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Execution is already completed.",
             )
+        if execution.status == "failed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Execution failed previously. Use rerun to start a fresh retry.",
+            )
 
         await self._apply_execution_estimates(execution)
         execution.status = "queued"
@@ -1499,6 +1504,77 @@ class ExecutionService:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Execution could not be queued. Please try again.",
+            ) from exc
+
+        return self._to_execution_response(execution)
+
+    async def rerun_execution(self, execution_id: UUID, user_id: str) -> ExecutionResponse:
+        """Rerun a failed execution after clearing runtime/output state."""
+        execution = (
+            self.db.query(Execution)
+            .filter(
+                Execution.id == execution_id,
+                Execution.created_by == user_id,
+            )
+            .with_for_update()
+            .first()
+        )
+        if not execution:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Execution not found",
+            )
+
+        normalized_status = (execution.status or "").strip().lower()
+        if normalized_status != "failed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Only failed executions can be rerun. "
+                    f"Current status is '{execution.status or 'unknown'}'."
+                ),
+            )
+
+        checkpoint = self._checkpoint(execution)
+        input_valid = bool(checkpoint["files"]["input"].get("validated"))
+        questions_valid = bool(checkpoint["files"]["questions"].get("validated"))
+        if not (input_valid and questions_valid):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Input and questions files are not marked as validated. "
+                    "Please re-upload and validate both files before rerun."
+                ),
+            )
+
+        await self._apply_execution_estimates(execution)
+        execution.status = "queued"
+        execution.upload_completed_at = datetime.utcnow()
+        execution.failure_reason = None
+        execution.error_logs = None
+        execution.processed_rows = 0
+        execution.completed_at = None
+        execution.processing_started_at = None
+        execution.processing_completed_at = None
+        execution.output_file_url = None
+        execution.output_file_size = None
+        execution.worker_id = None
+        execution.retry_count = 0
+        execution.actual_cost = None
+        execution.average_processing_time = None
+        execution.notification_sent = False
+        execution.notification_sent_at = None
+        self.db.commit()
+        self.db.refresh(execution)
+
+        try:
+            self.worker.submit_job(execution.id)
+        except Exception as exc:
+            logger.exception("Failed to enqueue execution rerun %s", execution.id)
+            self._mark_execution_failed(execution, f"Failed to enqueue execution: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Execution could not be queued for rerun. Please try again.",
             ) from exc
 
         return self._to_execution_response(execution)

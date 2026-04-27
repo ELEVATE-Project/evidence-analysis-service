@@ -52,13 +52,28 @@ python db/init_db.py
 python db/seed_data.py
 ```
 
-7. Start API server:
+7. Run database migrations:
+
+```bash
+alembic upgrade head
+```
+
+8. Upload sample CSV files to cloud storage:
+
+```bash
+# Upload sample files and update database with cloud paths
+python scripts/upload_sample_csvs.py
+```
+
+**Note:** The upload script should be run after the migration. It uploads sample CSV files from `public/sample-csv/projects/` to cloud storage and updates the database with the file paths.
+
+9. Start API server:
 
 ```bash
 uvicorn main:app --reload
 ```
 
-8. Start Celery worker (separate terminal):
+10. Start Celery worker (separate terminal):
 
 ```bash
 celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2
@@ -99,3 +114,53 @@ Services:
 - PostgreSQL: `localhost:5432`
 - RabbitMQ: `localhost:5672` (Management UI: `http://localhost:15672`)
 - Redis: `localhost:6379`
+
+## Migrations & Scripts
+
+### Database Migrations (Alembic)
+
+**Run migrations:**
+```bash
+alembic upgrade head
+```
+
+**Check current version:**
+```bash
+alembic current
+```
+
+**View migration history:**
+```bash
+alembic history --verbose
+```
+
+**Rollback one migration:**
+```bash
+alembic downgrade -1
+```
+
+**Create new migration:**
+```bash
+alembic revision -m "description"
+```
+
+**Auto-generate migration from model changes:**
+```bash
+alembic revision --autogenerate -m "description"
+```
+
+### Setup Order
+
+**New Installation:**
+```bash
+python db/init_db.py
+python db/seed_data.py
+alembic upgrade head
+python scripts/upload_sample_csvs.py
+```
+
+**Existing Installation:**
+```bash
+alembic upgrade head
+python scripts/upload_sample_csvs.py
+```

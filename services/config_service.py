@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 from models.csv_source_type import CsvSourceType
-from models.schemas import UserResponse
+from models.schemas import ReportDownloadResponse, UserResponse
+from services.storage_service import StorageService
 
 
 class ConfigService:
@@ -17,6 +18,7 @@ class ConfigService:
 
     def __init__(self, db: Session):
         self.db = db
+        self.storage_service = StorageService()
 
     @staticmethod
     def _resolve_scope(current_user: UserResponse) -> tuple[str, str]:
@@ -100,3 +102,77 @@ class ConfigService:
         )
 
         return [self._serialize_csv_source_type(item) for item in source_types]
+
+    async def get_sample_file_url(
+        self, type_id: int, file_type: str, current_user: UserResponse
+    ) -> ReportDownloadResponse:
+        """
+        Get signed download URL for sample CSV file.
+        
+        Args:
+            type_id: CSV source type ID
+            file_type: Either "input" or "criteria"
+            current_user: Current authenticated user
+            
+        Returns:
+            ReportDownloadResponse with signed download URL
+            
+        Raises:
+            HTTPException: If type not found or sample URL not configured
+        """
+        # Validate file_type parameter
+        if file_type not in ("input", "criteria"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid file_type. Must be 'input' or 'criteria'.",
+            )
+
+        tenant_code, organization_code = self._resolve_scope(current_user)
+        
+        # Fetch CSV source type
+        source_type = (
+            self.db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.id == type_id,
+                CsvSourceType.tenant_code == tenant_code,
+                CsvSourceType.organization_code == organization_code,
+                CsvSourceType.is_active.is_(True),
+            )
+            .first()
+        )
+        
+        if not source_type:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"CSV source type with id={type_id} not found.",
+            )
+        
+        # Get the appropriate sample URL
+        sample_url = (
+            source_type.sample_input_file_url
+            if file_type == "input"
+            else source_type.sample_criteria_file_url
+        )
+        
+        if not sample_url:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Sample {file_type} CSV file not available for this source type.",
+            )
+        
+        # Generate signed download URL
+        try:
+            signed_download = await self.storage_service.generate_download_url(
+                file_path=sample_url,
+                expiration=settings.SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS,
+                response_filename=f"sample_{file_type}.csv",
+            )
+            return ReportDownloadResponse(
+                download_url=signed_download["url"],
+                expires_in_seconds=signed_download["expires_in_seconds"],
+            )
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to generate download URL: {str(exc)}",
+            )

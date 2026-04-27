@@ -57,6 +57,10 @@ class CsvSourceType(Base):
         server_default=text("jsonb_build_object('relevant', 0.8, 'partial', 0.5)"),
     )
 
+    # Sample file URLs
+    sample_input_file_url = Column(Text, nullable=True)
+    sample_criteria_file_url = Column(Text, nullable=True)
+
     # Status and audit
     is_active = Column(Boolean, nullable=False, server_default=text("true"))
     created_by = Column(String(255), ForeignKey("users.id"), nullable=True)
