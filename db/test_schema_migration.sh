@@ -80,11 +80,12 @@ assert_index_exists() {
 
 echo "Validating required execution columns"
 required_columns=(
+    tenant_code
+    organization_code
     input_file_url
     input_file_size
-    input_file_checksum
-    questions_file_url
-    questions_file_size
+    criterias_file_url
+    criterias_file_size
     output_file_url
     output_file_size
     worker_id
@@ -95,8 +96,10 @@ required_columns=(
     processing_started_at
     processing_completed_at
     average_processing_time
+    estimated_time_seconds
     notification_sent
     notification_sent_at
+    district
 )
 
 for column in "${required_columns[@]}"; do
@@ -117,8 +120,26 @@ done
 
 echo "Running execution metadata persistence smoke check"
 psql "$TEST_DB_URL" -v ON_ERROR_STOP=1 -c "
-    INSERT INTO executions (name, status, created_by, questions_file_size, retry_count, notification_sent)
-    VALUES ('schema_smoke_execution', 'queued', 'smoke-user', 1024, 1, FALSE);
+    INSERT INTO executions (
+        tenant_code,
+        organization_code,
+        name,
+        status,
+        created_by,
+        criterias_file_size,
+        retry_count,
+        notification_sent
+    )
+    VALUES (
+        'default',
+        'default_code',
+        'schema_smoke_execution',
+        'queued',
+        'smoke-user',
+        1024,
+        1,
+        FALSE
+    );
 
     UPDATE executions
     SET status = 'running',
@@ -138,7 +159,7 @@ psql "$TEST_DB_URL" -v ON_ERROR_STOP=1 -c "
 " >/dev/null
 
 smoke_result="$(psql "$TEST_DB_URL" -At -v ON_ERROR_STOP=1 -c "
-    SELECT questions_file_size::text || '|' || status || '|' || notification_sent::text
+    SELECT criterias_file_size::text || '|' || status || '|' || notification_sent::text
     FROM executions
     WHERE name = 'schema_smoke_execution'
     ORDER BY created_at DESC
