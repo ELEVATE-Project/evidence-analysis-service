@@ -1,0 +1,231 @@
+# Production Docker Compose Configuration
+# Evidence Analysis System
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: evidence-postgres-prod
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-evidence_analysis}
+      POSTGRES_USER: ${POSTGRES_USER:-evidence_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-evidence_password}
+      POSTGRES_INITDB_ARGS: "-E UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backups:/backups
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-evidence_user} -d ${POSTGRES_DB:-evidence_analysis}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - evidence-backend-net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: evidence-rabbitmq-prod
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_DEFAULT_VHOST: /
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit disk_free_limit 2147483648"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+      - rabbitmq_logs:/var/log/rabbitmq
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - evidence-backend-net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # Redis Cache (Optional)
+  redis:
+    image: redis:7-alpine
+    container_name: evidence-redis-prod
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - evidence-backend-net
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+
+  # Backend API Service
+  backend:
+    build:
+      context: ..
+      dockerfile: documentation/Dockerfile
+    image: evidence-backend:latest
+    container_name: evidence-backend-prod
+    restart: unless-stopped
+    env_file:
+      - ../.env.production
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-evidence_user}:${POSTGRES_PASSWORD:-evidence_password}@postgres:5432/${POSTGRES_DB:-evidence_analysis}
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ../uploads:/app/uploads
+      - ../logs:/app/logs
+      - ../scripts:/app/scripts:ro
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - evidence-backend-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '1.0'
+          memory: 1G
+
+  # Celery Worker Service
+  celery-worker:
+    build:
+      context: ..
+      dockerfile: documentation/Dockerfile
+    image: evidence-backend:latest
+    container_name: evidence-celery-worker-prod
+    restart: unless-stopped
+    env_file:
+      - ../.env.production
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-evidence_user}:${POSTGRES_PASSWORD:-evidence_password}@postgres:5432/${POSTGRES_DB:-evidence_analysis}
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-guest}:${RABBITMQ_PASSWORD:-guest}@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A celery_worker.celery_app worker --loglevel=info --concurrency=${CELERY_CONCURRENCY:-2} --max-tasks-per-child=1000
+    volumes:
+      - ../uploads:/app/uploads
+      - ../logs:/app/logs
+      - ../scripts:/app/scripts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - evidence-backend-net
+    healthcheck:
+      test: ["CMD", "celery", "-A", "celery_worker.celery_app", "inspect", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: '3.0'
+          memory: 3G
+        reservations:
+          cpus: '2.0'
+          memory: 2G
+
+  # Frontend Service (Optional - for production use Nginx to serve static files)
+  frontend:
+    image: node:20-alpine
+    container_name: evidence-frontend-prod
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      APPLICATION_PORT: "3000"
+      APPLICATION_BASE_URL: "/api/v1"
+      API_ENDPOINT: "http://backend:8000"
+      NODE_ENV: production
+    volumes:
+      - ../../evidence-analysis-portal-p1:/app
+      - /app/node_modules
+    command: sh -c "npm install && npm run build && npx serve -s dist -l 3000"
+    ports:
+      - "${FRONTEND_PORT:-5173}:3000"
+    depends_on:
+      - backend
+    networks:
+      - evidence-backend-net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+# Persistent Volumes
+volumes:
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data/postgres
+  rabbitmq_data:
+    driver: local
+  rabbitmq_logs:
+    driver: local
+  redis_data:
+    driver: local
+
+# Networks
+networks:
+  evidence-backend-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
