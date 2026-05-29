@@ -80,27 +80,11 @@ print_status "Database created"
 
 echo ""
 
-# Step 3: Initialize schema
-echo "Step 3: Initializing schema..."
-
-python db/init_db.py
-print_status "Schema initialized"
-
-echo ""
-
-# Step 4: Seed default users
-echo "Step 4: Seeding default users..."
-
-python db/seed_data.py
-print_status "Default users seeded"
-
-echo ""
-
-# Step 5: Run migrations
-echo "Step 5: Running migrations..."
+# Step 3: Apply migrations (creates all tables and indexes)
+echo "Step 3: Applying Alembic migrations..."
 
 alembic upgrade head
-print_status "Migrations applied"
+print_status "Migrations applied (tables created)"
 
 echo ""
 

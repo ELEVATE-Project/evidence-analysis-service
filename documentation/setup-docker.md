@@ -30,13 +30,8 @@ cd evidence-analysis-service-p1
 cp .env.example .env
 # Edit .env with your configuration
 
-# Start all services
+# Start all services (migrations run automatically via docker-compose command)
 docker-compose up -d
-
-# Initialize database (first-time only)
-docker-compose exec backend python db/init_db.py
-docker-compose exec backend python db/seed_data.py
-docker-compose exec backend alembic upgrade head
 ```
 
 **Access Services:**
@@ -235,22 +230,17 @@ docker-compose up -d frontend
 
 ---
 
-### Step 6: Initialize Database
+### Step 6: Verify Database
 
-**First-time setup only:**
+The `docker-compose.yml` backend command runs `alembic upgrade head` automatically
+before starting the server, so no manual database step is needed.
 
 ```bash
-# Wait for PostgreSQL to be ready (check with docker-compose logs postgres)
-docker-compose exec backend python db/init_db.py
-
-# Seed default users
-docker-compose exec backend python db/seed_data.py
-
-# Run migrations
-docker-compose exec backend alembic upgrade head
-
-# Verify database
+# Verify tables were created (should show: alembic_version, csv_source_types, executions, users)
 docker-compose exec postgres psql -U evidence_user -d evidence_analysis -c "\dt"
+
+# Or re-run migrations explicitly if needed
+docker-compose exec backend alembic upgrade head
 ```
 
 ---
@@ -365,9 +355,6 @@ docker-compose logs -f --tail=50 backend
 ### Execute Commands in Containers
 
 ```bash
-# Run Python script in backend container
-docker-compose exec backend python db/init_db.py
-
 # Open shell in backend container
 docker-compose exec backend bash
 

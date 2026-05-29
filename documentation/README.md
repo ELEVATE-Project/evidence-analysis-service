@@ -14,11 +14,12 @@ Welcome to the Evidence Analysis System documentation! This folder contains comp
 | [Ubuntu Setup](setup-ubuntu.md) | Step-by-step setup for Ubuntu (20.04/22.04/24.04) | Linux developers |
 | [Docker Setup](setup-docker.md) | Containerized deployment guide | Production, teams |
 
-### Configuration
+### Configuration & Database
 
 | Guide | Description |
 |-------|-------------|
 | [Environment Setup](environment-setup.md) | Complete reference for all environment variables |
+| [Migration Workflow](migration-workflow.md) | Alembic migration reference — creating, applying, and rolling back migrations |
 | [Troubleshooting](troubleshooting.md) | Solutions for common issues and errors |
 
 ### Docker Files
@@ -92,10 +93,8 @@ Use this checklist to ensure your setup is complete:
 - [ ] Virtual environment created
 - [ ] Python dependencies installed
 - [ ] `.env` file configured
-- [ ] Database initialized
-- [ ] Default users seeded
-- [ ] Migrations applied
-- [ ] Backend API running (http://localhost:8000)
+- [ ] Migrations applied (`alembic upgrade head`)
+- [ ] Backend API running (http://localhost:8000) — seeds default data on first start
 - [ ] Celery worker running
 
 ### Frontend Setup
@@ -192,7 +191,7 @@ cd documentation/scripts
 
 ### Application Users
 
-After running `seed_data.py`:
+Seeded automatically on first application startup after `alembic upgrade head`:
 
 | Username | Password | Role |
 |----------|----------|------|
@@ -301,6 +300,7 @@ documentation/
 ├── setup-ubuntu.md              # Ubuntu setup guide
 ├── setup-docker.md              # Docker setup guide
 ├── environment-setup.md         # Environment variables reference
+├── migration-workflow.md        # Alembic migration workflow reference
 ├── troubleshooting.md           # Troubleshooting guide
 ├── Dockerfile                   # Production Docker image
 ├── docker-compose.prod.yml      # Production Docker Compose

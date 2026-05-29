@@ -284,10 +284,8 @@ evidence-analysis-service-p1/
 │   └── dependencies.py         # Dependency injection setup
 ├── db/                        # Database layer
 │   ├── database.py            # Database connection & session
-│   ├── init_db.py             # Database initialization
-│   ├── seed_data.py           # Default user seeding
-│   ├── schema.sql             # SQL schema
-│   └── migrations/            # Alembic migrations
+│   ├── seed_data.py           # Default seed data (users, CSV source types)
+│   └── migrations/            # Alembic migrations (single source of truth for schema)
 ├── models/                    # Data models
 │   ├── execution.py           # Execution model
 │   ├── user.py                # User model

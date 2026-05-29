@@ -7,12 +7,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
+from alembic.config import Config as AlembicConfig
+from alembic.runtime.migration import MigrationContext
+from alembic.script import ScriptDirectory
+
 from core.config import settings
 from core.dependencies import set_background_worker
-from db.database import engine, Base, SessionLocal
+from db.database import engine, SessionLocal
 from db.seed_data import seed_default_csv_source_types, seed_default_users
 from models.schemas import HealthResponse, RootResponse
 from services.background_worker import BackgroundWorker
+from services.bootstrap import run_bootstrap
 from routers import auth, cloud_services, config, criteria, entities, executions, notifications, reports
 
 # Configure logging
@@ -23,23 +28,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _assert_migrations_current() -> None:
+    """Fail fast if the database is not at the Alembic head revision.
+
+    This prevents the application from running against a schema that is behind
+    the codebase, which can cause silent data corruption or runtime errors.
+    Always run `alembic upgrade head` before starting the application.
+    """
+    alembic_cfg = AlembicConfig("alembic.ini")
+    script = ScriptDirectory.from_config(alembic_cfg)
+    expected_heads = set(script.get_heads())
+
+    with engine.connect() as conn:
+        context = MigrationContext.configure(conn)
+        current_heads = set(context.get_current_heads())
+
+    if not current_heads:
+        raise RuntimeError(
+            "Database has no Alembic migrations applied. "
+            "Run `alembic upgrade head` before starting the application."
+        )
+
+    if current_heads != expected_heads:
+        raise RuntimeError(
+            f"Database schema is out of date. "
+            f"Applied: {current_heads}  Expected: {expected_heads}. "
+            f"Run `alembic upgrade head` before starting the application."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown"""
     logger.info("Starting Evidence Analysis Service...")
-    
-    # Create database tables
-    Base.metadata.create_all(bind=engine)
-    logger.info("Database tables created/verified")
-    
-    # Seed default users
+
+    # Verify migrations are at head before doing anything else.
+    # Raises RuntimeError with a clear message if the database is behind.
+    _assert_migrations_current()
+    logger.info("Database migrations are current")
+
     db = SessionLocal()
     try:
         seed_default_users(db)
         seed_default_csv_source_types(db)
-        logger.info("Default users seeded")
+        logger.info("Default seed data applied")
+        await run_bootstrap(db)
     except Exception as e:
-        logger.error(f"Failed to seed users: {e}")
+        logger.critical("Startup initialization failed: %s", e)
+        raise
     finally:
         db.close()
     

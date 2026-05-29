@@ -185,8 +185,8 @@ alembic stamp head
 # Rollback one migration
 alembic downgrade -1
 
-# Drop all tables and reinitialize
-python db/init_db.py
+# Drop all tables and reinitialize via Alembic
+alembic downgrade base
 alembic upgrade head
 ```
 
@@ -829,11 +829,10 @@ pip install -r requirements.txt
 
 ### "DatabaseError: relation does not exist"
 
-**Cause**: Database schema not initialized
+**Cause**: Alembic migrations have not been applied.
 
 **Fix**:
 ```bash
-python db/init_db.py
 alembic upgrade head
 ```
 

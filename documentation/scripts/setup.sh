@@ -144,18 +144,10 @@ echo
 if [[ $REPLY =~ ^[Yy]$ ]]; then
     createdb -U postgres evidence_analysis 2>/dev/null || print_warning "Database may already exist"
     print_status "Database created"
-    
-    # Initialize schema
-    python db/init_db.py
-    print_status "Database schema initialized"
-    
-    # Seed users
-    python db/seed_data.py
-    print_status "Default users seeded"
-    
-    # Run migrations
+
+    # Apply migrations (creates all tables, indexes, constraints)
     alembic upgrade head
-    print_status "Migrations applied"
+    print_status "Migrations applied (schema ready)"
 fi
 
 echo ""

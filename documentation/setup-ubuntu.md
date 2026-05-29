@@ -270,6 +270,8 @@ SMTP_PASSWORD=your-mailtrap-password
 
 ### 4.4 Initialize Database
 
+Alembic is the **only** supported way to create and update the schema.
+
 ```bash
 # Ensure virtual environment is activated
 source venv/bin/activate
@@ -277,18 +279,15 @@ source venv/bin/activate
 # Ensure PostgreSQL is running
 sudo systemctl status postgresql
 
-# Initialize database schema
-python db/init_db.py
-
-# Seed default users
-python db/seed_data.py
-
-# Run migrations
+# Apply all migrations (creates all tables, indexes, and constraints)
 alembic upgrade head
 
-# Verify database
+# Verify database — you should see: users, executions, csv_source_types, alembic_version
 psql -U postgres -h localhost -d evidence_analysis -c "\dt"
 ```
+
+Default users and the default CSV source type are seeded automatically on first
+application startup — no manual seed step is needed.
 
 ### 4.5 Start Backend Server
 
