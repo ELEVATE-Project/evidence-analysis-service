@@ -1,0 +1,101 @@
+---
+# Evidence Analysis Backend - Deployment Playbook
+# FastAPI + Celery Worker with PM2 Process Manager
+
+- hosts: elevate
+  vars:
+    project_path: /opt/backend/deployment
+
+  tasks:
+    - name: Slurp hosts file
+      slurp:
+        src: "{{ project_path }}/.token"
+      register: slurpfile
+
+    - name: Get vault credentials
+      shell: "curl --location --request GET '{{ vaultAddress }}evidence-analysis-backend' --header 'X-Vault-Token: {{ slurpfile['content'] | b64decode }}' | jq '.data' > '{{ project_path }}/data2.json'"
+      register: credentials
+
+    - debug: msg="{{ credentials }}"
+
+    - name: Set some variable
+      set_fact:
+        release_path: "{{ project_path }}/releases/{{ lookup('pipe','date +%Y%m%d%H%M%S') }}"
+        current_path: "{{ project_path }}/evidence-analysis-service-p1"
+
+    - name: Retrieve current release folder
+      command: readlink -f evidence-analysis-service-p1
+      register: current_release_path
+      ignore_errors: yes
+      args:
+        chdir: "{{ project_path }}"
+
+    - name: Create new folder
+      file:
+        dest={{ release_path }}
+        mode=0755
+        recurse=yes
+        state=directory
+
+    - name: Clone the repository
+      git:
+        repo: https://github.com/priyanka-TL/evidence-analysis-service-p1.git
+        dest: "{{ release_path }}"
+        clone: yes
+        update: yes
+        version: "{{ gitBranch }}"
+
+    - name: Create Python virtual environment
+      shell: cd {{ release_path }} && python3.12 -m venv venv
+
+    - name: Install Python dependencies
+      shell: cd {{ release_path }} && ./venv/bin/pip install --upgrade pip && ./venv/bin/pip install -r requirements.txt
+
+    - name: Delete Old Folder
+      shell: rm -rf {{ current_path }} && cd {{ project_path }} && mkdir evidence-analysis-service-p1
+
+    - name: Move code
+      shell: mv "{{ release_path }}"/* {{ current_path }}/
+
+    - name: set permission
+      shell: chmod 744 {{ current_path }}/venv/bin/activate
+
+    - name: generate .env
+      shell: cat {{ project_path }}/data2.json | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > {{ current_path }}/.env
+      register: envConfig
+
+    - debug: msg=" cred {{ envConfig }} "
+
+    - name: Run database migrations
+      shell: cd {{ current_path }} && ./venv/bin/alembic upgrade head
+      register: migrationResponse
+      ignore_errors: yes
+
+    - debug: msg=" Migration {{ migrationResponse }} "
+
+    - name: Delete old pm2 backend process
+      command: pm2 delete evidence-backend
+      ignore_errors: yes
+
+    - name: Delete old pm2 celery process
+      command: pm2 delete celery-worker
+      ignore_errors: yes
+
+    - name: Delete release folder
+      shell: rm -rf {{ release_path }}
+
+    - name: Start backend with pm2
+      command: "pm2 start {{ current_path }}/venv/bin/uvicorn --cwd={{ current_path }} --name evidence-backend --interpreter {{ current_path }}/venv/bin/python -- main:app --host 0.0.0.0 --port 8000"
+      register: backendPm2Info
+
+    - name: debug backend info
+      debug:
+        msg: "Backend Pm2 log {{ backendPm2Info }}"
+
+    - name: Start celery worker with pm2
+      command: "pm2 start {{ current_path }}/venv/bin/celery --cwd={{ current_path }} --name celery-worker --interpreter {{ current_path }}/venv/bin/python -- -A celery_worker.celery_app worker --loglevel=info --concurrency=4"
+      register: celeryPm2Info
+
+    - name: debug celery info
+      debug:
+        msg: "Celery Pm2 log {{ celeryPm2Info }}"
