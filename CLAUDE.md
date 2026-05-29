@@ -277,10 +277,14 @@ When generating or modifying code in this repository:
 cp .env.example .env          # fill in DATABASE_URL, JWT_SECRET_KEY, cloud credentials
 python3.12 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
-createdb evidence_analysis
-alembic upgrade head           # creates all tables — THE ONLY schema path
-uvicorn main:app --reload      # seeds data + validates cloud storage on first start
+python scripts/create_dev_db.py   # creates DB if missing
+alembic upgrade head               # apply migrations
+uvicorn main:app --reload         # seeds data + validates cloud storage on first start
 ```
+
+The `create_dev_db.py` script reads `DATABASE_URL` from `.env` and creates the database
+if it does not exist. Run `alembic upgrade head` separately to apply migrations.
+If you prefer manual steps: `createdb -U postgres evidence_analysis && alembic upgrade head`.
 
 ### Adding a Migration
 

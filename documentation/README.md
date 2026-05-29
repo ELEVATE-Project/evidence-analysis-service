@@ -10,9 +10,10 @@ Welcome to the Evidence Analysis System documentation! This folder contains comp
 
 | Guide | Description | Best For |
 |-------|-------------|----------|
-| [macOS Setup](setup-mac.md) | Complete installation guide for macOS (Monterey+) | macOS developers |
-| [Ubuntu Setup](setup-ubuntu.md) | Step-by-step setup for Ubuntu (20.04/22.04/24.04) | Linux developers |
-| [Docker Setup](setup-docker.md) | Containerized deployment guide | Production, teams |
+| [macOS — Native](setup-mac-native.md) | Native installation for macOS (Monterey+) | macOS developers |
+| [macOS — Docker](setup-mac-docker.md) | Docker setup for macOS | macOS, teams |
+| [Ubuntu — Native](setup-ubuntu-native.md) | Native setup for Ubuntu (20.04/22.04/24.04) | Linux developers |
+| [Ubuntu — Docker](setup-ubuntu-docker.md) | Docker setup for Ubuntu | Linux, production |
 
 ### Configuration & Database
 
@@ -31,10 +32,11 @@ Welcome to the Evidence Analysis System documentation! This folder contains comp
 
 ### Helper Scripts
 
-All scripts are located in the `scripts/` directory and are ready to use.
+Service management scripts are in `documentation/scripts/`. The DB setup script is in the project root `scripts/` directory.
 
 | Script | Purpose | Usage |
 |--------|---------|-------|
+| [scripts/create_dev_db.py](../scripts/create_dev_db.py) | Create DB + run migrations (dev only) | `python scripts/create_dev_db.py` |
 | [setup.sh](scripts/setup.sh) | Automated setup and installation | `./setup.sh` |
 | [start.sh](scripts/start.sh) | Start all services | `./start.sh` |
 | [stop.sh](scripts/stop.sh) | Stop all services | `./stop.sh` |
@@ -49,16 +51,10 @@ All scripts are located in the `scripts/` directory and are ready to use.
 
 Choose your platform:
 
-```bash
-# macOS
-See: setup-mac.md
-
-# Ubuntu
-See: setup-ubuntu.md
-
-# Docker (all platforms)
-See: setup-docker.md
-```
+- **macOS Native**: [setup-mac-native.md](setup-mac-native.md)
+- **macOS Docker**: [setup-mac-docker.md](setup-mac-docker.md)
+- **Ubuntu Native**: [setup-ubuntu-native.md](setup-ubuntu-native.md)
+- **Ubuntu Docker**: [setup-ubuntu-docker.md](setup-ubuntu-docker.md)
 
 ### Using Helper Scripts (After Initial Setup)
 
@@ -92,8 +88,8 @@ Use this checklist to ensure your setup is complete:
 ### Backend Setup
 - [ ] Virtual environment created
 - [ ] Python dependencies installed
-- [ ] `.env` file configured
-- [ ] Migrations applied (`alembic upgrade head`)
+- [ ] `.env` file configured (copy from `.env.example` — never use a teammate's `.env`)
+- [ ] Database created and migrations applied (`python scripts/create_dev_db.py`)
 - [ ] Backend API running (http://localhost:8000) — seeds default data on first start
 - [ ] Celery worker running
 
@@ -296,9 +292,10 @@ All documentation follows these principles:
 ```
 documentation/
 ├── README.md                    # This file - documentation index
-├── setup-mac.md                 # macOS setup guide
-├── setup-ubuntu.md              # Ubuntu setup guide
-├── setup-docker.md              # Docker setup guide
+├── setup-mac-native.md          # macOS native setup guide
+├── setup-mac-docker.md          # macOS Docker setup guide
+├── setup-ubuntu-native.md       # Ubuntu native setup guide
+├── setup-ubuntu-docker.md       # Ubuntu Docker setup guide
 ├── environment-setup.md         # Environment variables reference
 ├── migration-workflow.md        # Alembic migration workflow reference
 ├── troubleshooting.md           # Troubleshooting guide
@@ -321,6 +318,7 @@ documentation/
 ---
 
 **Ready to start?** Choose your setup guide:
-- [macOS Setup](setup-mac.md)
-- [Ubuntu Setup](setup-ubuntu.md)
-- [Docker Setup](setup-docker.md)
+- [macOS — Native](setup-mac-native.md)
+- [macOS — Docker](setup-mac-docker.md)
+- [Ubuntu — Native](setup-ubuntu-native.md)
+- [Ubuntu — Docker](setup-ubuntu-docker.md)

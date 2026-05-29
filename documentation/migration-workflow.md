@@ -52,19 +52,27 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env — at minimum set DATABASE_URL and JWT_SECRET_KEY
 
-# 5. Create the PostgreSQL database (one time)
-createdb evidence_analysis
-# Or, if using a connection string with an existing server, just ensure the DB exists
+# 5. Create the database and apply all migrations (one-command)
+python scripts/create_dev_db.py
+# This reads DATABASE_URL from .env, creates the database if it does not
+# exist, and runs `alembic upgrade head` automatically.
 
-# 6. Apply all migrations
-alembic upgrade head
-
-# 7. Start the application
+# 6. Start the application
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-After step 7, the application seeds default users and the default CSV source
+After step 6, the application seeds default users and the default CSV source
 type automatically on first startup. No manual SQL or seed scripts are needed.
+
+If you prefer to run the steps manually instead of using the script:
+
+```bash
+# Create the database (the name must match DATABASE_URL in your .env)
+createdb -U postgres -h localhost evidence_analysis
+
+# Apply all migrations
+alembic upgrade head
+```
 
 ### Expected tables after `alembic upgrade head`
 

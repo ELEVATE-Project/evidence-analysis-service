@@ -35,4 +35,4 @@ python-dotenv==1.0.0
 httpx==0.25.2
 
 # Queue Processing
-celery==5.4.0
+celery==5.5.0

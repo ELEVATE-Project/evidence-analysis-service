@@ -156,17 +156,68 @@ sudo systemctl restart postgresql
 
 ### Database Does Not Exist
 
-**Problem**: `database "evidence_analysis" does not exist`
+**Problem**: `FATAL: database "..." does not exist`
+
+This is the most common first-time setup failure. It means the database name in `DATABASE_URL` does not exist in your local PostgreSQL server.
+
+**Step 1: Find out what DB name your `.env` expects**
 
 ```bash
-# Create database
-createdb -U postgres evidence_analysis
-
-# Or in psql:
-sudo -u postgres psql
-CREATE DATABASE evidence_analysis;
-\q
+grep DATABASE_URL .env
+# Example: DATABASE_URL=postgresql://postgres:postgres@localhost:5432/evidence_analysis
+#                                                                        ^^^^^^^^^^^^^^^^
+#                                                    This is the database that must exist.
 ```
+
+**Step 2: Create that database**
+
+```bash
+# Replace evidence_analysis with whatever name appeared in your .env
+createdb -U postgres -h localhost evidence_analysis
+
+# Ubuntu — if createdb is not in PATH:
+sudo -u postgres psql -c "CREATE DATABASE evidence_analysis;"
+
+# Verify
+psql -U postgres -h localhost -l | grep evidence_analysis
+```
+
+**Step 3: Run migrations and start**
+
+```bash
+alembic upgrade head
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+---
+
+### `phase1_db` Does Not Exist (Wrong DB Name in `.env`)
+
+**Problem**: `FATAL: database "phase1_db" does not exist`
+
+**Cause**: The `.env` file was copied from a teammate's machine. Their `DATABASE_URL` contains `phase1_db` — a personal database name used on their machine — rather than the project-standard `evidence_analysis`.
+
+**Fix**:
+
+```bash
+# 1. Open .env and find DATABASE_URL
+nano .env
+
+# 2. Change the database name at the end of the URL
+# FROM: DATABASE_URL=postgresql://postgres:postgres@localhost:5432/phase1_db
+# TO:   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/evidence_analysis
+
+# 3. Create the database
+createdb -U postgres -h localhost evidence_analysis
+
+# 4. Run migrations
+alembic upgrade head
+
+# 5. Start the app
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
+```
+
+**Prevention**: Always start from `.env.example` (`cp .env.example .env`), not from a teammate's file. The `.env` file is gitignored for this reason — it contains machine-specific paths and credentials.
 
 ### Migration Errors
 
@@ -834,6 +885,43 @@ pip install -r requirements.txt
 **Fix**:
 ```bash
 alembic upgrade head
+```
+
+### "DATABASE DOES NOT EXIST" at startup
+
+**Cause**: The `DATABASE_URL` in `.env` references a database that does not exist. The application now prints a structured error block with the exact fix.
+
+**Fix**:
+```bash
+# The error output itself tells you exactly what to run:
+#   createdb -U postgres <dbname>
+#   alembic upgrade head
+#
+# If the DB name is phase1_db (teammate's name), also update DATABASE_URL in .env
+# to point to the database you created (e.g., evidence_analysis).
+```
+
+See the "Database Does Not Exist" and "`phase1_db` Does Not Exist" sections above.
+
+### "Database has no Alembic migrations applied"
+
+**Cause**: The database exists but `alembic upgrade head` was never run.
+
+**Fix**:
+```bash
+alembic upgrade head
+```
+
+### "Database schema is out of date"
+
+**Cause**: New migrations were added to the codebase after the database was last migrated.
+
+**Fix**:
+```bash
+alembic upgrade head
+# Check what was applied:
+alembic current
+alembic history --verbose
 ```
 
 ### "401 Unauthorized"

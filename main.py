@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
 
+import sqlalchemy as sa
 from alembic.config import Config as AlembicConfig
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
@@ -26,6 +27,47 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+
+def _assert_db_exists() -> None:
+    """Fail fast with an actionable message if the database itself does not exist.
+
+    psycopg2 raises OperationalError with FATAL: database "X" does not exist
+    when the DB is missing. We intercept that specific case and surface a clear
+    setup instruction rather than a raw driver traceback.
+    """
+    import re
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text("SELECT 1"))
+    except OperationalError as exc:
+        msg = str(exc.orig) if exc.orig else str(exc)
+        # psycopg2: 'FATAL:  database "X" does not exist'
+        db_missing = "does not exist" in msg and "database" in msg.lower()
+        if db_missing:
+            # Extract the DB name from DATABASE_URL for the hint
+            db_name_match = re.search(r"/([^/]+)$", str(engine.url))
+            db_name = db_name_match.group(1) if db_name_match else "<dbname>"
+            raise RuntimeError(
+                f"\n\n"
+                f"  DATABASE DOES NOT EXIST: '{db_name}'\n"
+                f"\n"
+                f"  The database named in DATABASE_URL does not exist on this PostgreSQL server.\n"
+                f"  You must create it before running migrations or starting the application.\n"
+                f"\n"
+                f"  Fix:\n"
+                f"    createdb -U postgres {db_name}\n"
+                f"  Or in psql:\n"
+                f"    sudo -u postgres psql -c \"CREATE DATABASE {db_name};\"\n"
+                f"\n"
+                f"  Then run migrations:\n"
+                f"    alembic upgrade head\n"
+                f"\n"
+                f"  Current DATABASE_URL: {engine.url!r}\n"
+            ) from None
+        raise
 
 
 def _assert_migrations_current() -> None:
@@ -61,6 +103,10 @@ def _assert_migrations_current() -> None:
 async def lifespan(app: FastAPI):
     """Initialize resources on startup and cleanup on shutdown"""
     logger.info("Starting Evidence Analysis Service...")
+
+    # Check the database exists before attempting Alembic state check.
+    # Gives a clear, actionable error if DATABASE_URL points to a missing database.
+    _assert_db_exists()
 
     # Verify migrations are at head before doing anything else.
     # Raises RuntimeError with a clear message if the database is behind.
