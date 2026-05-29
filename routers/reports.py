@@ -3,14 +3,14 @@ Reports Router
 Handles report generation, viewing, and export
 """
 import io
-from typing import Literal
+from typing import Literal, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response, StreamingResponse
 
 from core.dependencies import ReportServiceDep
-from models.schemas import HTTPErrorResponse, ReportDownloadResponse, ReportResponse, UserResponse
+from models.schemas import HTTPErrorResponse, ReportDataPageResponse, ReportDownloadResponse, ReportResponse, UserResponse
 from services.auth_service import AuthService
 from services.report_service import (
     ReportCsvConflictError,
@@ -125,6 +125,52 @@ async def get_report_csv(
         ) from exc
 
     return Response(content=csv_content, media_type="text/csv; charset=utf-8")
+
+
+@router.get(
+    "/{execution_id}/data",
+    response_model=ReportDataPageResponse,
+    responses={
+        404: {"model": HTTPErrorResponse, "description": "Report not found"},
+        409: {"model": HTTPErrorResponse, "description": "Execution not completed"},
+    },
+)
+async def get_report_data_page(
+    execution_id: UUID,
+    report_service: ReportServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(1000, ge=1, le=5000),
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
+    block: Optional[str] = Query(None),
+    school: Optional[str] = Query(None),
+    relevance: Optional[str] = Query(None),
+):
+    """
+    Paginated report data with pre-aggregated summary statistics.
+    Replaces the full-CSV download for efficient large-dataset rendering.
+    """
+    try:
+        return await report_service.get_report_data_page(
+            execution_id=execution_id,
+            user_id=current_user.id,
+            page=page,
+            page_size=page_size,
+            filters={
+                "state": state or "",
+                "district": district or "",
+                "block": block or "",
+                "school": school or "",
+                "relevance": relevance or "",
+            },
+        )
+    except ReportCsvNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ReportCsvConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ReportCsvValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
 
 @router.get(

@@ -277,7 +277,7 @@ async def list_executions(
 ):
     """List executions with pagination and optional server-side filters."""
     try:
-        return execution_service.list_executions(
+        return await execution_service.list_executions(
             user_id=current_user.id,
             page=page,
             page_size=page_size,

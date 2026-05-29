@@ -334,6 +334,17 @@ class ReportDownloadResponse(BaseModel):
     expires_in_seconds: int
 
 
+class ReportDataPageResponse(BaseModel):
+    """Paginated report data response — avoids shipping the full CSV to the browser."""
+    page: int
+    page_size: int
+    total_filtered: int
+    total_all: int
+    rows: list[Dict[str, str]]
+    headers: list[str]
+    summary: Optional[Dict[str, Any]] = None  # populated on every request
+
+
 # ============ Status Schemas ============
 
 class StatusResponse(BaseModel):

@@ -147,6 +147,17 @@ CREATE INDEX IF NOT EXISTS idx_executions_notification ON executions(notificatio
 CREATE INDEX IF NOT EXISTS idx_executions_tenant ON executions(tenant_code);
 CREATE INDEX IF NOT EXISTS idx_executions_org ON executions(organization_code);
 
+-- Composite indexes for list_executions() query patterns (user + sort/filter columns)
+CREATE INDEX IF NOT EXISTS idx_executions_user_created
+    ON executions(created_by, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_executions_user_status_created
+    ON executions(created_by, status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_executions_user_state_created
+    ON executions(created_by, state, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_executions_in_progress
+    ON executions(created_by, created_at DESC)
+    WHERE status IN ('in_progress', 'queued', 'running');
+
 
 
 -- ============================================

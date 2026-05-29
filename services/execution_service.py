@@ -2,6 +2,7 @@
 Execution Service
 Handles execution business logic, file management, and background processing
 """
+import asyncio
 import csv
 import io
 import json
@@ -85,12 +86,16 @@ class ExecutionService:
         return float(value)
 
     @staticmethod
-    def _to_execution_response(execution: Execution) -> ExecutionResponse:
+    def _to_execution_response(execution: Execution, checkpoint_override: Optional[dict] = None) -> ExecutionResponse:
         """Build API response with safe fallbacks for nullable legacy fields."""
         # For in-progress executions, try to get real-time progress from checkpoint file
         processed_rows = execution.processed_rows or 0
         if (execution.status or "").strip().lower() == "in_progress":
-            checkpoint_progress = ExecutionService._read_processor_checkpoint_file(execution.id)
+            # Use pre-fetched checkpoint data when available (avoids per-row file I/O)
+            if checkpoint_override is not None:
+                checkpoint_progress = checkpoint_override
+            else:
+                checkpoint_progress = ExecutionService._read_processor_checkpoint_file(execution.id)
             checkpoint_processed = checkpoint_progress.get('total_processed', 0)
             # Use checkpoint value if it's more recent (higher) than DB value
             if checkpoint_processed > processed_rows:
@@ -789,6 +794,13 @@ class ExecutionService:
         except Exception as e:
             logger.debug(f"Could not read processor checkpoint for execution {execution_id}: {e}")
             return {}
+
+    @staticmethod
+    async def _read_processor_checkpoint_file_async(execution_id: UUID) -> dict[str, Any]:
+        """Non-blocking wrapper: offloads sync file I/O to a thread pool."""
+        return await asyncio.to_thread(
+            ExecutionService._read_processor_checkpoint_file, execution_id
+        )
 
     @staticmethod
     def _checkpoint(execution: Execution) -> dict[str, Any]:
@@ -1934,7 +1946,7 @@ class ExecutionService:
             message="Email notification sent successfully.",
         )
 
-    def list_executions(
+    async def list_executions(
         self,
         user_id: str,
         page: int = 1,
@@ -1995,11 +2007,18 @@ class ExecutionService:
             if normalized_search_query:
                 query = query.filter(Execution.name.ilike(f"%{normalized_search_query}%"))
 
-            total = query.count()
-
-            executions = query.order_by(Execution.created_at.desc()).offset(
-                (page - 1) * page_size
-            ).limit(page_size).all()
+            # Single DB round-trip: window function returns count alongside paginated rows
+            count_col = func.count().over().label("total_count")
+            paginated = (
+                query
+                .add_columns(count_col)
+                .order_by(Execution.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+            total = paginated[0].total_count if paginated else 0
+            executions = [row[0] for row in paginated]
         except SQLAlchemyError as exc:
             logger.exception("Failed to query executions")
             raise HTTPException(
@@ -2007,10 +2026,25 @@ class ExecutionService:
                 detail="Failed to fetch executions. Please verify database schema/configuration.",
             ) from exc
 
+        # Fetch checkpoint files for all in-progress executions concurrently (non-blocking)
+        in_progress_execs = [e for e in executions if (e.status or "").strip().lower() == "in_progress"]
+        checkpoint_map: dict[str, dict] = {}
+        if in_progress_execs:
+            checkpoint_results = await asyncio.gather(
+                *[ExecutionService._read_processor_checkpoint_file_async(e.id) for e in in_progress_execs],
+                return_exceptions=True,
+            )
+            for exec_obj, result in zip(in_progress_execs, checkpoint_results):
+                if not isinstance(result, Exception):
+                    checkpoint_map[str(exec_obj.id)] = result
+
         items: list[ExecutionResponse] = []
         for execution in executions:
             try:
-                items.append(self._to_execution_response(execution))
+                items.append(self._to_execution_response(
+                    execution,
+                    checkpoint_override=checkpoint_map.get(str(execution.id)),
+                ))
             except ValidationError:
                 logger.exception("Skipping malformed execution row: %s", getattr(execution, "id", "unknown"))
 
