@@ -353,7 +353,7 @@ redis-cli ping && echo "✓ Redis OK"
 cd ~/Projects/evidence-analysis-service-p1
 
 source venv/bin/activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --reload --host 0.0.0.0 --port 6002
 ```
 
 Expected output:
@@ -364,6 +364,10 @@ INFO  Default seed data applied
 INFO  Background worker initialized
 INFO  Application startup complete.
 ```
+
+> **What the Storage Bootstrap does:** On every startup the application validates cloud storage connectivity (write + read + sign a probe object), then uploads the two bundled sample CSV files (`sample_input.csv` and `sample_criteria.csv`) from `public/sample-csv/projects/` to your cloud bucket at `projects/sample_input.csv` and `projects/sample_criteria.csv`. It then records those cloud paths in the `csv_source_types` table. This is fully automatic — no manual upload is needed.
+>
+> **Prerequisite:** Cloud storage credentials (`CLOUD_STORAGE_PROVIDER`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_ACCOUNTNAME`, `CLOUD_STORAGE_SECRET`) must be correctly set in `.env` before starting the backend. If any credential is wrong or missing the bootstrap will fail and the application will not start. See [Storage Bootstrap Issues](#storage-bootstrap-issues) in Troubleshooting.
 
 Backend available at: http://localhost:8000
 

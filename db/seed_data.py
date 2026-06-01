@@ -156,8 +156,6 @@ def seed_default_csv_source_types(db: Session) -> None:
             "optional_columns": [],
         },
         default_thresholds={"relevant": 0.7, "partial": 0.5},
-        sample_input_file_url="projects/sample_input.csv",
-        sample_criteria_file_url="projects/sample_criteria.csv",
         is_active=True,
         created_by=admin_user_id,
         updated_by=admin_user_id,

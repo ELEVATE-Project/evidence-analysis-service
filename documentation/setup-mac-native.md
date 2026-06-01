@@ -326,6 +326,10 @@ INFO  Background worker initialized
 INFO  Application startup complete.
 ```
 
+> **What the Storage Bootstrap does:** On every startup the application validates cloud storage connectivity (write + read + sign a probe object), then uploads the two bundled sample CSV files (`sample_input.csv` and `sample_criteria.csv`) from `public/sample-csv/projects/` to your cloud bucket at `projects/sample_input.csv` and `projects/sample_criteria.csv`. It then records those cloud paths in the `csv_source_types` table. This is fully automatic — no manual upload is needed.
+>
+> **Prerequisite:** Cloud storage credentials (`CLOUD_STORAGE_PROVIDER`, `CLOUD_STORAGE_BUCKETNAME`, `CLOUD_STORAGE_ACCOUNTNAME`, `CLOUD_STORAGE_SECRET`) must be correctly set in `.env` before starting the backend. If any credential is wrong or missing the bootstrap will fail and the application will not start. See [Storage Bootstrap Issues](#storage-bootstrap-issues) in Troubleshooting.
+
 Backend available at: http://localhost:8000
 
 ### 6.3 Start Celery Worker

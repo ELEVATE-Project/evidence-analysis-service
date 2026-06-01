@@ -5,18 +5,23 @@ Called from two places with identical behaviour:
   1. main.py lifespan      → every native / uvicorn / systemd startup
   2. scripts/upload_sample_csvs.py → Docker pre-start step before uvicorn
 
-Both call ``run_bootstrap(db)``, which is fully idempotent and safe to
-invoke on every deployment or restart.
+Both call ``run_bootstrap(db)``, which is safe to invoke on every restart.
 
 Startup sequence enforced by run_bootstrap:
   1. Initialise StorageService (validates provider + credentials at SDK level)
-  2. run_deep_validation():
+  2. run_deep_validation() — runs on EVERY startup:
        a. write a tiny probe object
        b. read it back via get_file_metadata
        c. generate a signed download URL
        d. delete the probe (best-effort)
-  3. Upload sample CSVs and sync their cloud paths in the database
-  4. Verify each sample CSV can generate a signed download URL
+     This catches rotated credentials, lost bucket permissions, or provider
+     outages at startup rather than silently at runtime.
+  3. Upload sample CSVs — runs only if not already uploaded (DB field is NULL):
+       a. upload file to cloud bucket
+       b. record cloud path in csv_source_types table
+       c. verify a signed download URL can be generated
+     Once both sample_input_file_url and sample_criteria_file_url are set in
+     the database, subsequent startups skip the upload entirely.
 """
 from __future__ import annotations
 
@@ -66,9 +71,11 @@ def _resolve_scope() -> tuple[str, str]:
 
 
 async def _upload_sample_csvs(db: Session, storage: StorageService) -> None:
-    """Upload both sample CSVs, sync DB paths, and verify signed URL generation.
+    """Upload sample CSVs that have not been uploaded yet, sync DB paths, and verify signing.
 
-    Idempotent — re-uploading an existing object is safe for both GCP and AWS.
+    Each file is skipped individually if its DB field (sample_input_file_url /
+    sample_criteria_file_url) is already populated, meaning it was successfully
+    uploaded in a previous startup.
     """
     tenant_code, organization_code = _resolve_scope()
 
@@ -102,6 +109,11 @@ async def _upload_sample_csvs(db: Session, storage: StorageService) -> None:
         cloud_path: str = spec["cloud_path"]
         db_field: str = spec["db_field"]
         label: str = spec["label"]
+
+        # Skip if this file was already uploaded in a previous startup.
+        if getattr(record, db_field, None):
+            logger.info("[Bootstrap] %-20s already uploaded — skipping.", label)
+            continue
 
         # Verify the source file exists in the repository
         if not local_path.exists():
