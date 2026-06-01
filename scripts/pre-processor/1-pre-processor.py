@@ -261,6 +261,10 @@ def normalize_task_name(name):
     s = s.rstrip("'.\" ").strip()
     # Collapse internal whitespace
     s = re.sub(r'\s+', ' ', s)
+    # NFC normalization: critical for Devanagari text where the same glyph can be
+    # stored as precomposed (NFC) or decomposed (NFD) codepoints across files.
+    import unicodedata
+    s = unicodedata.normalize("NFC", s)
     return s.lower()
 
 # === Helper function to determine evidence type ===

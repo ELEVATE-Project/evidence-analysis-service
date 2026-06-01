@@ -57,9 +57,6 @@ class Settings(BaseSettings):
     CLOUD_STORAGE_SECRET: str = ""
     CLOUD_STORAGE_BUCKET_TYPE: str = "private"
     
-    # Local Storage
-    LOCAL_STORAGE_PATH: str = "./uploads"
-    
     # AI Models (Gemini)
     GEMINI_API_KEY_1: str = ""
     GEMINI_API_KEY_2: str = ""
@@ -95,6 +92,7 @@ class Settings(BaseSettings):
     CELERY_MAX_RETRIES: int = 3
     CELERY_RETRY_BACKOFF_SECONDS: int = 30
     CELERY_WORKER_CONCURRENCY: int = 2
+    CELERY_WORKER_POOL: str = "threads"  # "threads" avoids macOS fork-safety SIGABRT; use "prefork" on Linux
 
     # Execution workspace + script runtime
     EXECUTION_WORKSPACE_ROOT: str = "/tmp/evidence_analysis/executions"
@@ -173,7 +171,3 @@ class Settings(BaseSettings):
 # Initialize settings
 settings = Settings()
 validate_environment(settings=settings, env_file_path=ENV_FILE_PATH)
-
-# Create local storage directory if using local storage
-if (settings.CLOUD_STORAGE_PROVIDER or "").strip().lower() == "local":
-    Path(settings.LOCAL_STORAGE_PATH).mkdir(parents=True, exist_ok=True)
