@@ -182,10 +182,11 @@ sudo -u postgres psql -c "CREATE DATABASE evidence_analysis;"
 psql -U postgres -h localhost -l | grep evidence_analysis
 ```
 
-**Step 3: Run migrations and start**
+**Step 3: Run migrations, seed data, and start**
 
 ```bash
 alembic upgrade head
+python db/seed_data.py
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -213,7 +214,10 @@ createdb -U postgres -h localhost evidence_analysis
 # 4. Run migrations
 alembic upgrade head
 
-# 5. Start the app
+# 5. Seed default data
+python db/seed_data.py
+
+# 6. Start the app
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -366,7 +370,7 @@ client_max_body_size 200M;
 
 # 1. API endpoint unreachable
 # Verify backend is running
-curl http://localhost:8000/health
+curl http://localhost:6002/health
 
 # 2. Environment variables missing
 cat .env
@@ -388,7 +392,7 @@ npm run build
 API_ENDPOINT=http://localhost:8000
 
 # Verify backend is running
-curl http://localhost:8000/health
+curl http://localhost:6002/health
 
 # Check CORS configuration in backend .env
 CORS_ORIGINS=["http://localhost:5173"]
@@ -864,7 +868,7 @@ brew services list
 
 # Verify connection details
 telnet localhost 5432
-curl http://localhost:8000/health
+curl http://localhost:6002/health
 ```
 
 ### "ModuleNotFoundError"
@@ -1012,7 +1016,7 @@ curl -s http://localhost:15672/api/overview -u guest:guest > /dev/null && echo "
 
 # Check Backend
 echo -n "Backend API: "
-curl -s http://localhost:8000/health > /dev/null && echo "✅" || echo "❌"
+curl -s http://localhost:6002/health > /dev/null && echo "✅" || echo "❌"
 
 # Check Frontend
 echo -n "Frontend: "

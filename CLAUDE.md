@@ -319,7 +319,7 @@ celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2
 
 ```bash
 # 1. Login
-curl -X POST http://localhost:8000/api/v1/auth/login \
+curl -X POST http://localhost:6002/api/v1/auth/login \
   -d "username=admin&password=admin123"
 
 # 2. Create execution

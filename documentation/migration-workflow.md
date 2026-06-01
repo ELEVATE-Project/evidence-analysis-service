@@ -57,12 +57,17 @@ python scripts/create_dev_db.py
 # This reads DATABASE_URL from .env, creates the database if it does not
 # exist, and runs `alembic upgrade head` automatically.
 
-# 6. Start the application
+# 6. Seed default users and CSV source type configuration
+python db/seed_data.py
+
+# 7. Start the application
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-After step 6, the application seeds default users and the default CSV source
-type automatically on first startup. No manual SQL or seed scripts are needed.
+Step 6 creates the three default users and the `project_report` CSV source type.
+The application also seeds on startup automatically, but that path requires cloud
+storage to be fully configured first — running `python db/seed_data.py` explicitly
+ensures seed data is in place regardless of storage status.
 
 If you prefer to run the steps manually instead of using the script:
 
@@ -72,6 +77,9 @@ createdb -U postgres -h localhost evidence_analysis
 
 # Apply all migrations
 alembic upgrade head
+
+# Seed default data
+python db/seed_data.py
 ```
 
 ### Expected tables after `alembic upgrade head`
@@ -211,7 +219,7 @@ alembic history --indicate-current | grep -v "(head)"
 | `Base.metadata.create_all()` in application code | Bypasses version history; causes drift |
 | Running `python db/init_db.py` | Deprecated; same problem as above |
 | Manual `CREATE TABLE` / `ALTER TABLE` in psql | Not tracked by Alembic |
-| Running `python db/seed_data.py` directly for schema | Seeds data only, not schema |
+| Using `python db/seed_data.py` for schema changes | It inserts rows only — schema changes require an Alembic migration |
 | Environment-specific migration branches | Causes divergence between environments |
 
 ---

@@ -316,6 +316,20 @@ createdb -U postgres -h localhost evidence_analysis
 alembic upgrade head
 ```
 
+### 5.3 Seed Default Data
+
+```bash
+# Seed default users and CSV source type configuration
+python db/seed_data.py
+```
+
+This script:
+- Creates the three default users (`admin`, `program_designer`, `analyst`) with bcrypt-hashed passwords
+- Creates the default `project_report` CSV source type configuration
+- Is safe to re-run (idempotent — skips records that already exist)
+
+> **Why this is a separate step:** The application also seeds on startup automatically (via FastAPI lifespan), but that requires cloud storage to be fully configured first. Running the seed script here ensures your database has the required data regardless of cloud storage status, and lets you verify the database state before starting the application.
+
 ---
 
 ## Step 6: Backend Service Setup
@@ -546,7 +560,7 @@ pm2 delete all
 ### 9.1 API Health Check
 
 ```bash
-curl http://localhost:8000/health
+curl http://localhost:6002/health
 # Expected: {"status":"healthy","version":"1.0.0"}
 ```
 
@@ -578,7 +592,7 @@ echo "=== RabbitMQ ==="
 sudo systemctl status rabbitmq-server | grep -q "active (running)" && echo "✓ RabbitMQ OK"
 
 echo "=== Backend API ==="
-curl http://localhost:8000/health | jq . && echo "✓ API OK"
+curl http://localhost:6002/health | jq . && echo "✓ API OK"
 
 echo "=== Frontend ==="
 curl -s http://localhost:5173 | head -c 100 && echo "✓ Frontend OK"
@@ -752,18 +766,21 @@ pm2 restart celery-worker
 
 **Users table empty / login fails**
 ```bash
-# Seed data runs on first app startup
-# Restart the backend:
+# Run the seed script directly — this is the recommended fix:
 source venv/bin/activate
-uvicorn main:app --reload --host 0.0.0.0 --port 8000
+python db/seed_data.py
 ```
+
+The application also seeds on startup, but only after cloud storage validation succeeds.
+If cloud storage is not yet configured, the app may fail to start before seeding occurs.
+Running `python db/seed_data.py` seeds the database independently of cloud storage.
 
 ---
 
 ## Next Steps
 
 1. **Environment Variables**: Complete all configuration in `.env`
-2. **API Documentation**: Visit http://localhost:8000/docs (Swagger UI)
+2. **API Documentation**: Visit http://localhost:6002/docs (Swagger UI)
 3. **Frontend Development**: See [Frontend Setup Guide](../frontend-setup.md)
 4. **Production Deployment**: See [Production Deployment Guide](../production-deployment.md)
 

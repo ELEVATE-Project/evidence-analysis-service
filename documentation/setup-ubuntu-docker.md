@@ -96,7 +96,7 @@ docker compose logs -f celery-worker
 docker compose ps
 
 # Backend API
-curl http://localhost:8000/health
+curl http://localhost:6002/health
 # Expected: {"status":"healthy","version":"1.0.0"}
 
 # Database tables
@@ -111,7 +111,7 @@ Open http://localhost:5173 and login with `admin` / `admin123`.
 |---------|-----|
 | Frontend | http://localhost:5173 |
 | Backend API | http://localhost:8000 |
-| API Docs | http://localhost:8000/docs |
+| API Docs | http://localhost:6002/docs |
 | RabbitMQ UI | http://localhost:15672 (guest/guest) |
 
 ---
@@ -190,6 +190,24 @@ ports:
 sudo usermod -aG docker $USER
 newgrp docker
 ```
+
+### Users / seed data missing (login fails)
+
+Default users (`admin`, `program_designer`, `analyst`) and the CSV source type are seeded automatically when the backend container starts. If login fails or the `users` table is empty, the backend likely failed to start cleanly (often due to missing cloud storage credentials).
+
+**Step 1: Check why the backend failed**
+```bash
+docker compose logs backend
+```
+
+**Step 2: Fix any startup error** (usually a missing env var — see [Configure Environment](#step-3-configure-environment))
+
+**Step 3: Re-seed manually once the container is running**
+```bash
+docker compose exec backend python db/seed_data.py
+```
+
+This is idempotent — safe to run even if some seed records already exist.
 
 ### Rebuild after dependency changes
 ```bash

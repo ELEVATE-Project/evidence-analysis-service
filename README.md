@@ -27,7 +27,7 @@ AI-powered platform for processing and analyzing CSV-based educational evidence 
 ```
 ┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
 │  React Frontend │─────▶│  FastAPI Backend │─────▶│   PostgreSQL    │
-│   (Port 5173)   │◀─────│   (Port 8000)    │◀─────│   (Port 5432)   │
+│   (Port 5173)   │◀─────│   (Port 6002)    │◀─────│   (Port 5432)   │
 └─────────────────┘      └──────────────────┘      └─────────────────┘
                                   │
                     ┌─────────────┼─────────────┐
@@ -71,9 +71,9 @@ AI-powered platform for processing and analyzing CSV-based educational evidence 
 
 ## API Documentation
 
-- **Swagger UI**: http://localhost:8000/docs — interactive API explorer
-- **ReDoc**: http://localhost:8000/redoc — alternative reference
-- **OpenAPI JSON**: http://localhost:8000/openapi.json
+- **Swagger UI**: http://localhost:6002/docs — interactive API explorer
+- **ReDoc**: http://localhost:6002/redoc — alternative reference
+- **OpenAPI JSON**: http://localhost:6002/openapi.json
 
 <details>
 <summary>Key API Endpoints</summary>
@@ -96,12 +96,12 @@ AI-powered platform for processing and analyzing CSV-based educational evidence 
 **Example**:
 ```bash
 # Login
-curl -X POST http://localhost:8000/api/v1/auth/login \
+curl -X POST http://localhost:6002/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "admin123"}'
 
 # List executions
-curl http://localhost:8000/api/v1/executions \
+curl http://localhost:6002/api/v1/executions \
   -H "Authorization: Bearer <token>"
 ```
 
@@ -115,7 +115,7 @@ curl http://localhost:8000/api/v1/executions \
 |---------|------|-----|-------------|
 | Frontend | 5173 | http://localhost:5173 | admin / admin123 |
 | Backend API | 8000 | http://localhost:8000 | — |
-| API Docs | 8000 | http://localhost:8000/docs | — |
+| API Docs | 8000 | http://localhost:6002/docs | — |
 | PostgreSQL | 5432 | localhost:5432 | postgres / postgres |
 | RabbitMQ | 5672 | AMQP | guest / guest |
 | RabbitMQ UI | 15672 | http://localhost:15672 | guest / guest |
