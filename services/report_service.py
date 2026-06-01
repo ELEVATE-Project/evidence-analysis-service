@@ -360,8 +360,17 @@ class ReportService:
         def parse_dt(date_str: str) -> Optional[datetime]:
             if not date_str:
                 return None
-            for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ",
-                        "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
+            # fromisoformat handles +05:30 / -05:00 timezone offsets (Python 3.7+).
+            # Normalize trailing Z → +00:00 for Python < 3.11 compatibility.
+            s = date_str.strip()
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            try:
+                return datetime.fromisoformat(s).replace(tzinfo=None)
+            except ValueError:
+                pass
+            for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+                        "%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y"):
                 try:
                     return datetime.strptime(date_str, fmt)
                 except ValueError:
