@@ -117,7 +117,7 @@ fi
 sleep 3
 
 # Verify backend
-curl -s http://localhost:8000/health > /dev/null 2>&1 && print_status "Backend is ready" || print_warning "Backend may need more time to start"
+curl -s http://localhost:6002/health > /dev/null 2>&1 && print_status "Backend is ready" || print_warning "Backend may need more time to start"
 
 echo ""
 
@@ -168,7 +168,7 @@ echo "  ✓ PostgreSQL:     localhost:5432"
 echo "  ✓ RabbitMQ:       localhost:5672"
 echo "  ✓ RabbitMQ UI:    http://localhost:15672 (guest/guest)"
 echo "  ✓ Backend API:    http://localhost:8000"
-echo "  ✓ API Docs:       http://localhost:8000/docs"
+echo "  ✓ API Docs:       http://localhost:6002/docs"
 echo "  ✓ Celery Worker:  Running"
 if [ -d "$FRONTEND_DIR" ]; then
 echo "  ✓ Frontend:       http://localhost:5173"

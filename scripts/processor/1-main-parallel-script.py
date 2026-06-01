@@ -702,11 +702,6 @@ GEMINI_TOKENS = get_gemini_tokens_from_env()
 current_token_index = 0
 
 def _build_generation_config():
-    """
-    Keep generation config compatible with pinned google-generativeai==0.3.1.
-    Newer response schema keys (response_mime_type/response_schema) are not
-    supported in this SDK version and fail every request.
-    """
     return {
         "temperature": 0.0,
     }
@@ -2530,9 +2525,9 @@ if __name__ == "__main__":
         logging.info("="*80)
         
         logging.info(f"Total Rows Processed (sum of attempts): {total_rows_processed_all}")
-        logging.info(f"Total API Calls (image rows attempted): {total_api_calls_all}")
-        logging.info(f"  - ✅ Success: {total_api_success_all}")
-        logging.info(f"  - ❌ Failed: {total_api_failure_all}")
+        logging.info(f"Total Image Rows Processed: {total_api_calls_all}")
+        logging.info(f"  - ✅ Relevant / Partially Relevant: {total_api_success_all}")
+        logging.info(f"  - ⬜ Irrelevant: {total_api_failure_all}")
         
         # Checkpoint statistics
         if RESUME_FROM_CHECKPOINT:
@@ -2602,18 +2597,18 @@ if __name__ == "__main__":
         logging.info(f"  - Total Tasks: {total_standard_count + total_user_owned_count}")
 
         if all_failed_lists:
-            logging.warning(f"List of Failed API Calls ({len(all_failed_lists)}):")
+            logging.warning(f"List of Irrelevant Evidence URLs ({len(all_failed_lists)}):")
             for item in all_failed_lists:
                 logging.warning(f"  - {item}")
         else:
-            logging.info("✅ No API call failures recorded.")
+            logging.info("✅ No irrelevant evidence recorded.")
 
         if all_success_lists:
-            logging.info(f"List of Successful API Calls ({len(all_success_lists)}):")
+            logging.info(f"List of Relevant / Partially Relevant Evidence URLs ({len(all_success_lists)}):")
             for item in all_success_lists:
                 logging.info(f"  - {item}")
         else:
-            logging.info("No API call successes recorded.")
+            logging.info("No relevant evidence recorded.")
             
         logging.info("="*80)
         logging.info("===== 🏁 END OF SUMMARY =====")

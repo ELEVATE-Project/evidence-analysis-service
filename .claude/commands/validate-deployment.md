@@ -19,11 +19,11 @@ psql $DATABASE_URL -c "
 # Expected: both URLs set to "/projects/sample_input.csv" etc.
 
 # 3. Health check
-curl -s http://localhost:8000/health | python -m json.tool
+curl -s http://localhost:6002/health | python -m json.tool
 # Expected: {"status": "healthy"}
 
 # 4. API responds
-curl -X POST http://localhost:8000/api/v1/auth/login \
+curl -X POST http://localhost:6002/api/v1/auth/login \
   -d "username=admin&password=admin123" | python -m json.tool
 # Expected: {"access_token": "...", "token_type": "bearer"}
 
@@ -39,22 +39,22 @@ rabbitmqctl list_queues name messages
 ## Post-Deployment Smoke Test
 
 ```bash
-TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:6002/api/v1/auth/login \
   -d "username=admin&password=admin123" | python -c "import json,sys; print(json.load(sys.stdin)['access_token'])")
 
 # Test config endpoint
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8000/api/v1/config/list?type=project" | python -m json.tool
+  "http://localhost:6002/api/v1/config/list?type=project" | python -m json.tool
 # Expected: {"success": true, "data": [...]}
 
 # Test entities (external service)
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8000/api/v1/states" | python -m json.tool
+  "http://localhost:6002/api/v1/states" | python -m json.tool
 # Expected: {"success": true, "data": [...]} or upstream error with success=false
 
 # Test sample file download URL generation
 curl -s -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:8000/api/v1/config/1/sample/input" | python -m json.tool
+  "http://localhost:6002/api/v1/config/1/sample/input" | python -m json.tool
 # Expected: {"download_url": "https://...", "expires_in_seconds": 600}
 ```
 

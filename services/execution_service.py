@@ -120,6 +120,7 @@ class ExecutionService:
             criterias_file_url=execution.criterias_file_url,
             output_file_url=execution.output_file_url,
             estimated_cost=ExecutionService._to_float(execution.estimated_cost),
+            actual_cost=ExecutionService._to_float(execution.actual_cost),
             estimated_time_seconds=execution.estimated_time_seconds,
             failure_reason=execution.failure_reason,
             average_processing_time=ExecutionService._to_float(execution.average_processing_time),

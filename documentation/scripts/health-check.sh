@@ -83,12 +83,12 @@ echo ""
 
 # Check Backend API
 echo "4. Backend API:"
-if curl -s http://localhost:8000/health > /dev/null 2>&1; then
+if curl -s http://localhost:6002/health > /dev/null 2>&1; then
     print_success "Backend is running"
     ((CHECKS_PASSED++))
     
     # Check API response
-    HEALTH=$(curl -s http://localhost:8000/health)
+    HEALTH=$(curl -s http://localhost:6002/health)
     if echo "$HEALTH" | grep -q "healthy"; then
         print_success "Backend is healthy"
         ((CHECKS_PASSED++))
@@ -152,7 +152,7 @@ if [ $CHECKS_FAILED -eq 0 ]; then
     echo ""
     echo "Endpoints:"
     echo "  • Backend API:    http://localhost:8000"
-    echo "  • API Docs:       http://localhost:8000/docs"
+    echo "  • API Docs:       http://localhost:6002/docs"
     echo "  • Frontend:       http://localhost:5173"
     echo "  • RabbitMQ UI:    http://localhost:15672"
     echo ""
