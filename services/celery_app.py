@@ -32,6 +32,8 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     task_track_started=True,
+    worker_concurrency=settings.CELERY_WORKER_CONCURRENCY,
+    worker_pool=settings.CELERY_WORKER_POOL,
     worker_prefetch_multiplier=1,
     broker_connection_retry_on_startup=True,
     accept_content=["json"],

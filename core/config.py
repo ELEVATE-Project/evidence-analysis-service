@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     CELERY_MAX_RETRIES: int = 3
     CELERY_RETRY_BACKOFF_SECONDS: int = 30
     CELERY_WORKER_CONCURRENCY: int = 2
+    CELERY_WORKER_POOL: str = "threads"  # "threads" avoids macOS fork-safety SIGABRT; use "prefork" on Linux
 
     # Execution workspace + script runtime
     EXECUTION_WORKSPACE_ROOT: str = "/tmp/evidence_analysis/executions"
