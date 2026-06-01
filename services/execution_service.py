@@ -8,6 +8,7 @@ import io
 import json
 import logging
 import re
+import unicodedata
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
@@ -50,6 +51,7 @@ from models.schemas import (
 )
 from services.background_worker import BackgroundWorker
 from services.email_service import EmailService
+from services.gemini_runtime import get_gemini_model_name
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -592,12 +594,35 @@ class ExecutionService:
         self._validate_questions_csv_metadata(headers, source_type)
 
     @staticmethod
-    def _validate_tasks_cross_reference_from_values(input_tasks: set[str], questions_tasks: set[str]) -> None:
-        missing_tasks = questions_tasks - input_tasks
-        if not missing_tasks:
-            return
+    def _normalize_task_string(value: str) -> str:
+        """Normalize a task string for reliable cross-file matching.
 
-        missing_list = list(missing_tasks)[:5]
+        Handles: leading/trailing single/double quotes, extra internal whitespace,
+        Unicode NFC normalization (critical for Hindi/Devanagari text where the
+        same glyph can be encoded as precomposed NFC or decomposed NFD).
+        """
+        # NFC normalization first so subsequent operations work on stable codepoints
+        value = unicodedata.normalize("NFC", value)
+        # Strip surrounding whitespace, then surrounding quote characters
+        value = value.strip().strip("\"'").strip()
+        # Collapse runs of internal whitespace (including NBSP U+00A0, ZWSP, etc.)
+        value = re.sub(r"[\s ​‌‍﻿]+", " ", value).strip()
+        return value
+
+    @staticmethod
+    def _validate_tasks_cross_reference_from_values(input_tasks: set[str], questions_tasks: set[str]) -> None:
+        normalized_input = {ExecutionService._normalize_task_string(t) for t in input_tasks}
+        normalized_questions = {ExecutionService._normalize_task_string(t) for t in questions_tasks}
+        # Build map from normalized → original so error messages show readable originals
+        questions_norm_to_orig = {
+            ExecutionService._normalize_task_string(t): t for t in questions_tasks
+        }
+        missing_normalized = normalized_questions - normalized_input
+        if not missing_normalized:
+            return
+        missing_tasks = {questions_norm_to_orig.get(n, n) for n in missing_normalized}
+
+        missing_list = sorted(missing_tasks)[:5]
         missing_display = ", ".join(missing_list)
         if len(missing_tasks) > 5:
             missing_display += f" (and {len(missing_tasks) - 5} more)"
@@ -941,7 +966,7 @@ class ExecutionService:
             organization_code=organization_code,
             name=request_data.name,
             csv_type_id=source_type.type_key,
-            ai_model_id=request_data.ai_model_id or "gemini-2.5-flash",
+            ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
             state=request_data.state,
@@ -1631,7 +1656,7 @@ class ExecutionService:
             organization_code=organization_code,
             name=request_data.name,
             csv_type_id=source_type.type_key,
-            ai_model_id=request_data.ai_model_id or "gemini-2.5-flash",
+            ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
             state=request_data.state,

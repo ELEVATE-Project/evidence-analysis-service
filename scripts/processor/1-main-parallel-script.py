@@ -10,6 +10,7 @@ import base64
 import typing_extensions as typing
 import time
 import mimetypes
+import unicodedata
 from urllib.request import urlopen
 import re
 import logging
@@ -179,6 +180,14 @@ api_usage_lock = threading.Lock()
 # === API PRICING CONFIGURATION (per 1M tokens) ===
 # Gemini 2.0 Flash pricing as of Jan 2026
 GEMINI_PRICING = {
+    "gemini-2.5-flash-lite": {
+        "input_price_per_million": 0.10,
+        "output_price_per_million": 0.40,
+    },
+    "gemini-2.5-flash": {
+        "input_price_per_million": 0.15,
+        "output_price_per_million": 0.60,
+    },
     "gemini-2.0-flash": {
         "input_price_per_million": 0.075,   # $0.075 per 1M input tokens
         "output_price_per_million": 0.30,   # $0.30 per 1M output tokens
@@ -510,6 +519,9 @@ def _normalize_task_name(name):
     s = s.rstrip("'.\" ").strip()
     # Collapse internal whitespace
     s = re.sub(r'\s+', ' ', s)
+    # NFC normalization: critical for Devanagari text where the same glyph can be
+    # stored as precomposed (NFC) or decomposed (NFD) codepoints across files.
+    s = unicodedata.normalize("NFC", s)
     return s.lower()
 
 

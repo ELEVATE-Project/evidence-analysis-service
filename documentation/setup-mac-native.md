@@ -321,7 +321,7 @@ Backend available at: http://localhost:8000
 cd ~/Projects/evidence-analysis-service-p1
 
 source venv/bin/activate
-celery -A celery_worker.celery_app worker --loglevel=info --concurrency=4
+celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2
 ```
 
 **Concurrency Settings:**
@@ -408,7 +408,7 @@ Expected output:
 Alternatively, use the ecosystem JSON configuration file to start all services together:
 
 ```bash
-pm2 start ~/Projects/evidence-analysis-service-p1/ecosystem.json
+pm2 start ~/Projects/evidence-analysis-service-p1/documentation/ecosystem.json
 ```
 
 ### 8.4 Monitor Services
@@ -624,7 +624,7 @@ pm2 show celery-worker  # Detailed service info
 ```bash
 pm2 monit  # Check memory usage
 # Reduce celery concurrency if high memory:
-# Edit ecosystem.json and change --concurrency value
+# Edit documentation/ecosystem.json and change --concurrency value
 pm2 restart celery-worker
 ```
 

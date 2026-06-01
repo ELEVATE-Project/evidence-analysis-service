@@ -30,6 +30,12 @@ Welcome to the Evidence Analysis System documentation! This folder contains comp
 | [Dockerfile](Dockerfile) | Production-ready Docker image definition |
 | [docker-compose.prod.yml](docker-compose.prod.yml) | Production Docker Compose orchestration |
 
+### Process Management
+
+| File | Description |
+|------|-------------|
+| [ecosystem.json](ecosystem.json) | PM2 configuration for running all services (native setup) |
+
 ### Helper Scripts
 
 Service management scripts are in `documentation/scripts/`. The DB setup script is in the project root `scripts/` directory.

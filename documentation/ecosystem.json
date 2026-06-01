@@ -1,0 +1,60 @@
+{
+  "apps": [
+    {
+      "name": "evidence-backend",
+      "script": "uvicorn",
+      "args": "main:app --host 0.0.0.0 --port 8000",
+      "cwd": "/Users/priyankapradeep/Desktop/workspace/EVIDENCE_ANALYSIS/Phase1/evidence-analysis-service-p1",
+      "interpreter": "/Users/priyankapradeep/Desktop/workspace/EVIDENCE_ANALYSIS/Phase1/evidence-analysis-service-p1/venv/bin/python",
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "instances": 1,
+      "exec_mode": "fork",
+      "autorestart": true,
+      "watch": false,
+      "max_memory_restart": "1G",
+      "error_file": "logs/backend-error.log",
+      "out_file": "logs/backend-out.log",
+      "log_date_format": "YYYY-MM-DD HH:mm:ss Z",
+      "kill_timeout": 5000,
+      "listen_timeout": 10000
+    },
+    {
+      "name": "celery-worker",
+      "script": "celery",
+      "args": "-A celery_worker.celery_app worker --loglevel=info --concurrency=4",
+      "cwd": "/Users/priyankapradeep/Desktop/workspace/EVIDENCE_ANALYSIS/Phase1/evidence-analysis-service-p1",
+      "interpreter": "/Users/priyankapradeep/Desktop/workspace/EVIDENCE_ANALYSIS/Phase1/evidence-analysis-service-p1/venv/bin/python",
+      "env": {
+        "PYTHONUNBUFFERED": "1"
+      },
+      "instances": 1,
+      "exec_mode": "fork",
+      "autorestart": true,
+      "watch": false,
+      "max_memory_restart": "2G",
+      "error_file": "logs/celery-error.log",
+      "out_file": "logs/celery-out.log",
+      "log_date_format": "YYYY-MM-DD HH:mm:ss Z",
+      "kill_timeout": 10000,
+      "listen_timeout": 10000
+    },
+    {
+      "name": "frontend",
+      "script": "npm",
+      "args": "run dev",
+      "cwd": "/Users/priyankapradeep/Desktop/workspace/EVIDENCE_ANALYSIS/Phase1/evidence-analysis-portal-p1",
+      "instances": 1,
+      "exec_mode": "fork",
+      "autorestart": true,
+      "watch": false,
+      "max_memory_restart": "500M",
+      "error_file": "logs/frontend-error.log",
+      "out_file": "logs/frontend-out.log",
+      "log_date_format": "YYYY-MM-DD HH:mm:ss Z",
+      "kill_timeout": 5000,
+      "listen_timeout": 10000
+    }
+  ]
+}
