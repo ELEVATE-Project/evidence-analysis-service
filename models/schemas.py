@@ -2,7 +2,7 @@
 Pydantic Schemas for Request/Response Validation
 """
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from typing import Optional, Dict, Any, Literal
+from typing import List, Optional, Dict, Any, Literal
 from datetime import datetime
 from uuid import UUID
 
@@ -75,8 +75,19 @@ class ExecutionCreate(BaseModel):
     ai_model_id: Optional[str] = None
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
-    state: Optional[str] = None
-    district: Optional[str] = None
+    states: Optional[List[str]] = None
+
+    @field_validator("states", mode="before")
+    @classmethod
+    def validate_states(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            raise ValueError("states must be an array of strings")
+        cleaned = [str(s).strip() for s in v if str(s).strip()]
+        if len(v) > 0 and not cleaned:
+            raise ValueError("states must contain at least one non-empty string")
+        return cleaned or None
 
 
 class FileUploadDescriptor(BaseModel):
@@ -176,14 +187,25 @@ class ExecutionFilePreviewResponse(BaseModel):
 class ExecutionUpdate(BaseModel):
     """Schema for updating an execution"""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
-    state: Optional[str] = None
-    district: Optional[str] = None
+    states: Optional[List[str]] = None
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
     status: Optional[str] = None
     failure_reason: Optional[str] = None
     processed_rows: Optional[int] = None
     total_rows: Optional[int] = None
+
+    @field_validator("states", mode="before")
+    @classmethod
+    def validate_states(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            raise ValueError("states must be an array of strings")
+        cleaned = [str(s).strip() for s in v if str(s).strip()]
+        if len(v) > 0 and not cleaned:
+            raise ValueError("states must contain at least one non-empty string")
+        return cleaned or None
 
 
 class ExecutionResponse(BaseModel):
@@ -192,8 +214,7 @@ class ExecutionResponse(BaseModel):
     name: str
     csv_type_id: Optional[str] = None
     status: str
-    state: Optional[str] = None
-    district: Optional[str] = None
+    states: Optional[List[str]] = None
     created_by: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
@@ -222,8 +243,6 @@ class ExecutionDetail(ExecutionResponse):
     ai_model_id: Optional[str] = None
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
-    state: Optional[str] = None
-    district: Optional[str] = None
     criterias_mode: Optional[str] = None
     criterias_config: Optional[Dict[str, Any]] = None
     threshold_config: Optional[Dict[str, Any]] = None

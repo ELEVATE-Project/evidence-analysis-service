@@ -23,8 +23,7 @@ class Execution(Base):
     ai_model_id = Column(String(100), nullable=True)
     program_ref_id = Column(String(100), nullable=True)
     program_name = Column(String(255), nullable=True)
-    state = Column(String(50), nullable=True)
-    district = Column(String(100), nullable=True)
+    states = Column(JSONB, nullable=True)  # list of state name strings; state/district columns kept in DB for history
     
     # Configuration
     criterias_mode = Column(String(50), nullable=True)

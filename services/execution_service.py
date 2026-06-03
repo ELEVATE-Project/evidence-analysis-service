@@ -18,7 +18,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from pydantic import ValidationError
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -108,8 +108,7 @@ class ExecutionService:
             name=execution.name or "Untitled execution",
             csv_type_id=execution.csv_type_id,
             status=execution.status or "queued",
-            state=execution.state,
-            district=execution.district,
+            states=execution.states or [],
             created_by=execution.created_by,
             created_at=execution.created_at or datetime.utcnow(),
             updated_at=execution.updated_at,
@@ -718,10 +717,10 @@ class ExecutionService:
         request_data: Any,
         source_type: CsvSourceType,
     ) -> None:
-        if source_type.has_geo and not (request_data.state or "").strip():
+        if source_type.has_geo and not (request_data.states or []):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="State is required for the selected CSV source type.",
+                detail="At least one state is required for the selected CSV source type.",
             )
 
     def _mark_execution_failed(self, execution: Execution, reason: str) -> None:
@@ -970,8 +969,7 @@ class ExecutionService:
             ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
-            state=request_data.state,
-            district=request_data.district,
+            states=request_data.states or [],
             criterias_mode=criterias_mode,
             threshold_config=threshold_config,
             status="draft",
@@ -1660,8 +1658,7 @@ class ExecutionService:
             ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
-            state=request_data.state,
-            district=request_data.district,
+            states=request_data.states or [],
             criterias_mode=criterias_mode,
             threshold_config=threshold_config,
             status="draft",
@@ -1979,8 +1976,7 @@ class ExecutionService:
         page_size: int = 20,
         status_filter: Optional[str] = None,
         status_group: Optional[str] = None,
-        state_filter: Optional[str] = None,
-        district_filter: Optional[str] = None,
+        states_filter: Optional[list] = None,
         search_query: Optional[str] = None,
     ) -> ExecutionList:
         """List executions with pagination and optional server-side filters."""
@@ -2021,13 +2017,10 @@ class ExecutionService:
                         detail="status_group must be one of: draft, in_progress, completed, failed",
                     )
 
-            normalized_state_filter = (state_filter or "").strip()
-            if normalized_state_filter:
-                query = query.filter(Execution.state == normalized_state_filter)
-
-            normalized_district_filter = (district_filter or "").strip()
-            if normalized_district_filter:
-                query = query.filter(Execution.district == normalized_district_filter)
+            if states_filter:
+                query = query.filter(
+                    or_(Execution.states.contains([s]) for s in states_filter)
+                )
 
             normalized_search_query = (search_query or "").strip()
             if normalized_search_query:
@@ -2142,8 +2135,7 @@ class ExecutionService:
 
         allowed_fields = {
             'name',
-            'state',
-            'district',
+            'states',
             'program_ref_id',
             'program_name',
         }
@@ -2161,6 +2153,13 @@ class ExecutionService:
                     )
                 execution.name = str(value).strip()
                 continue
+
+            if field == 'states' and value is not None:
+                if not isinstance(value, list) or not value:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="states must be a non-empty array if provided."
+                    )
 
             # Optional fields support explicit clears via null.
             setattr(execution, field, value)
