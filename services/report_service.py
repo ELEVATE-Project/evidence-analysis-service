@@ -249,10 +249,10 @@ class ReportService:
         # Build active filters map
         active = {k: v.strip() for k, v in (filters or {}).items() if (v or "").strip()}
 
-        active_states = [s.strip() for s in active.get("state", "").split(",") if s.strip()]
-
         def _matches(row: Dict[str, str]) -> bool:
-            if active_states and row.get("Declared State", "") not in active_states:
+            if active.get("state") and row.get("Declared State", "") != active["state"]:
+                return False
+            if active.get("district") and row.get("District", "") != active["district"]:
                 return False
             if active.get("block") and row.get("Block", "") != active["block"]:
                 return False
@@ -288,28 +288,35 @@ class ReportService:
     ) -> Dict[str, list[str]]:
         """Compute cascading filter option lists from all rows (one pass)."""
         state_set: set[str] = set()
+        district_set: set[str] = set()
         block_set: set[str] = set()
         school_set: set[str] = set()
 
-        active_states = [s.strip() for s in active.get("state", "").split(",") if s.strip()]
+        active_state = active.get("state", "")
+        active_district = active.get("district", "")
         active_block = active.get("block", "")
 
         for row in all_rows:
             s = row.get("Declared State", "")
+            d = row.get("District", "")
             b = row.get("Block", "")
             sc = row.get("School Name", "")
 
             if s:
                 state_set.add(s)
-            if not active_states or s in active_states:
-                if b:
-                    block_set.add(b)
-                if not active_block or b == active_block:
-                    if sc:
-                        school_set.add(sc)
+            if not active_state or s == active_state:
+                if d:
+                    district_set.add(d)
+                if not active_district or d == active_district:
+                    if b:
+                        block_set.add(b)
+                    if not active_block or b == active_block:
+                        if sc:
+                            school_set.add(sc)
 
         return {
             "states": sorted(state_set),
+            "districts": sorted(district_set),
             "blocks": sorted(block_set),
             "schools": sorted(school_set),
         }

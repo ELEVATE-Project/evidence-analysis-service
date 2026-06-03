@@ -141,7 +141,8 @@ async def get_report_data_page(
     current_user: UserResponse = Depends(AuthService.get_current_user),
     page: int = Query(1, ge=1),
     page_size: int = Query(1000, ge=1, le=5000),
-    state: Optional[str] = Query(None, description="Comma-separated state names, e.g. Bihar,Haryana"),
+    state: Optional[str] = Query(None),
+    district: Optional[str] = Query(None),
     block: Optional[str] = Query(None),
     school: Optional[str] = Query(None),
     relevance: Optional[str] = Query(None),
@@ -158,6 +159,7 @@ async def get_report_data_page(
             page_size=page_size,
             filters={
                 "state": state or "",
+                "district": district or "",
                 "block": block or "",
                 "school": school or "",
                 "relevance": relevance or "",
