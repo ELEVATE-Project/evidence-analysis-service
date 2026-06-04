@@ -204,7 +204,7 @@ class CriteriaValidationService:
         *,
         evidence_criteria: list[str],
         model_name: str,
-        source: str = "gemini",
+        source: str = "google",
     ) -> CriteriaValidationResponse:
         raw_answers = payload.get("answers")
         raw_reasonings = payload.get("reasonings")
@@ -325,7 +325,7 @@ class CriteriaValidationService:
 
         model_name = get_llm_model_name()
         provider_name = get_llm_provider_name()
-        provider = get_provider()
+        provider = get_provider({"LLM_PROVIDER": provider_name})
         last_error: Exception | None = None
 
         for token in llm_tokens:
@@ -350,12 +350,12 @@ class CriteriaValidationService:
                         marker in strict_error
                         for marker in ("response_schema", "response_mime_type", "unknown field")
                     ):
-                        logger.warning(
-                            "LLM SDK/config compatibility issue for provider=%s model=%s. "
-                            "Retrying without schema config.",
-                            provider_name,
-                            model_name,
-                        )
+                        if provider_name == "google":
+                            logger.warning(
+                                "Gemini SDK/config compatibility issue for model=%s. "
+                                "Retrying without schema config.",
+                                model_name,
+                            )
                         llm_model = provider.create_model(model_name=model_name)
                         response = await asyncio.to_thread(llm_model.generate_content, content_parts)
                     else:
@@ -373,6 +373,11 @@ class CriteriaValidationService:
                 last_error = exc
                 error_message = str(exc)
                 if self._is_quota_error(error_message) or self._is_auth_error(error_message):
+                    logger.warning(
+                        "LLM retriable error (provider=%s): %s",
+                        provider_name,
+                        error_message,
+                    )
                     continue
                 if self._is_bad_image_input_error(error_message):
                     raise HTTPException(

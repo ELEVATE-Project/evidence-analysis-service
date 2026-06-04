@@ -72,14 +72,23 @@ def _add_csv_values(unique_values: list[str], seen: set[str], raw_values: Option
 def get_gemini_tokens(env: Optional[dict[str, str]] = None) -> list[str]:
     """
     Resolve Gemini tokens in deterministic order with fallback semantics.
-    Supported sources:
-    - GEMINI_TOKEN* / GEMINI_API_KEY* env variables
-    - settings.GEMINI_API_KEY_1..3 fallback values
+    Priority (highest first):
+    1. Pydantic settings (loaded from .env file — source of truth for managed keys)
+    2. GEMINI_TOKEN* / GEMINI_API_KEY* from the supplied env dict / os.environ
+    Settings take priority so that a stale shell export of GEMINI_API_KEY_* cannot
+    shadow a key that was explicitly set in .env.
     """
     source_env = env or os.environ
     tokens: list[str] = []
     seen: set[str] = set()
 
+    # Pydantic settings first — these come directly from .env and are the managed source.
+    _add_value(tokens, seen, getattr(settings, "GEMINI_API_KEY_1", ""))
+    _add_value(tokens, seen, getattr(settings, "GEMINI_API_KEY_2", ""))
+    _add_value(tokens, seen, getattr(settings, "GEMINI_API_KEY_3", ""))
+
+    # Then fall back to raw env vars (covers Docker/shell environments that set
+    # keys without a .env file, and any extra numbered slots beyond 3).
     for key in _ORDERED_GEMINI_ENV_KEYS:
         _add_value(tokens, seen, source_env.get(key))
 
@@ -88,11 +97,6 @@ def get_gemini_tokens(env: Optional[dict[str, str]] = None) -> list[str]:
 
     for key in _iter_env_keys(("GEMINI_TOKEN", "GEMINI_API_KEY"), source_env):
         _add_value(tokens, seen, source_env.get(key))
-
-    # Settings fallback for environments where values are loaded only via pydantic settings.
-    _add_value(tokens, seen, getattr(settings, "GEMINI_API_KEY_1", ""))
-    _add_value(tokens, seen, getattr(settings, "GEMINI_API_KEY_2", ""))
-    _add_value(tokens, seen, getattr(settings, "GEMINI_API_KEY_3", ""))
 
     return tokens
 
