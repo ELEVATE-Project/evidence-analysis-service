@@ -1,10 +1,10 @@
 import os
+import sys
 import argparse
 import ast
 import concurrent.futures
 import pandas as pd
 import json
-import google.generativeai as genai
 import httpx
 import base64
 import typing_extensions as typing
@@ -20,6 +20,10 @@ from dotenv import load_dotenv
 # Load .env from service root explicitly so subprocess cwd doesn't matter.
 SERVICE_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
+# Allow importing from the service package (services/, core/, etc.)
+if str(SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVICE_ROOT))
+from utils.llm_provider import get_provider as _get_llm_provider_factory
 import threading
 import time
 from collections import deque
@@ -193,7 +197,15 @@ GEMINI_PRICING = {
     }
 }
 
-GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+_LLM_PROVIDER_NAME = (os.getenv("LLM_PROVIDER") or "google").strip().lower()
+
+if _LLM_PROVIDER_NAME == "openrouter":
+    LLM_MODEL_NAME = (os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash-lite").strip()
+else:
+    LLM_MODEL_NAME = (os.getenv("GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash").strip()
+
+# Alias kept for backward compatibility with log_api_usage call sites.
+GEMINI_MODEL_NAME = LLM_MODEL_NAME
 
 
 def _looks_like_placeholder_secret(value: str) -> bool:
@@ -642,13 +654,21 @@ def load_questions_mapping(questions_file):
     combined = {**questions_map_raw, **questions_map}
     return combined
 
-def get_gemini_tokens_from_env():
+def _load_llm_tokens_from_env():
     """
-    Load Gemini keys from common env naming conventions in deterministic order.
-    Supported:
-      - GEMINI_TOKEN, GEMINI_TOKEN_1..N
-      - GEMINI_API_KEY, GEMINI_API_KEY_1..N
+    Load API tokens for the active LLM provider from environment variables.
+    - google:     reads GEMINI_TOKEN* / GEMINI_API_KEY* (supports rotation).
+    - openrouter: reads OPENROUTER_API_KEY (single key).
     """
+    if _LLM_PROVIDER_NAME == "openrouter":
+        key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+        if key and not _looks_like_placeholder_secret(key):
+            logging.info("[LLM] OpenRouter: loaded API key from OPENROUTER_API_KEY")
+            return [key]
+        logging.error("[LLM] No valid OPENROUTER_API_KEY found in environment.")
+        return []
+
+    # Google Gemini path
     ordered_keys = [
         "GEMINI_TOKEN",
         "GEMINI_TOKEN_1",
@@ -675,17 +695,20 @@ def get_gemini_tokens_from_env():
                     tokens.append(val)
                     seen.add(val)
 
-    valid_tokens = [token for token in tokens if not _looks_like_placeholder_secret(token)]
+    valid_tokens = [t for t in tokens if not _looks_like_placeholder_secret(t)]
     if not valid_tokens:
         logging.error(
-            "[Gemini] No valid Gemini tokens found. Checked GEMINI_TOKEN* and GEMINI_API_KEY* "
+            "[LLM] No valid Gemini tokens found. Checked GEMINI_TOKEN* and GEMINI_API_KEY* "
             "(empty/placeholder values were ignored)."
         )
     else:
-        logging.info("[Gemini] Loaded %s token(s) from environment", len(valid_tokens))
+        logging.info("[LLM] Loaded %s Gemini token(s) from environment", len(valid_tokens))
     return valid_tokens
 
-GEMINI_TOKENS = get_gemini_tokens_from_env()
+
+_LLM_TOKENS = _load_llm_tokens_from_env()
+# Alias for any remaining code that references GEMINI_TOKENS.
+GEMINI_TOKENS = _LLM_TOKENS
 
 current_token_index = 0
 
@@ -841,35 +864,41 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
 
 
 def get_next_gemini_token():
+    """Return the current API token (works for both Gemini and OpenRouter)."""
     global current_token_index
-    if current_token_index < len(GEMINI_TOKENS):
-        token = GEMINI_TOKENS[current_token_index]
-        logging.info(f"[Gemini] Using token: -----")
+    if current_token_index < len(_LLM_TOKENS):
+        token = _LLM_TOKENS[current_token_index]
+        logging.info("[LLM] Using token: -----")
         return token
     return None
 
+
 def switch_to_next_token():
-    global current_token_index
+    """
+    Advance to the next API token and re-initialise the provider models.
+    For OpenRouter (single key), this always returns None after the first exhaustion.
+    """
+    global current_token_index, _llm_provider, model, enrollment_model
     current_token_index += 1
-    if current_token_index >= len(GEMINI_TOKENS):
-        logging.error("[Gemini] All tokens exhausted!")
+    if current_token_index >= len(_LLM_TOKENS):
+        logging.error("[LLM] All tokens exhausted!")
         return None
     token = get_next_gemini_token()
     if token:
-        genai.configure(api_key=token)
-        global model, enrollment_model
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
+        _llm_provider.configure(api_key=token)
+        model = _llm_provider.create_model(
+            model_name=LLM_MODEL_NAME,
             generation_config=_build_generation_config(),
         )
-        enrollment_model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
+        enrollment_model = _llm_provider.create_model(
+            model_name=LLM_MODEL_NAME,
             generation_config=_build_generation_config(),
         )
         return token
     return None
 
-# === Gemini Model Setup ===
+
+# === LLM Model Setup ===
 class AnalysisResponse(typing.TypedDict):
     answers: list[str]
     reasonings: list[str]
@@ -881,21 +910,22 @@ class EnrollmentAnalysisResponse(typing.TypedDict):
     enrollment_2025: int | None
     enrollment_increase_percentage: float | None
 
-initial_token = get_next_gemini_token()
-if not initial_token:
-    raise ValueError("[Gemini] No valid Gemini tokens found!")
+_initial_token = get_next_gemini_token()
+if not _initial_token:
+    raise ValueError("[LLM] No valid API tokens found!")
 
-genai.configure(api_key=initial_token)
+_llm_provider = _get_llm_provider_factory()
+_llm_provider.configure(api_key=_initial_token)
 
 # Standard model for regular tasks
-model = genai.GenerativeModel(
-    model_name=GEMINI_MODEL_NAME,
+model = _llm_provider.create_model(
+    model_name=LLM_MODEL_NAME,
     generation_config=_build_generation_config(),
 )
 
-# Enrollment model with enhanced schema
-enrollment_model = genai.GenerativeModel(
-    model_name=GEMINI_MODEL_NAME,
+# Enrollment model (same model name; separate handle for logical clarity)
+enrollment_model = _llm_provider.create_model(
+    model_name=LLM_MODEL_NAME,
     generation_config=_build_generation_config(),
 )
 

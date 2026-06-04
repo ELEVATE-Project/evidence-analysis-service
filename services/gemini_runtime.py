@@ -136,3 +136,77 @@ def build_gemini_env_overrides(env: Optional[dict[str, str]] = None) -> dict[str
         overrides["GEMINI_MODEL"] = model_name
 
     return overrides
+
+
+# ── Provider-agnostic helpers ──────────────────────────────────────────────────
+
+def get_llm_provider_name(env: Optional[dict[str, str]] = None) -> str:
+    """Return the active LLM provider name: 'google' (default) or 'openrouter'."""
+    source_env = env or os.environ
+    name = (
+        source_env.get("LLM_PROVIDER")
+        or getattr(settings, "LLM_PROVIDER", "")
+        or "google"
+    ).strip().lower()
+    return name
+
+
+def get_llm_tokens(env: Optional[dict[str, str]] = None) -> list[str]:
+    """
+    Return API tokens for the active LLM provider.
+    - google:     returns the Gemini key list (rotation-ready).
+    - openrouter: returns [OPENROUTER_API_KEY] (single key).
+    """
+    source_env = env or os.environ
+    provider = get_llm_provider_name(source_env)
+    if provider == "openrouter":
+        key = (
+            source_env.get("OPENROUTER_API_KEY")
+            or getattr(settings, "OPENROUTER_API_KEY", "")
+            or ""
+        ).strip()
+        if key and not _looks_like_placeholder_secret(key):
+            return [key]
+        return []
+    return get_gemini_tokens(source_env)
+
+
+def get_llm_model_name(env: Optional[dict[str, str]] = None) -> str:
+    """Return the model name for the active LLM provider."""
+    source_env = env or os.environ
+    provider = get_llm_provider_name(source_env)
+    if provider == "openrouter":
+        model = (
+            source_env.get("OPENROUTER_MODEL")
+            or getattr(settings, "OPENROUTER_MODEL", "")
+            or ""
+        ).strip()
+        return model or "google/gemini-2.5-flash-lite"
+    return get_gemini_model_name(source_env)
+
+
+def build_llm_env_overrides(env: Optional[dict[str, str]] = None) -> dict[str, str]:
+    """
+    Build subprocess env overrides for the active LLM provider.
+    Extends build_gemini_env_overrides with OpenRouter variables when applicable,
+    and always propagates LLM_PROVIDER so the subprocess uses the same provider.
+    """
+    source_env = env or os.environ
+    overrides = build_gemini_env_overrides(source_env)
+
+    provider = get_llm_provider_name(source_env)
+    overrides["LLM_PROVIDER"] = provider
+
+    if provider == "openrouter":
+        key = (
+            source_env.get("OPENROUTER_API_KEY")
+            or getattr(settings, "OPENROUTER_API_KEY", "")
+            or ""
+        ).strip()
+        if key and not _looks_like_placeholder_secret(key):
+            overrides["OPENROUTER_API_KEY"] = key
+        model = get_llm_model_name(source_env)
+        if model:
+            overrides["OPENROUTER_MODEL"] = model
+
+    return overrides

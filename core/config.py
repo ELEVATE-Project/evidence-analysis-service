@@ -60,11 +60,18 @@ class Settings(BaseSettings):
     # Local Storage
     LOCAL_STORAGE_PATH: str = "./uploads"
     
+    # LLM Provider Selection
+    LLM_PROVIDER: str = "google"  # google | openrouter
+
     # AI Models (Gemini)
     GEMINI_API_KEY_1: str = ""
     GEMINI_API_KEY_2: str = ""
     GEMINI_API_KEY_3: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
+
+    # OpenRouter
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
     
     # Notification control
     IS_NOTIFICATION_ENABLED: bool = True

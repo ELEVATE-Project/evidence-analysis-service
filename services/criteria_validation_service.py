@@ -11,7 +11,6 @@ import mimetypes
 import re
 from urllib.parse import urlparse
 
-import google.generativeai as genai
 import httpx
 import typing_extensions as typing
 from fastapi import HTTPException, status
@@ -22,7 +21,8 @@ from models.schemas import (
     CriteriaValidationRequest,
     CriteriaValidationResponse,
 )
-from services.gemini_runtime import get_gemini_model_name, get_gemini_tokens
+from services.gemini_runtime import get_llm_model_name, get_llm_provider_name, get_llm_tokens
+from utils.llm_provider import get_provider
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,7 @@ class CriteriaValidationService:
         *,
         evidence_criteria: list[str],
         model_name: str,
+        source: str = "gemini",
     ) -> CriteriaValidationResponse:
         raw_answers = payload.get("answers")
         raw_reasonings = payload.get("reasonings")
@@ -242,7 +243,7 @@ class CriteriaValidationService:
         ]
 
         return CriteriaValidationResponse(
-            source="gemini",
+            source=source,
             model=model_name,
             relevance_tag=relevance_tag,
             criteria_results=criteria_results,
@@ -315,32 +316,34 @@ class CriteriaValidationService:
         image_bytes, mime_type = await self._download_image(evidence_url)
         prompt_text = self._build_prompt(request_data.prompt, evidence_criteria)
 
-        gemini_tokens = get_gemini_tokens()
-        if not gemini_tokens:
+        llm_tokens = get_llm_tokens()
+        if not llm_tokens:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Gemini configuration is missing. Please contact support.",
+                detail="LLM configuration is missing. Please contact support.",
             )
 
-        model_name = get_gemini_model_name()
+        model_name = get_llm_model_name()
+        provider_name = get_llm_provider_name()
+        provider = get_provider()
         last_error: Exception | None = None
 
-        for token in gemini_tokens:
+        for token in llm_tokens:
             try:
-                genai.configure(api_key=token)
+                provider.configure(api_key=token)
                 content_parts = [
                     {"mime_type": mime_type, "data": image_bytes},
                     prompt_text,
                 ]
                 try:
-                    model = genai.GenerativeModel(
+                    llm_model = provider.create_model(
                         model_name=model_name,
                         generation_config={
                             "response_mime_type": "application/json",
                             "response_schema": GeminiCriteriaResponse,
                         },
                     )
-                    response = await asyncio.to_thread(model.generate_content, content_parts)
+                    response = await asyncio.to_thread(llm_model.generate_content, content_parts)
                 except Exception as strict_exc:  # noqa: BLE001
                     strict_error = str(strict_exc).lower()
                     if any(
@@ -348,11 +351,13 @@ class CriteriaValidationService:
                         for marker in ("response_schema", "response_mime_type", "unknown field")
                     ):
                         logger.warning(
-                            "Gemini SDK/config compatibility issue for model=%s. Retrying without schema config.",
+                            "LLM SDK/config compatibility issue for provider=%s model=%s. "
+                            "Retrying without schema config.",
+                            provider_name,
                             model_name,
                         )
-                        model = genai.GenerativeModel(model_name=model_name)
-                        response = await asyncio.to_thread(model.generate_content, content_parts)
+                        llm_model = provider.create_model(model_name=model_name)
+                        response = await asyncio.to_thread(llm_model.generate_content, content_parts)
                     else:
                         raise
 
@@ -361,6 +366,7 @@ class CriteriaValidationService:
                     payload,
                     evidence_criteria=evidence_criteria,
                     model_name=model_name,
+                    source=provider_name,
                 )
                 return normalized_response
             except Exception as exc:  # noqa: BLE001
@@ -372,22 +378,26 @@ class CriteriaValidationService:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=(
-                            "Evidence URL did not return a valid image payload for Gemini processing. "
+                            "Evidence URL did not return a valid image payload for LLM processing. "
                             "Please use a direct public image URL."
                         ),
                     ) from exc
-                logger.exception("Gemini criteria validation failed with non-retriable error: %s", error_message)
+                logger.exception(
+                    "LLM criteria validation failed with non-retriable error (provider=%s): %s",
+                    provider_name,
+                    error_message,
+                )
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="Gemini validation failed. Please retry in a moment.",
+                    detail="LLM validation failed. Please retry in a moment.",
                 ) from exc
 
         if last_error and self._is_quota_error(str(last_error)):
-            detail = "Gemini quota/rate limit reached across configured keys. Please retry shortly."
+            detail = "LLM quota/rate limit reached across configured keys. Please retry shortly."
         elif last_error and self._is_auth_error(str(last_error)):
-            detail = "Gemini authentication failed for configured keys. Please contact support."
+            detail = "LLM authentication failed for configured keys. Please contact support."
         else:
-            detail = "Unable to validate criteria with Gemini right now. Please retry shortly."
+            detail = "Unable to validate criteria right now. Please retry shortly."
 
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
