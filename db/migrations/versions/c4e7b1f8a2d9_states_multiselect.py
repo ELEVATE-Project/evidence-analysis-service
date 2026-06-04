@@ -35,12 +35,16 @@ def upgrade() -> None:
         """
     )
 
-    # Old index referenced the state column which is no longer queried by the app
+    # Drop old index before dropping the column it references
     op.drop_index(
         'idx_executions_user_state_created',
         table_name='executions',
         if_exists=True,
     )
+
+    # Drop legacy columns — data preserved in states array above
+    op.drop_column('executions', 'state')
+    op.drop_column('executions', 'district')
 
     # GIN index enables efficient JSONB @> containment queries on states
     op.execute(
@@ -55,6 +59,11 @@ def downgrade() -> None:
     op.execute('DROP INDEX IF EXISTS idx_executions_states_gin')
     op.drop_column('executions', 'states')
 
+    # Restore legacy columns
+    op.add_column('executions', sa.Column('state', sa.String(length=50), nullable=True))
+    op.add_column('executions', sa.Column('district', sa.String(length=100), nullable=True))
+
+    # Restore old index on state column
     op.create_index(
         'idx_executions_user_state_created',
         'executions',
