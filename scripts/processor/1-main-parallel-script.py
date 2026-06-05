@@ -5,6 +5,7 @@ import ast
 import concurrent.futures
 import pandas as pd
 import json
+import google.generativeai as genai
 import httpx
 import base64
 import typing_extensions as typing
@@ -23,7 +24,8 @@ load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
 # Allow importing from the service package (services/, core/, etc.)
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
-from utils.llm_provider import get_provider as _get_llm_provider_factory
+from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER
+from utils.llm_provider import generate_content
 import threading
 import time
 from collections import deque
@@ -197,9 +199,9 @@ GEMINI_PRICING = {
     }
 }
 
-_LLM_PROVIDER_NAME = (os.getenv("LLM_PROVIDER") or "google").strip().lower()
+_LLM_PROVIDER_NAME = (os.getenv("LLM_PROVIDER") or PROVIDER_GEMINI).strip().lower()
 
-if _LLM_PROVIDER_NAME == "openrouter":
+if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
     LLM_MODEL_NAME = (os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash-lite").strip()
 else:
     LLM_MODEL_NAME = (os.getenv("GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash").strip()
@@ -660,7 +662,7 @@ def _load_llm_tokens_from_env():
     - google:     reads GEMINI_TOKEN* / GEMINI_API_KEY* (supports rotation).
     - openrouter: reads OPENROUTER_API_KEY (single key).
     """
-    if _LLM_PROVIDER_NAME == "openrouter":
+    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
         tokens: list[str] = []
         seen: set[str] = set()
         for slot in ("OPENROUTER_API_KEY_1", "OPENROUTER_API_KEY_2", "OPENROUTER_API_KEY_3"):
@@ -706,7 +708,7 @@ def _load_llm_tokens_from_env():
                     tokens.append(val)
                     seen.add(val)
 
-    valid_tokens = [t for t in tokens if not _looks_like_placeholder_secret(t)]
+    valid_tokens = [token for token in tokens if not _looks_like_placeholder_secret(token)]
     if not valid_tokens:
         logging.error(
             "[LLM] No valid Gemini tokens found. Checked GEMINI_TOKEN* and GEMINI_API_KEY* "
@@ -875,40 +877,36 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
 
 
 def get_next_gemini_token():
-    """Return the current API token (works for both Gemini and OpenRouter)."""
     global current_token_index
     if current_token_index < len(_LLM_TOKENS):
         token = _LLM_TOKENS[current_token_index]
-        logging.info("[LLM] Using token: -----")
+        logging.info(f"[Gemini] Using token: -----")
         return token
     return None
 
-
 def switch_to_next_token():
-    """
-    Advance to the next API token and re-initialise the provider models.
-    """
-    global current_token_index, _llm_provider, model, enrollment_model
+    global current_token_index
     current_token_index += 1
     if current_token_index >= len(_LLM_TOKENS):
-        logging.error("[LLM] All tokens exhausted!")
+        logging.error("[Gemini] All tokens exhausted!")
         return None
     token = get_next_gemini_token()
     if token:
-        _llm_provider.configure(api_key=token)
-        model = _llm_provider.create_model(
-            model_name=LLM_MODEL_NAME,
-            generation_config=_build_generation_config(),
-        )
-        enrollment_model = _llm_provider.create_model(
-            model_name=LLM_MODEL_NAME,
-            generation_config=_build_generation_config(),
-        )
+        if _LLM_PROVIDER_NAME != PROVIDER_OPENROUTER:
+            genai.configure(api_key=token)
+            global model, enrollment_model
+            model = genai.GenerativeModel(
+                model_name=LLM_MODEL_NAME,
+                generation_config=_build_generation_config(),
+            )
+            enrollment_model = genai.GenerativeModel(
+                model_name=LLM_MODEL_NAME,
+                generation_config=_build_generation_config(),
+            )
         return token
     return None
 
-
-# === LLM Model Setup ===
+# === Gemini Model Setup ===
 class AnalysisResponse(typing.TypedDict):
     answers: list[str]
     reasonings: list[str]
@@ -920,24 +918,23 @@ class EnrollmentAnalysisResponse(typing.TypedDict):
     enrollment_2025: int | None
     enrollment_increase_percentage: float | None
 
-_initial_token = get_next_gemini_token()
-if not _initial_token:
-    raise ValueError("[LLM] No valid API tokens found!")
+initial_token = get_next_gemini_token()
+if not initial_token:
+    raise ValueError("[Gemini] No valid Gemini tokens found!")
 
-_llm_provider = _get_llm_provider_factory()
-_llm_provider.configure(api_key=_initial_token)
-
-# Standard model for regular tasks
-model = _llm_provider.create_model(
-    model_name=LLM_MODEL_NAME,
-    generation_config=_build_generation_config(),
-)
-
-# Enrollment model (same model name; separate handle for logical clarity)
-enrollment_model = _llm_provider.create_model(
-    model_name=LLM_MODEL_NAME,
-    generation_config=_build_generation_config(),
-)
+if _LLM_PROVIDER_NAME != PROVIDER_OPENROUTER:
+    genai.configure(api_key=initial_token)
+    model = genai.GenerativeModel(
+        model_name=LLM_MODEL_NAME,
+        generation_config=_build_generation_config(),
+    )
+    enrollment_model = genai.GenerativeModel(
+        model_name=LLM_MODEL_NAME,
+        generation_config=_build_generation_config(),
+    )
+else:
+    model = None
+    enrollment_model = None
 
 # === 🆕 Extra Keys Extraction Function ===
 def extract_extra_keys(text_fields, task_name=None):
@@ -1407,10 +1404,8 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
 
-            # Select model and update prompt based on task type
-            selected_model = model
+            selected_model = enrollment_model if is_enrollment_task else model
             if is_enrollment_task:
-                selected_model = enrollment_model
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
 
@@ -1531,10 +1526,16 @@ CORRECT JSON Response:
 ====================================================================================
 """
 
-            response = selected_model.generate_content([
-                {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
-                prompt,
-            ])
+            if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+                response = generate_content(
+                    [{"url": task_evidence_link}, prompt],
+                    api_key=get_next_gemini_token(),
+                )
+            else:
+                response = selected_model.generate_content([
+                    {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
+                    prompt,
+                ])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1558,7 +1559,7 @@ CORRECT JSON Response:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted", "401", "unauthorized", "user not found"]):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
                 if switch_to_next_token():
                     continue
@@ -1682,9 +1683,8 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
             
-            selected_model = model
+            selected_model = enrollment_model if is_enrollment_task else model
             if is_enrollment_task:
-                selected_model = enrollment_model
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
 
@@ -1716,10 +1716,16 @@ Focus on:
 - Educational context and completeness"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            response = selected_model.generate_content([
-                {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
-                prompt,
-            ])
+            if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+                response = generate_content(
+                    [{"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")}, prompt],
+                    api_key=get_next_gemini_token(),
+                )
+            else:
+                response = selected_model.generate_content([
+                    {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
+                    prompt,
+                ])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1743,7 +1749,7 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted", "401", "unauthorized", "user not found"]):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
                 if switch_to_next_token():
                     continue
@@ -1811,9 +1817,8 @@ Focus on:
 - Quality and completeness of the data
 - Educational context"""
             
-            selected_model = model
+            selected_model = enrollment_model if is_enrollment_task else model
             if is_enrollment_task:
-                selected_model = enrollment_model
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
 
@@ -1848,7 +1853,13 @@ Focus on:
 - Educational context"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            response = selected_model.generate_content([prompt])
+            if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+                response = generate_content(
+                    [prompt],
+                    api_key=get_next_gemini_token(),
+                )
+            else:
+                response = selected_model.generate_content([prompt])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1872,7 +1883,7 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted", "401", "unauthorized", "user not found"]):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
                 if switch_to_next_token():
                     continue

@@ -21,8 +21,9 @@ from models.schemas import (
     CriteriaValidationRequest,
     CriteriaValidationResponse,
 )
-from services.gemini_runtime import get_llm_model_name, get_llm_provider_name, get_llm_tokens
-from utils.llm_provider import get_provider
+from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER
+from services.llm_runtime import get_llm_model_name, get_llm_provider_name, get_llm_tokens
+from utils.llm_provider import generate_content  # provider-agnostic replacement for direct genai calls
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +205,7 @@ class CriteriaValidationService:
         *,
         evidence_criteria: list[str],
         model_name: str,
-        source: str = "google",
+        source: str = PROVIDER_GEMINI,
     ) -> CriteriaValidationResponse:
         raw_answers = payload.get("answers")
         raw_reasonings = payload.get("reasonings")
@@ -325,39 +326,41 @@ class CriteriaValidationService:
 
         model_name = get_llm_model_name()
         provider_name = get_llm_provider_name()
-        provider = get_provider({"LLM_PROVIDER": provider_name})
         last_error: Exception | None = None
 
         for token in llm_tokens:
             try:
-                provider.configure(api_key=token)
-                content_parts = [
-                    {"mime_type": mime_type, "data": image_bytes},
-                    prompt_text,
-                ]
+                if provider_name == PROVIDER_OPENROUTER and mime_type.startswith("image/"):
+                    content_parts = [{"url": evidence_url}, prompt_text]
+                else:
+                    content_parts = [{"mime_type": mime_type, "data": image_bytes}, prompt_text]
                 try:
-                    llm_model = provider.create_model(
-                        model_name=model_name,
+                    response = await asyncio.to_thread(
+                        generate_content,
+                        content_parts,
+                        api_key=token,
                         generation_config={
                             "response_mime_type": "application/json",
                             "response_schema": GeminiCriteriaResponse,
                         },
                     )
-                    response = await asyncio.to_thread(llm_model.generate_content, content_parts)
                 except Exception as strict_exc:  # noqa: BLE001
                     strict_error = str(strict_exc).lower()
                     if any(
                         marker in strict_error
                         for marker in ("response_schema", "response_mime_type", "unknown field")
                     ):
-                        if provider_name == "google":
+                        if provider_name == PROVIDER_GEMINI:
                             logger.warning(
                                 "Gemini SDK/config compatibility issue for model=%s. "
                                 "Retrying without schema config.",
                                 model_name,
                             )
-                        llm_model = provider.create_model(model_name=model_name)
-                        response = await asyncio.to_thread(llm_model.generate_content, content_parts)
+                        response = await asyncio.to_thread(
+                            generate_content,
+                            content_parts,
+                            api_key=token,
+                        )
                     else:
                         raise
 
@@ -373,35 +376,27 @@ class CriteriaValidationService:
                 last_error = exc
                 error_message = str(exc)
                 if self._is_quota_error(error_message) or self._is_auth_error(error_message):
-                    logger.warning(
-                        "[LLM] Retriable error (provider=%s): %s",
-                        provider_name, error_message,
-                    )
                     continue
                 if self._is_bad_image_input_error(error_message):
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=(
-                            "Evidence URL did not return a valid image payload for LLM processing. "
+                            "Evidence URL did not return a valid image payload for Gemini processing. "
                             "Please use a direct public image URL."
                         ),
                     ) from exc
-                logger.exception(
-                    "LLM criteria validation failed with non-retriable error (provider=%s): %s",
-                    provider_name,
-                    error_message,
-                )
+                logger.exception("Gemini criteria validation failed with non-retriable error: %s", error_message)
                 raise HTTPException(
                     status_code=status.HTTP_502_BAD_GATEWAY,
-                    detail="LLM validation failed. Please retry in a moment.",
+                    detail="Gemini validation failed. Please retry in a moment.",
                 ) from exc
 
         if last_error and self._is_quota_error(str(last_error)):
-            detail = "LLM quota/rate limit reached across configured keys. Please retry shortly."
+            detail = "Gemini quota/rate limit reached across configured keys. Please retry shortly."
         elif last_error and self._is_auth_error(str(last_error)):
-            detail = "LLM authentication failed for configured keys. Please contact support."
+            detail = "Gemini authentication failed for configured keys. Please contact support."
         else:
-            detail = "Unable to validate criteria right now. Please retry shortly."
+            detail = "Unable to validate criteria with Gemini right now. Please retry shortly."
 
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

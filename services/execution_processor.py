@@ -26,7 +26,7 @@ from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from services.email_service import EmailService
-from services.gemini_runtime import build_llm_env_overrides
+from services.llm_runtime import build_llm_env_overrides
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)

@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import List
+from core.constants import PROVIDER_GEMINI
 from env_variables import validate_environment
 
 SERVICE_ROOT = Path(__file__).resolve().parent.parent
@@ -61,7 +62,7 @@ class Settings(BaseSettings):
     LOCAL_STORAGE_PATH: str = "./uploads"
     
     # LLM Provider Selection
-    LLM_PROVIDER: str = "google"  # google | openrouter
+    LLM_PROVIDER: str = PROVIDER_GEMINI
 
     # AI Models (Gemini)
     GEMINI_API_KEY_1: str = ""
@@ -70,12 +71,8 @@ class Settings(BaseSettings):
     GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # OpenRouter
-    OPENROUTER_API_KEY: str = ""
-    OPENROUTER_API_KEY_1: str = ""
-    OPENROUTER_API_KEY_2: str = ""
-    OPENROUTER_API_KEY_3: str = ""
-    OPENROUTER_API_KEYS: str = ""
     OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     
     # Notification control
     IS_NOTIFICATION_ENABLED: bool = True
@@ -178,7 +175,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(ENV_FILE_PATH)
         case_sensitive = True
-        extra = "ignore"
+        extra = "allow"
 
 
 # Initialize settings

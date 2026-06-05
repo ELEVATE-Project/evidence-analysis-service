@@ -310,7 +310,7 @@ class CriteriaValidationItem(BaseModel):
 
 class CriteriaValidationResponse(BaseModel):
     """Response schema for criteria validation."""
-    source: Literal["google", "openrouter"]
+    source: Literal["gemini", "openrouter"]
     model: str
     relevance_tag: Literal["Relevant", "Partially Relevant", "Irrelevant"]
     criteria_results: list[CriteriaValidationItem]
