@@ -21,6 +21,15 @@ _ORDERED_GEMINI_ENV_KEYS = [
     "GEMINI_API_KEY_3",
 ]
 
+_ORDERED_OPENROUTER_ENV_KEYS = [
+    "OPENROUTER_API_KEY",
+    "OPENROUTER_API_KEY_1",
+    "OPENROUTER_API_KEY_2",
+    "OPENROUTER_API_KEY_3",
+]
+
+_CSV_KEY_SKIP = {"GEMINI_API_KEYS", "OPENROUTER_API_KEYS"}
+
 
 def _looks_like_placeholder_secret(value: str) -> bool:
     normalized = (value or "").strip().lower()
@@ -45,7 +54,7 @@ def _looks_like_placeholder_secret(value: str) -> bool:
 def _iter_env_keys(prefixes: Iterable[str], env: dict[str, str]) -> list[str]:
     matches: list[str] = []
     for key in sorted(env.keys()):
-        if key == "GEMINI_API_KEYS":
+        if key in _CSV_KEY_SKIP:
             continue
         if any(key.startswith(prefix) for prefix in prefixes):
             matches.append(key)
@@ -96,6 +105,39 @@ def get_gemini_tokens(env: Optional[dict[str, str]] = None) -> list[str]:
     _add_csv_values(tokens, seen, source_env.get("GEMINI_API_KEYS"))
 
     for key in _iter_env_keys(("GEMINI_TOKEN", "GEMINI_API_KEY"), source_env):
+        _add_value(tokens, seen, source_env.get(key))
+
+    return tokens
+
+
+def get_openrouter_tokens(env: Optional[dict[str, str]] = None) -> list[str]:
+    """
+    Resolve OpenRouter tokens in deterministic order with fallback semantics.
+    Priority (highest first):
+    1. Pydantic settings (loaded from .env file — source of truth for managed keys)
+    2. OPENROUTER_API_KEY* from the supplied env dict / os.environ
+    3. OPENROUTER_API_KEYS comma-separated list
+    4. Dynamic OPENROUTER_API_KEY* scan for slots beyond _3
+    """
+    source_env = env or os.environ
+    tokens: list[str] = []
+    seen: set[str] = set()
+
+    # Pydantic settings first — these come directly from .env and are the managed source.
+    for attr in ("OPENROUTER_API_KEY_1", "OPENROUTER_API_KEY_2", "OPENROUTER_API_KEY_3"):
+        _add_value(tokens, seen, getattr(settings, attr, ""))
+    _add_value(tokens, seen, getattr(settings, "OPENROUTER_API_KEY", ""))
+
+    # Raw env vars (covers Docker/shell environments without a .env file).
+    for key in _ORDERED_OPENROUTER_ENV_KEYS:
+        _add_value(tokens, seen, source_env.get(key))
+
+    # Comma-separated key list support (settings first, then raw env).
+    _add_csv_values(tokens, seen, getattr(settings, "OPENROUTER_API_KEYS", ""))
+    _add_csv_values(tokens, seen, source_env.get("OPENROUTER_API_KEYS"))
+
+    # Dynamic scan for any extra numbered slots beyond _3.
+    for key in _iter_env_keys(("OPENROUTER_API_KEY",), source_env):
         _add_value(tokens, seen, source_env.get(key))
 
     return tokens
@@ -156,22 +198,11 @@ def get_llm_provider_name(env: Optional[dict[str, str]] = None) -> str:
 
 
 def get_llm_tokens(env: Optional[dict[str, str]] = None) -> list[str]:
-    """
-    Return API tokens for the active LLM provider.
-    - google:     returns the Gemini key list (rotation-ready).
-    - openrouter: returns [OPENROUTER_API_KEY] (single key).
-    """
+    """Return API tokens for the active LLM provider (rotation-ready list)."""
     source_env = env or os.environ
     provider = get_llm_provider_name(source_env)
     if provider == "openrouter":
-        key = (
-            source_env.get("OPENROUTER_API_KEY")
-            or getattr(settings, "OPENROUTER_API_KEY", "")
-            or ""
-        ).strip()
-        if key and not _looks_like_placeholder_secret(key):
-            return [key]
-        return []
+        return get_openrouter_tokens(source_env)
     return get_gemini_tokens(source_env)
 
 

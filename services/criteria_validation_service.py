@@ -374,9 +374,8 @@ class CriteriaValidationService:
                 error_message = str(exc)
                 if self._is_quota_error(error_message) or self._is_auth_error(error_message):
                     logger.warning(
-                        "LLM retriable error (provider=%s): %s",
-                        provider_name,
-                        error_message,
+                        "[LLM] Retriable error (provider=%s): %s",
+                        provider_name, error_message,
                     )
                     continue
                 if self._is_bad_image_input_error(error_message):

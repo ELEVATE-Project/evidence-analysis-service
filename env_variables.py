@@ -197,13 +197,8 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
 
     # AI models — OpenRouter
     "OPENROUTER_API_KEY": {
-        "message": "OpenRouter API key (required when LLM_PROVIDER=openrouter)",
+        "message": "OpenRouter API key (one of OPENROUTER_API_KEY / OPENROUTER_API_KEY_1/2/3 / OPENROUTER_API_KEYS required when LLM_PROVIDER=openrouter)",
         "optional": True,
-        "required_if": {
-            "key": "LLM_PROVIDER",
-            "operator": "EQUALS",
-            "value": "openrouter",
-        },
     },
     "OPENROUTER_MODEL": {
         "message": "OpenRouter model name",
@@ -473,17 +468,26 @@ def validate_environment(settings: Any, env_file_path: str | Path) -> None:
     active_provider = _normalize_compare(current_values.get("LLM_PROVIDER", "google") or "google")
 
     if active_provider == "openrouter":
-        # OpenRouter path: OPENROUTER_API_KEY is handled by required_if above.
-        # Still report a summary row so the table is consistent.
-        openrouter_key = current_values.get("OPENROUTER_API_KEY", "")
-        key_present = not _is_blank(openrouter_key)
+        openrouter_keys = [
+            _setting_value(settings, "OPENROUTER_API_KEY"),
+            _setting_value(settings, "OPENROUTER_API_KEYS"),
+            _setting_value(settings, "OPENROUTER_API_KEY_1"),
+            _setting_value(settings, "OPENROUTER_API_KEY_2"),
+            _setting_value(settings, "OPENROUTER_API_KEY_3"),
+        ]
+        key_present = any(not _is_blank(k) for k in openrouter_keys)
+        if not key_present:
+            failures.append(
+                "OPENROUTER_API_KEY (or OPENROUTER_API_KEY_1/2/3 / OPENROUTER_API_KEYS): "
+                "At least one OpenRouter key is required when LLM_PROVIDER=openrouter"
+            )
         table_rows.append(
             [
                 "LLM_KEYS_GROUP",
                 "YES",
                 "SET" if key_present else "MISSING",
                 "PASSED" if key_present else "FAILED",
-                "" if key_present else "OPENROUTER_API_KEY is required when LLM_PROVIDER=openrouter",
+                "" if key_present else "At least one OpenRouter key is required when LLM_PROVIDER=openrouter",
             ]
         )
     else:

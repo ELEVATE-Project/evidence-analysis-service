@@ -71,6 +71,10 @@ class Settings(BaseSettings):
 
     # OpenRouter
     OPENROUTER_API_KEY: str = ""
+    OPENROUTER_API_KEY_1: str = ""
+    OPENROUTER_API_KEY_2: str = ""
+    OPENROUTER_API_KEY_3: str = ""
+    OPENROUTER_API_KEYS: str = ""
     OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
     
     # Notification control

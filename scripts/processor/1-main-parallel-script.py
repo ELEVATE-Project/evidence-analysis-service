@@ -661,12 +661,23 @@ def _load_llm_tokens_from_env():
     - openrouter: reads OPENROUTER_API_KEY (single key).
     """
     if _LLM_PROVIDER_NAME == "openrouter":
-        key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
-        if key and not _looks_like_placeholder_secret(key):
-            logging.info("[LLM] OpenRouter: loaded API key from OPENROUTER_API_KEY")
-            return [key]
-        logging.error("[LLM] No valid OPENROUTER_API_KEY found in environment.")
-        return []
+        tokens: list[str] = []
+        seen: set[str] = set()
+        for slot in ("OPENROUTER_API_KEY_1", "OPENROUTER_API_KEY_2", "OPENROUTER_API_KEY_3"):
+            val = (os.getenv(slot) or "").strip()
+            if val and val not in seen and not _looks_like_placeholder_secret(val):
+                tokens.append(val)
+                seen.add(val)
+        # Fallback: bare OPENROUTER_API_KEY
+        val = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+        if val and val not in seen and not _looks_like_placeholder_secret(val):
+            tokens.append(val)
+            seen.add(val)
+        if not tokens:
+            logging.error("[LLM] No valid OpenRouter API keys found in environment.")
+        else:
+            logging.info("[LLM] OpenRouter: loaded %s key(s)", len(tokens))
+        return tokens
 
     # Google Gemini path
     ordered_keys = [
@@ -876,7 +887,6 @@ def get_next_gemini_token():
 def switch_to_next_token():
     """
     Advance to the next API token and re-initialise the provider models.
-    For OpenRouter (single key), this always returns None after the first exhaustion.
     """
     global current_token_index, _llm_provider, model, enrollment_model
     current_token_index += 1
