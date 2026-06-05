@@ -892,17 +892,16 @@ def switch_to_next_token():
         return None
     token = get_next_gemini_token()
     if token:
-        if _LLM_PROVIDER_NAME != PROVIDER_OPENROUTER:
-            genai.configure(api_key=token)
-            global model, enrollment_model
-            model = genai.GenerativeModel(
-                model_name=LLM_MODEL_NAME,
-                generation_config=_build_generation_config(),
-            )
-            enrollment_model = genai.GenerativeModel(
-                model_name=LLM_MODEL_NAME,
-                generation_config=_build_generation_config(),
-            )
+        genai.configure(api_key=token)
+        global model, enrollment_model
+        model = genai.GenerativeModel(
+            model_name=LLM_MODEL_NAME,
+            generation_config=_build_generation_config(),
+        )
+        enrollment_model = genai.GenerativeModel(
+            model_name=LLM_MODEL_NAME,
+            generation_config=_build_generation_config(),
+        )
         return token
     return None
 
@@ -922,19 +921,24 @@ initial_token = get_next_gemini_token()
 if not initial_token:
     raise ValueError("[Gemini] No valid Gemini tokens found!")
 
-if _LLM_PROVIDER_NAME != PROVIDER_OPENROUTER:
-    genai.configure(api_key=initial_token)
-    model = genai.GenerativeModel(
-        model_name=LLM_MODEL_NAME,
-        generation_config=_build_generation_config(),
-    )
-    enrollment_model = genai.GenerativeModel(
-        model_name=LLM_MODEL_NAME,
-        generation_config=_build_generation_config(),
-    )
-else:
-    model = None
-    enrollment_model = None
+genai.configure(api_key=initial_token)
+
+model = genai.GenerativeModel(
+    model_name=LLM_MODEL_NAME,
+    generation_config=_build_generation_config(),
+)
+
+enrollment_model = genai.GenerativeModel(
+    model_name=LLM_MODEL_NAME,
+    generation_config=_build_generation_config(),
+)
+
+
+def _llm_generate(gemini_model, parts):
+    """Route to OpenRouter or use the Gemini model directly."""
+    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+        return generate_content(parts, api_key=get_next_gemini_token())
+    return gemini_model.generate_content(parts)
 
 # === 🆕 Extra Keys Extraction Function ===
 def extract_extra_keys(text_fields, task_name=None):
@@ -1526,16 +1530,10 @@ CORRECT JSON Response:
 ====================================================================================
 """
 
-            if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-                response = generate_content(
-                    [{"url": task_evidence_link}, prompt],
-                    api_key=get_next_gemini_token(),
-                )
-            else:
-                response = selected_model.generate_content([
-                    {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
-                    prompt,
-                ])
+            response = _llm_generate(selected_model, [
+                {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
+                prompt,
+            ])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1716,16 +1714,10 @@ Focus on:
 - Educational context and completeness"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-                response = generate_content(
-                    [{"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")}, prompt],
-                    api_key=get_next_gemini_token(),
-                )
-            else:
-                response = selected_model.generate_content([
-                    {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
-                    prompt,
-                ])
+            response = _llm_generate(selected_model, [
+                {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
+                prompt,
+            ])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1853,13 +1845,7 @@ Focus on:
 - Educational context"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-                response = generate_content(
-                    [prompt],
-                    api_key=get_next_gemini_token(),
-                )
-            else:
-                response = selected_model.generate_content([prompt])
+            response = _llm_generate(selected_model, [prompt])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
