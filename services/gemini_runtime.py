@@ -233,13 +233,9 @@ def build_llm_env_overrides(env: Optional[dict[str, str]] = None) -> dict[str, s
     overrides["LLM_PROVIDER"] = provider
 
     if provider == "openrouter":
-        key = (
-            source_env.get("OPENROUTER_API_KEY")
-            or getattr(settings, "OPENROUTER_API_KEY", "")
-            or ""
-        ).strip()
-        if key and not _looks_like_placeholder_secret(key):
-            overrides["OPENROUTER_API_KEY"] = key
+        tokens = get_openrouter_tokens(source_env)
+        for index, token in enumerate(tokens[:3], start=1):
+            overrides[f"OPENROUTER_API_KEY_{index}"] = token
         model = get_llm_model_name(source_env)
         if model:
             overrides["OPENROUTER_MODEL"] = model
