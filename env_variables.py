@@ -186,16 +186,19 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "possible_values": [PROVIDER_GEMINI, PROVIDER_OPENROUTER],
     },
 
-    # AI models — Google Gemini
-    # Keys are loaded dynamically: GEMINI_API_KEY_1, GEMINI_API_KEY_2, ... GEMINI_API_KEY_N
+    # AI models (Gemini) — kept identical to the original release-1.0 entries.
+    "GEMINI_API_KEY_1": {
+        "message": "Gemini key slot 1",
+        "optional": True,
+    },
     "GEMINI_MODEL": {
-        "message": "Gemini model name",
+        "message": "Gemini model",
         "optional": True,
         "default": "gemini-2.5-flash",
     },
 
-    # AI models — OpenRouter
-    # Keys are loaded dynamically: OPENROUTER_API_KEY_1, OPENROUTER_API_KEY_2, ... OPENROUTER_API_KEY_N
+    # AI models — OpenRouter (additive; keys are discovered dynamically:
+    # OPENROUTER_API_KEY_1, OPENROUTER_API_KEY_2, ... OPENROUTER_API_KEY_N)
     "OPENROUTER_MODEL": {
         "message": "OpenRouter model name",
         "optional": True,
@@ -333,13 +336,14 @@ def _has_any_key_for_prefix(settings: Any, prefix: str) -> bool:
     )
 
 
-def _validate_llm_key_group(
+def _validate_openrouter_key_group(
     settings: Any,
     prefix: str,
     provider_value: str,
     failures: list,
     table_rows: list,
 ) -> None:
+    """Group requirement check for OpenRouter — additive, mirrors GEMINI_KEYS_GROUP's shape."""
     key_present = _has_any_key_for_prefix(settings, prefix)
     if not key_present:
         failures.append(
@@ -347,7 +351,7 @@ def _validate_llm_key_group(
             f"At least one key is required when LLM_PROVIDER={provider_value}"
         )
     table_rows.append([
-        "LLM_KEYS_GROUP",
+        "OPENROUTER_KEYS_GROUP",
         "YES",
         "SET" if key_present else "MISSING",
         "PASSED" if key_present else "FAILED",
@@ -491,30 +495,42 @@ def validate_environment(settings: Any, env_file_path: str | Path) -> None:
             ]
         )
 
-    # Group requirement: at least one LLM key must be present for the active provider.
+    # Group requirement: at least one key must be present for the active provider.
+    # The gemini branch is byte-identical to the original release-1.0 check — it
+    # runs whenever gemini is active (the default), so existing Gemini-only
+    # deployments validate exactly as before. OpenRouter gets its own, separate
+    # branch so it isn't forced to also configure Gemini keys.
     active_provider = _normalize_compare(current_values.get("LLM_PROVIDER", PROVIDER_GEMINI) or PROVIDER_GEMINI)
 
     if active_provider == PROVIDER_OPENROUTER:
-        _validate_llm_key_group(settings, OPENROUTER_API_KEY_PREFIX, PROVIDER_OPENROUTER, failures, table_rows)
+        _validate_openrouter_key_group(settings, OPENROUTER_API_KEY_PREFIX, PROVIDER_OPENROUTER, failures, table_rows)
     else:
         gemini_keys = [
+            _setting_value(settings, "GEMINI_TOKEN"),
+            _setting_value(settings, "GEMINI_API_KEY"),
+            _setting_value(settings, "GEMINI_API_KEYS"),
             _setting_value(settings, "GEMINI_API_KEY_1"),
             _setting_value(settings, "GEMINI_API_KEY_2"),
             _setting_value(settings, "GEMINI_API_KEY_3"),
         ]
-        gemini_present = any(not _is_blank(k) for k in gemini_keys)
+        gemini_present = any(not _is_blank(item) for item in gemini_keys)
+        gemini_status = "PASSED" if gemini_present else "FAILED"
+        gemini_notes = ""
         if not gemini_present:
+            gemini_notes = "At least one Gemini key is required"
             failures.append(
-                "GEMINI_API_KEY_1 (or _2, _3): "
-                f"At least one Gemini key is required when LLM_PROVIDER={PROVIDER_GEMINI}"
+                "GEMINI_API_KEY_1 (or GEMINI_API_KEY / GEMINI_TOKEN / GEMINI_API_KEYS): "
+                "At least one Gemini key is required"
             )
-        table_rows.append([
-            "LLM_KEYS_GROUP",
-            "YES",
-            "SET" if gemini_present else "MISSING",
-            "PASSED" if gemini_present else "FAILED",
-            "" if gemini_present else f"At least one Gemini key is required when LLM_PROVIDER={PROVIDER_GEMINI}",
-        ])
+        table_rows.append(
+            [
+                "GEMINI_KEYS_GROUP",
+                "YES",
+                "SET" if gemini_present else "MISSING",
+                gemini_status,
+                gemini_notes,
+            ]
+        )
 
     provider = _normalize_provider(
         _setting_value(settings, "CLOUD_STORAGE_PROVIDER"),

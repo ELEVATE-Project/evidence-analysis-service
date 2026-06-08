@@ -199,15 +199,22 @@ GEMINI_PRICING = {
     }
 }
 
+GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+
 _LLM_PROVIDER_NAME = (os.getenv("LLM_PROVIDER") or PROVIDER_GEMINI).strip().lower()
 
 if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-    LLM_MODEL_NAME = (os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash-lite").strip()
+    OPENROUTER_MODEL_NAME = (os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash-lite").strip()
+    LLM_MODEL_NAME = OPENROUTER_MODEL_NAME
 else:
-    LLM_MODEL_NAME = (os.getenv("GEMINI_MODEL", "gemini-2.0-flash") or "gemini-2.0-flash").strip()
+    LLM_MODEL_NAME = GEMINI_MODEL_NAME
 
-# Alias kept for backward compatibility with log_api_usage call sites.
-GEMINI_MODEL_NAME = LLM_MODEL_NAME
+# Retriable-error markers for the token-rotation retry handlers below.
+# Gemini keeps its original markers untouched; OpenRouter additionally treats
+# auth-style failures (401/unauthorized/user not found) as retriable-with-rotation.
+_RETRY_ERROR_MARKERS = ["rate limit", "quota", "429", "resource_exhausted"]
+if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+    _RETRY_ERROR_MARKERS = _RETRY_ERROR_MARKERS + ["401", "unauthorized", "user not found"]
 
 
 def _looks_like_placeholder_secret(value: str) -> bool:
@@ -656,32 +663,13 @@ def load_questions_mapping(questions_file):
     combined = {**questions_map_raw, **questions_map}
     return combined
 
-def _load_llm_tokens_from_env():
+def get_gemini_tokens_from_env():
     """
-    Load API tokens for the active LLM provider from environment variables.
-    - google:     reads GEMINI_TOKEN* / GEMINI_API_KEY* (supports rotation).
-    - openrouter: reads OPENROUTER_API_KEY (single key).
+    Load Gemini keys from common env naming conventions in deterministic order.
+    Supported:
+      - GEMINI_TOKEN, GEMINI_TOKEN_1..N
+      - GEMINI_API_KEY, GEMINI_API_KEY_1..N
     """
-    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-        tokens: list[str] = []
-        seen: set[str] = set()
-        for slot in ("OPENROUTER_API_KEY_1", "OPENROUTER_API_KEY_2", "OPENROUTER_API_KEY_3"):
-            val = (os.getenv(slot) or "").strip()
-            if val and val not in seen and not _looks_like_placeholder_secret(val):
-                tokens.append(val)
-                seen.add(val)
-        # Fallback: bare OPENROUTER_API_KEY
-        val = (os.getenv("OPENROUTER_API_KEY") or "").strip()
-        if val and val not in seen and not _looks_like_placeholder_secret(val):
-            tokens.append(val)
-            seen.add(val)
-        if not tokens:
-            logging.error("[LLM] No valid OpenRouter API keys found in environment.")
-        else:
-            logging.info("[LLM] OpenRouter: loaded %s key(s)", len(tokens))
-        return tokens
-
-    # Google Gemini path
     ordered_keys = [
         "GEMINI_TOKEN",
         "GEMINI_TOKEN_1",
@@ -711,17 +699,43 @@ def _load_llm_tokens_from_env():
     valid_tokens = [token for token in tokens if not _looks_like_placeholder_secret(token)]
     if not valid_tokens:
         logging.error(
-            "[LLM] No valid Gemini tokens found. Checked GEMINI_TOKEN* and GEMINI_API_KEY* "
+            "[Gemini] No valid Gemini tokens found. Checked GEMINI_TOKEN* and GEMINI_API_KEY* "
             "(empty/placeholder values were ignored)."
         )
     else:
-        logging.info("[LLM] Loaded %s Gemini token(s) from environment", len(valid_tokens))
+        logging.info("[Gemini] Loaded %s token(s) from environment", len(valid_tokens))
     return valid_tokens
 
 
-_LLM_TOKENS = _load_llm_tokens_from_env()
-# Alias for any remaining code that references GEMINI_TOKENS.
-GEMINI_TOKENS = _LLM_TOKENS
+def get_openrouter_tokens_from_env():
+    """
+    Load OpenRouter keys for rotation: OPENROUTER_API_KEY_1, _2, _3, ... _N.
+    Scans dynamically (no hardcoded cap) so adding OPENROUTER_API_KEY_4 to .env is enough.
+    """
+    tokens = []
+    seen = set()
+    for key in sorted(os.environ.keys()):
+        if key.startswith("OPENROUTER_API_KEY_"):
+            val = (os.getenv(key, "") or "").strip()
+            if val and val not in seen and not _looks_like_placeholder_secret(val):
+                tokens.append(val)
+                seen.add(val)
+
+    if not tokens:
+        logging.error(
+            "[OpenRouter] No valid OpenRouter tokens found. Checked OPENROUTER_API_KEY_* "
+            "(empty/placeholder values were ignored)."
+        )
+    else:
+        logging.info("[OpenRouter] Loaded %s token(s) from environment", len(tokens))
+    return tokens
+
+
+GEMINI_TOKENS = get_gemini_tokens_from_env()
+OPENROUTER_TOKENS = get_openrouter_tokens_from_env() if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER else []
+
+# Active token list used for rotation, selected once based on the configured provider.
+_LLM_TOKENS = OPENROUTER_TOKENS if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER else GEMINI_TOKENS
 
 current_token_index = 0
 
@@ -878,8 +892,8 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
 
 def get_next_gemini_token():
     global current_token_index
-    if current_token_index < len(_LLM_TOKENS):
-        token = _LLM_TOKENS[current_token_index]
+    if current_token_index < len(GEMINI_TOKENS):
+        token = GEMINI_TOKENS[current_token_index]
         logging.info(f"[Gemini] Using token: -----")
         return token
     return None
@@ -887,7 +901,7 @@ def get_next_gemini_token():
 def switch_to_next_token():
     global current_token_index
     current_token_index += 1
-    if current_token_index >= len(_LLM_TOKENS):
+    if current_token_index >= len(GEMINI_TOKENS):
         logging.error("[Gemini] All tokens exhausted!")
         return None
     token = get_next_gemini_token()
@@ -895,15 +909,44 @@ def switch_to_next_token():
         genai.configure(api_key=token)
         global model, enrollment_model
         model = genai.GenerativeModel(
-            model_name=LLM_MODEL_NAME,
+            model_name=GEMINI_MODEL_NAME,
             generation_config=_build_generation_config(),
         )
         enrollment_model = genai.GenerativeModel(
-            model_name=LLM_MODEL_NAME,
+            model_name=GEMINI_MODEL_NAME,
             generation_config=_build_generation_config(),
         )
         return token
     return None
+
+
+# === OpenRouter token rotation (parallel to the Gemini rotation above; only used
+#     when LLM_PROVIDER=openrouter — does not touch GEMINI_TOKENS/current_token_index) ===
+current_openrouter_token_index = 0
+
+def get_next_openrouter_token():
+    global current_openrouter_token_index
+    if current_openrouter_token_index < len(OPENROUTER_TOKENS):
+        token = OPENROUTER_TOKENS[current_openrouter_token_index]
+        logging.info("[OpenRouter] Using token: -----")
+        return token
+    return None
+
+def switch_to_next_openrouter_token():
+    global current_openrouter_token_index
+    current_openrouter_token_index += 1
+    if current_openrouter_token_index >= len(OPENROUTER_TOKENS):
+        logging.error("[OpenRouter] All tokens exhausted!")
+        return None
+    return get_next_openrouter_token()
+
+
+def _switch_to_next_llm_token():
+    """Provider-aware token rotation used by the retry handlers below."""
+    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+        return switch_to_next_openrouter_token()
+    return switch_to_next_token()
+
 
 # === Gemini Model Setup ===
 class AnalysisResponse(typing.TypedDict):
@@ -917,27 +960,33 @@ class EnrollmentAnalysisResponse(typing.TypedDict):
     enrollment_2025: int | None
     enrollment_increase_percentage: float | None
 
-initial_token = get_next_gemini_token()
-if not initial_token:
-    raise ValueError("[Gemini] No valid Gemini tokens found!")
+if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+    if not OPENROUTER_TOKENS:
+        raise ValueError("[OpenRouter] No valid OpenRouter tokens found!")
+    model = None
+    enrollment_model = None
+else:
+    initial_token = get_next_gemini_token()
+    if not initial_token:
+        raise ValueError("[Gemini] No valid Gemini tokens found!")
 
-genai.configure(api_key=initial_token)
+    genai.configure(api_key=initial_token)
 
-model = genai.GenerativeModel(
-    model_name=LLM_MODEL_NAME,
-    generation_config=_build_generation_config(),
-)
+    model = genai.GenerativeModel(
+        model_name=GEMINI_MODEL_NAME,
+        generation_config=_build_generation_config(),
+    )
 
-enrollment_model = genai.GenerativeModel(
-    model_name=LLM_MODEL_NAME,
-    generation_config=_build_generation_config(),
-)
+    enrollment_model = genai.GenerativeModel(
+        model_name=GEMINI_MODEL_NAME,
+        generation_config=_build_generation_config(),
+    )
 
 
 def _llm_generate(gemini_model, parts):
     """Route to OpenRouter or use the Gemini model directly."""
     if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-        return generate_content(parts, api_key=get_next_gemini_token())
+        return generate_content(parts, api_key=get_next_openrouter_token())
     return gemini_model.generate_content(parts)
 
 # === 🆕 Extra Keys Extraction Function ===
@@ -1547,7 +1596,7 @@ CORRECT JSON Response:
                 row_number=row_number or 0,
                 school_id=school_id or "unknown",
                 task=task_name or "unknown",
-                model_name=GEMINI_MODEL_NAME,
+                model_name=LLM_MODEL_NAME,
                 api_call_type=api_call_type,
                 response=response,
                 status='success',
@@ -1557,9 +1606,9 @@ CORRECT JSON Response:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted", "401", "unauthorized", "user not found"]):
+            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_token():
+                if _switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
@@ -1731,7 +1780,7 @@ Focus on:
                 row_number=row_number or 0,
                 school_id=school_id or "unknown",
                 task=task_name or "unknown",
-                model_name=GEMINI_MODEL_NAME,
+                model_name=LLM_MODEL_NAME,
                 api_call_type=api_call_type,
                 response=response,
                 status='success',
@@ -1741,9 +1790,9 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted", "401", "unauthorized", "user not found"]):
+            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_token():
+                if _switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
@@ -1859,7 +1908,7 @@ Focus on:
                 row_number=row_number or 0,
                 school_id=school_id or "unknown",
                 task=task_name or "unknown",
-                model_name=GEMINI_MODEL_NAME,
+                model_name=LLM_MODEL_NAME,
                 api_call_type=api_call_type,
                 response=response,
                 status='success',
@@ -1869,9 +1918,9 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted", "401", "unauthorized", "user not found"]):
+            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_token():
+                if _switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
