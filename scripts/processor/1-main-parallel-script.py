@@ -210,8 +210,6 @@ else:
     LLM_MODEL_NAME = GEMINI_MODEL_NAME
 
 # Retriable-error markers for the token-rotation retry handlers below.
-# Gemini keeps its original markers untouched; OpenRouter additionally treats
-# auth-style failures (401/unauthorized/user not found) as retriable-with-rotation.
 _RETRY_ERROR_MARKERS = ["rate limit", "quota", "429", "resource_exhausted"]
 if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
     _RETRY_ERROR_MARKERS = _RETRY_ERROR_MARKERS + ["401", "unauthorized", "user not found"]

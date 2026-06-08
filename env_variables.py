@@ -186,7 +186,6 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "possible_values": [PROVIDER_GEMINI, PROVIDER_OPENROUTER],
     },
 
-    # AI models (Gemini) — kept identical to the original release-1.0 entries.
     "GEMINI_API_KEY_1": {
         "message": "Gemini key slot 1",
         "optional": True,
@@ -496,10 +495,6 @@ def validate_environment(settings: Any, env_file_path: str | Path) -> None:
         )
 
     # Group requirement: at least one key must be present for the active provider.
-    # The gemini branch is byte-identical to the original release-1.0 check — it
-    # runs whenever gemini is active (the default), so existing Gemini-only
-    # deployments validate exactly as before. OpenRouter gets its own, separate
-    # branch so it isn't forced to also configure Gemini keys.
     active_provider = _normalize_compare(current_values.get("LLM_PROVIDER", PROVIDER_GEMINI) or PROVIDER_GEMINI)
 
     if active_provider == PROVIDER_OPENROUTER:

@@ -361,7 +361,6 @@ class CriteriaValidationService:
                         else:
                             raise
                 else:
-                    # Gemini path — kept identical to the original direct-genai implementation.
                     genai.configure(api_key=token)
                     content_parts = [
                         {"mime_type": mime_type, "data": image_bytes},
