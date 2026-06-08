@@ -35,6 +35,12 @@ def _looks_like_placeholder(value: str) -> bool:
     return any(marker in normalized for marker in _OPENROUTER_PLACEHOLDER_MARKERS)
 
 
+def _numeric_suffix_sort_key(key: str) -> tuple[str, int]:
+    """Sort OPENROUTER_API_KEY_<N> by numeric N so _2 precedes _10 (not lexicographic _10 < _2)."""
+    prefix, _, suffix = key.rpartition("_")
+    return (prefix, int(suffix)) if suffix.isdigit() else (key, -1)
+
+
 def _add_token(tokens: list[str], seen: set[str], raw_value: Optional[str]) -> None:
     value = (raw_value or "").strip()
     if not value or _looks_like_placeholder(value) or value in seen:
@@ -55,13 +61,19 @@ def get_openrouter_tokens(env: Optional[dict[str, str]] = None) -> list[str]:
     seen: set[str] = set()
 
     settings_dict: dict = settings.model_dump()
-    for key in sorted(settings_dict.keys()):
-        if key.startswith(OPENROUTER_API_KEY_PREFIX + "_"):
-            _add_token(tokens, seen, str(settings_dict[key] or ""))
+    matched_setting_keys = sorted(
+        (k for k in settings_dict.keys() if k.startswith(OPENROUTER_API_KEY_PREFIX + "_")),
+        key=_numeric_suffix_sort_key,
+    )
+    for key in matched_setting_keys:
+        _add_token(tokens, seen, str(settings_dict[key] or ""))
 
-    for key in sorted(source_env.keys()):
-        if key.startswith(OPENROUTER_API_KEY_PREFIX + "_"):
-            _add_token(tokens, seen, source_env.get(key))
+    matched_env_keys = sorted(
+        (k for k in source_env.keys() if k.startswith(OPENROUTER_API_KEY_PREFIX + "_")),
+        key=_numeric_suffix_sort_key,
+    )
+    for key in matched_env_keys:
+        _add_token(tokens, seen, source_env.get(key))
 
     if tokens:
         logger.info("[LLM] OpenRouter: loaded %d key(s)", len(tokens))
@@ -129,5 +141,4 @@ def build_llm_env_overrides(env: Optional[dict[str, str]] = None) -> dict[str, s
     if provider == PROVIDER_OPENROUTER:
         overrides.update(build_openrouter_env_overrides(source_env))
     overrides["LLM_PROVIDER"] = provider
-
     return overrides

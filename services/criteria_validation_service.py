@@ -333,10 +333,7 @@ class CriteriaValidationService:
             try:
                 if provider_name == PROVIDER_OPENROUTER:
                     # OpenRouter path — routed through the provider-agnostic abstraction.
-                    if mime_type.startswith("image/"):
-                        content_parts = [{"url": evidence_url}, prompt_text]
-                    else:
-                        content_parts = [{"mime_type": mime_type, "data": image_bytes}, prompt_text]
+                    content_parts = [{"mime_type": mime_type, "data": image_bytes}, prompt_text]
                     try:
                         response = await asyncio.to_thread(
                             generate_content,

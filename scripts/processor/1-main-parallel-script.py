@@ -921,22 +921,27 @@ def switch_to_next_token():
 # === OpenRouter token rotation (parallel to the Gemini rotation above; only used
 #     when LLM_PROVIDER=openrouter — does not touch GEMINI_TOKENS/current_token_index) ===
 current_openrouter_token_index = 0
+openrouter_token_rotation_lock = threading.Lock()
 
 def get_next_openrouter_token():
     global current_openrouter_token_index
-    if current_openrouter_token_index < len(OPENROUTER_TOKENS):
-        token = OPENROUTER_TOKENS[current_openrouter_token_index]
-        logging.info("[OpenRouter] Using token: -----")
-        return token
-    return None
+    with openrouter_token_rotation_lock:
+        if current_openrouter_token_index < len(OPENROUTER_TOKENS):
+            token = OPENROUTER_TOKENS[current_openrouter_token_index]
+            logging.info("[OpenRouter] Using token: -----")
+            return token
+        return None
 
 def switch_to_next_openrouter_token():
     global current_openrouter_token_index
-    current_openrouter_token_index += 1
-    if current_openrouter_token_index >= len(OPENROUTER_TOKENS):
-        logging.error("[OpenRouter] All tokens exhausted!")
-        return None
-    return get_next_openrouter_token()
+    with openrouter_token_rotation_lock:
+        current_openrouter_token_index += 1
+        if current_openrouter_token_index >= len(OPENROUTER_TOKENS):
+            logging.error("[OpenRouter] All tokens exhausted!")
+            return None
+        token = OPENROUTER_TOKENS[current_openrouter_token_index]
+        logging.info("[OpenRouter] Using token: -----")
+        return token
 
 
 def _switch_to_next_llm_token():

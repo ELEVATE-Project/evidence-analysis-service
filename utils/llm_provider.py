@@ -10,6 +10,7 @@ Call generate_content() from any call site — it branches on provider_name inte
 from __future__ import annotations
 
 import base64
+import binascii
 import logging
 from typing import Any
 
@@ -74,7 +75,7 @@ def _parts_to_openai_content(parts: list) -> list | str:
         return parts[0]
 
     content: list[dict] = []
-    for part in parts:
+    for part_index, part in enumerate(parts):
         if isinstance(part, str):
             content.append({"type": "text", "text": part})
         elif isinstance(part, dict):
@@ -84,8 +85,15 @@ def _parts_to_openai_content(parts: list) -> list | str:
             mime: str = part.get("mime_type", "")
             raw: bytes | str = part.get("data", b"")
             if isinstance(raw, str):
+                try:
+                    raw_bytes = base64.b64decode(raw, validate=True)
+                except (binascii.Error, ValueError):
+                    logger.warning(
+                        "[LLM] OpenRouter: part[%d] has malformed base64 data (mime '%s') — skipping part",
+                        part_index, mime,
+                    )
+                    continue
                 b64_data = raw
-                raw_bytes = base64.b64decode(raw)
             else:
                 b64_data = base64.b64encode(raw).decode("utf-8")
                 raw_bytes = raw
