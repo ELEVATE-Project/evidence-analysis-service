@@ -61,7 +61,7 @@
       shell: chmod 744 {{ current_path }}/venv/bin/activate
 
     - name: generate .env
-      shell: cat {{ project_path }}/data2.json | jq -r 'to_entries | .[] | "\(.key)=\(.value)"' > {{ current_path }}/.env
+      shell: cat {{ project_path }}/data2.json | jq -r 'to_entries | .[] | "\(.key)=\(if (.value | type) == "string" then (.value | gsub("\n"; "\\n")) else (.value | tostring) end)"' > {{ current_path }}/.env
       register: envConfig
 
     - debug: msg=" cred {{ envConfig }} "
