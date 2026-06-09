@@ -51,7 +51,7 @@ from models.schemas import (
 )
 from services.background_worker import BackgroundWorker
 from services.email_service import EmailService
-from services.gemini_runtime import get_gemini_model_name
+from utils.llm_provider import get_llm_model_name
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -967,7 +967,7 @@ class ExecutionService:
             organization_code=organization_code,
             name=request_data.name,
             csv_type_id=source_type.type_key,
-            ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
+            ai_model_id=request_data.ai_model_id or get_llm_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
             state=request_data.state,
@@ -1657,7 +1657,7 @@ class ExecutionService:
             organization_code=organization_code,
             name=request_data.name,
             csv_type_id=source_type.type_key,
-            ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
+            ai_model_id=request_data.ai_model_id or get_llm_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
             state=request_data.state,
