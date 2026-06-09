@@ -24,7 +24,7 @@ load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER
-from utils.llm_provider import generate_content
+from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
 import time
 from collections import deque
@@ -218,19 +218,6 @@ elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
     pass  # Gemini uses the base markers above
 
 
-def _looks_like_placeholder_secret(value: str) -> bool:
-    lower = (value or "").strip().lower()
-    if not lower:
-        return True
-    placeholder_markers = [
-        "your_gemini_api_key",
-        "your-api-key",
-        "replace_me",
-        "changeme",
-        "example",
-        "dummy",
-    ]
-    return any(marker in lower for marker in placeholder_markers)
 
 # ===== CHECKPOINT MANAGEMENT FUNCTIONS =====
 
@@ -664,82 +651,34 @@ def load_questions_mapping(questions_file):
     combined = {**questions_map_raw, **questions_map}
     return combined
 
-def get_gemini_tokens_from_env():
-    """
-    Load Gemini keys from common env naming conventions in deterministic order.
-    Supported:
-      - GEMINI_TOKEN, GEMINI_TOKEN_1..N
-      - GEMINI_API_KEY, GEMINI_API_KEY_1..N
-    """
-    ordered_keys = [
-        "GEMINI_TOKEN",
-        "GEMINI_TOKEN_1",
-        "GEMINI_TOKEN_2",
-        "GEMINI_TOKEN_3",
-        "GEMINI_API_KEY",
-        "GEMINI_API_KEY_1",
-        "GEMINI_API_KEY_2",
-        "GEMINI_API_KEY_3",
-    ]
-    tokens = []
-    seen = set()
-    for key in ordered_keys:
-        val = (os.getenv(key, "") or "").strip()
-        if val and val not in seen:
-            tokens.append(val)
-            seen.add(val)
-
-    if not tokens:
-        for key in sorted(os.environ.keys()):
-            if key.startswith("GEMINI_TOKEN") or key.startswith("GEMINI_API_KEY"):
-                val = (os.getenv(key, "") or "").strip()
-                if val and val not in seen:
-                    tokens.append(val)
-                    seen.add(val)
-
-    valid_tokens = [token for token in tokens if not _looks_like_placeholder_secret(token)]
-    if not valid_tokens:
-        logging.error(
-            "[Gemini] No valid Gemini tokens found. Checked GEMINI_TOKEN* and GEMINI_API_KEY* "
-            "(empty/placeholder values were ignored)."
-        )
-    else:
-        logging.info("[Gemini] Loaded %s token(s) from environment", len(valid_tokens))
-    return valid_tokens
-
-
-def get_openrouter_tokens_from_env():
-    """
-    Load OpenRouter keys for rotation: OPENROUTER_API_KEY_1, _2, _3, ... _N.
-    Scans dynamically (no hardcoded cap) so adding OPENROUTER_API_KEY_4 to .env is enough.
-    """
+def _load_tokens_from_env(prefixes: list, label: str) -> list:
     tokens = []
     seen = set()
     for key in sorted(os.environ.keys()):
-        if key.startswith("OPENROUTER_API_KEY_"):
+        if any(key.startswith(p) for p in prefixes):
             val = (os.getenv(key, "") or "").strip()
-            if val and val not in seen and not _looks_like_placeholder_secret(val):
+            if val and val not in seen and not _looks_like_placeholder(val):
                 tokens.append(val)
                 seen.add(val)
-
     if not tokens:
-        logging.error(
-            "[OpenRouter] No valid OpenRouter tokens found. Checked OPENROUTER_API_KEY_* "
-            "(empty/placeholder values were ignored)."
-        )
+        logging.error("[%s] No valid tokens found. (empty/placeholder values were ignored)", label)
     else:
-        logging.info("[OpenRouter] Loaded %s token(s) from environment", len(tokens))
+        logging.info("[%s] Loaded %s token(s) from environment", label, len(tokens))
     return tokens
 
 
-GEMINI_TOKENS = get_gemini_tokens_from_env()
-OPENROUTER_TOKENS = get_openrouter_tokens_from_env() if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER else []
+def get_gemini_tokens_from_env():
+    return _load_tokens_from_env(["GEMINI_TOKEN", "GEMINI_API_KEY"], "Gemini")
 
-# Active token list used for rotation, selected once based on the configured provider.
+
+def get_openrouter_tokens_from_env():
+    return _load_tokens_from_env(["OPENROUTER_API_KEY_"], "OpenRouter")
+
+
 if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-    _LLM_TOKENS = OPENROUTER_TOKENS
+    _LLM_TOKENS = get_openrouter_tokens_from_env()
 elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
-    _LLM_TOKENS = GEMINI_TOKENS
+    _LLM_TOKENS = get_gemini_tokens_from_env()
 else:
     raise ValueError(f"Unsupported LLM_PROVIDER: {_LLM_PROVIDER_NAME!r}")
 

@@ -56,7 +56,7 @@ class LLMResponse:
 # ── Shared token/model resolution helpers (used by both providers) ────────────
 
 _PLACEHOLDER_MARKERS = (
-    "your_", "replace_me", "placeholder", "example", "sample", "<", "changeme",
+    "your_", "your-api-key", "replace_me", "placeholder", "example", "sample", "<", "changeme", "dummy",
 )
 
 
