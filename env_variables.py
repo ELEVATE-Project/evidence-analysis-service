@@ -499,7 +499,7 @@ def validate_environment(settings: Any, env_file_path: str | Path) -> None:
 
     if active_provider == PROVIDER_OPENROUTER:
         _validate_openrouter_key_group(settings, OPENROUTER_API_KEY_PREFIX, PROVIDER_OPENROUTER, failures, table_rows)
-    else:
+    elif active_provider == PROVIDER_GEMINI:
         gemini_keys = [
             _setting_value(settings, "GEMINI_TOKEN"),
             _setting_value(settings, "GEMINI_API_KEY"),
@@ -526,6 +526,8 @@ def validate_environment(settings: Any, env_file_path: str | Path) -> None:
                 gemini_notes,
             ]
         )
+    else:
+        failures.append(f"LLM_PROVIDER={active_provider!r} is not supported. Add a key-group validation block for this provider.")
 
     provider = _normalize_provider(
         _setting_value(settings, "CLOUD_STORAGE_PROVIDER"),

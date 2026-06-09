@@ -11,7 +11,6 @@ import mimetypes
 import re
 from urllib.parse import urlparse
 
-import google.generativeai as genai
 import httpx
 import typing_extensions as typing
 from fastapi import HTTPException, status
@@ -22,9 +21,8 @@ from models.schemas import (
     CriteriaValidationRequest,
     CriteriaValidationResponse,
 )
-from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER
-from services.llm_runtime import get_llm_model_name, get_llm_provider_name, get_llm_tokens
-from utils.llm_provider import generate_content  # OpenRouter path only — Gemini path uses genai directly
+from core.constants import PROVIDER_GEMINI
+from utils.llm_provider import generate_content, get_llm_model_name, get_llm_provider_name, get_llm_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -331,61 +329,36 @@ class CriteriaValidationService:
 
         for token in llm_tokens:
             try:
-                if provider_name == PROVIDER_OPENROUTER:
-                    # OpenRouter path — routed through the provider-agnostic abstraction.
-                    content_parts = [{"mime_type": mime_type, "data": image_bytes}, prompt_text]
-                    try:
+                content_parts = [{"mime_type": mime_type, "data": image_bytes}, prompt_text]
+                try:
+                    response = await asyncio.to_thread(
+                        generate_content,
+                        content_parts,
+                        api_key=token,
+                        model_name=model_name,
+                        generation_config={
+                            "response_mime_type": "application/json",
+                            "response_schema": GeminiCriteriaResponse,
+                        },
+                    )
+                except Exception as strict_exc:  # noqa: BLE001
+                    strict_error = str(strict_exc).lower()
+                    if any(
+                        marker in strict_error
+                        for marker in ("response_schema", "response_mime_type", "unknown field")
+                    ):
+                        logger.warning(
+                            "%s SDK/config compatibility issue for model=%s. Retrying without schema config.",
+                            provider_name, model_name,
+                        )
                         response = await asyncio.to_thread(
                             generate_content,
                             content_parts,
                             api_key=token,
-                            generation_config={
-                                "response_mime_type": "application/json",
-                                "response_schema": GeminiCriteriaResponse,
-                            },
-                        )
-                    except Exception as strict_exc:  # noqa: BLE001
-                        strict_error = str(strict_exc).lower()
-                        if any(
-                            marker in strict_error
-                            for marker in ("response_schema", "response_mime_type", "unknown field")
-                        ):
-                            response = await asyncio.to_thread(
-                                generate_content,
-                                content_parts,
-                                api_key=token,
-                            )
-                        else:
-                            raise
-                else:
-                    genai.configure(api_key=token)
-                    content_parts = [
-                        {"mime_type": mime_type, "data": image_bytes},
-                        prompt_text,
-                    ]
-                    try:
-                        gemini_model = genai.GenerativeModel(
                             model_name=model_name,
-                            generation_config={
-                                "response_mime_type": "application/json",
-                                "response_schema": GeminiCriteriaResponse,
-                            },
                         )
-                        response = await asyncio.to_thread(gemini_model.generate_content, content_parts)
-                    except Exception as strict_exc:  # noqa: BLE001
-                        strict_error = str(strict_exc).lower()
-                        if any(
-                            marker in strict_error
-                            for marker in ("response_schema", "response_mime_type", "unknown field")
-                        ):
-                            logger.warning(
-                                "Gemini SDK/config compatibility issue for model=%s. Retrying without schema config.",
-                                model_name,
-                            )
-                            gemini_model = genai.GenerativeModel(model_name=model_name)
-                            response = await asyncio.to_thread(gemini_model.generate_content, content_parts)
-                        else:
-                            raise
+                    else:
+                        raise
 
                 payload = self._extract_json_payload(getattr(response, "text", ""))
                 normalized_response = self._normalize_output(

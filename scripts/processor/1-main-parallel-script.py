@@ -5,7 +5,6 @@ import ast
 import concurrent.futures
 import pandas as pd
 import json
-import google.generativeai as genai
 import httpx
 import base64
 import typing_extensions as typing
@@ -206,13 +205,17 @@ _LLM_PROVIDER_NAME = (os.getenv("LLM_PROVIDER") or PROVIDER_GEMINI).strip().lowe
 if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
     OPENROUTER_MODEL_NAME = (os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash-lite").strip()
     LLM_MODEL_NAME = OPENROUTER_MODEL_NAME
-else:
+elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
     LLM_MODEL_NAME = GEMINI_MODEL_NAME
+else:
+    raise ValueError(f"Unsupported LLM_PROVIDER: {_LLM_PROVIDER_NAME!r}")
 
 # Retriable-error markers for the token-rotation retry handlers below.
 _RETRY_ERROR_MARKERS = ["rate limit", "quota", "429", "resource_exhausted"]
 if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
     _RETRY_ERROR_MARKERS = _RETRY_ERROR_MARKERS + ["401", "unauthorized", "user not found"]
+elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
+    pass  # Gemini uses the base markers above
 
 
 def _looks_like_placeholder_secret(value: str) -> bool:
@@ -733,9 +736,12 @@ GEMINI_TOKENS = get_gemini_tokens_from_env()
 OPENROUTER_TOKENS = get_openrouter_tokens_from_env() if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER else []
 
 # Active token list used for rotation, selected once based on the configured provider.
-_LLM_TOKENS = OPENROUTER_TOKENS if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER else GEMINI_TOKENS
-
-current_token_index = 0
+if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+    _LLM_TOKENS = OPENROUTER_TOKENS
+elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
+    _LLM_TOKENS = GEMINI_TOKENS
+else:
+    raise ValueError(f"Unsupported LLM_PROVIDER: {_LLM_PROVIDER_NAME!r}")
 
 def _build_generation_config():
     """
@@ -888,67 +894,28 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
     return response_json
 
 
-def get_next_gemini_token():
-    global current_token_index
-    if current_token_index < len(GEMINI_TOKENS):
-        token = GEMINI_TOKENS[current_token_index]
-        logging.info(f"[Gemini] Using token: -----")
-        return token
-    return None
+current_llm_token_index = 0
+llm_token_rotation_lock = threading.Lock()
 
-def switch_to_next_token():
-    global current_token_index
-    current_token_index += 1
-    if current_token_index >= len(GEMINI_TOKENS):
-        logging.error("[Gemini] All tokens exhausted!")
-        return None
-    token = get_next_gemini_token()
-    if token:
-        genai.configure(api_key=token)
-        global model, enrollment_model
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
-            generation_config=_build_generation_config(),
-        )
-        enrollment_model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
-            generation_config=_build_generation_config(),
-        )
-        return token
-    return None
-
-
-# === OpenRouter token rotation (parallel to the Gemini rotation above; only used
-#     when LLM_PROVIDER=openrouter — does not touch GEMINI_TOKENS/current_token_index) ===
-current_openrouter_token_index = 0
-openrouter_token_rotation_lock = threading.Lock()
-
-def get_next_openrouter_token():
-    global current_openrouter_token_index
-    with openrouter_token_rotation_lock:
-        if current_openrouter_token_index < len(OPENROUTER_TOKENS):
-            token = OPENROUTER_TOKENS[current_openrouter_token_index]
-            logging.info("[OpenRouter] Using token: -----")
+def get_next_llm_token():
+    global current_llm_token_index
+    with llm_token_rotation_lock:
+        if current_llm_token_index < len(_LLM_TOKENS):
+            token = _LLM_TOKENS[current_llm_token_index]
+            logging.info("[LLM] Using token: -----")
             return token
         return None
 
-def switch_to_next_openrouter_token():
-    global current_openrouter_token_index
-    with openrouter_token_rotation_lock:
-        current_openrouter_token_index += 1
-        if current_openrouter_token_index >= len(OPENROUTER_TOKENS):
-            logging.error("[OpenRouter] All tokens exhausted!")
+def switch_to_next_llm_token():
+    global current_llm_token_index
+    with llm_token_rotation_lock:
+        current_llm_token_index += 1
+        if current_llm_token_index >= len(_LLM_TOKENS):
+            logging.error("[LLM] All tokens exhausted!")
             return None
-        token = OPENROUTER_TOKENS[current_openrouter_token_index]
-        logging.info("[OpenRouter] Using token: -----")
+        token = _LLM_TOKENS[current_llm_token_index]
+        logging.info("[LLM] Using token: -----")
         return token
-
-
-def _switch_to_next_llm_token():
-    """Provider-aware token rotation used by the retry handlers below."""
-    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-        return switch_to_next_openrouter_token()
-    return switch_to_next_token()
 
 
 # === Gemini Model Setup ===
@@ -963,34 +930,17 @@ class EnrollmentAnalysisResponse(typing.TypedDict):
     enrollment_2025: int | None
     enrollment_increase_percentage: float | None
 
-if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-    if not OPENROUTER_TOKENS:
-        raise ValueError("[OpenRouter] No valid OpenRouter tokens found!")
-    model = None
-    enrollment_model = None
-else:
-    initial_token = get_next_gemini_token()
-    if not initial_token:
-        raise ValueError("[Gemini] No valid Gemini tokens found!")
+if not _LLM_TOKENS:
+    raise ValueError(f"[{_LLM_PROVIDER_NAME}] No valid tokens found!")
 
-    genai.configure(api_key=initial_token)
 
-    model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL_NAME,
+def _llm_generate(parts):
+    return generate_content(
+        parts,
+        api_key=get_next_llm_token(),
+        model_name=LLM_MODEL_NAME,
         generation_config=_build_generation_config(),
     )
-
-    enrollment_model = genai.GenerativeModel(
-        model_name=GEMINI_MODEL_NAME,
-        generation_config=_build_generation_config(),
-    )
-
-
-def _llm_generate(gemini_model, parts):
-    """Route to OpenRouter or use the Gemini model directly."""
-    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-        return generate_content(parts, api_key=get_next_openrouter_token())
-    return gemini_model.generate_content(parts)
 
 # === 🆕 Extra Keys Extraction Function ===
 def extract_extra_keys(text_fields, task_name=None):
@@ -1460,7 +1410,6 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
 
-            selected_model = enrollment_model if is_enrollment_task else model
             if is_enrollment_task:
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
@@ -1582,7 +1531,7 @@ CORRECT JSON Response:
 ====================================================================================
 """
 
-            response = _llm_generate(selected_model, [
+            response = _llm_generate([
                 {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
                 prompt,
             ])
@@ -1611,7 +1560,7 @@ CORRECT JSON Response:
             error_str = str(e).lower()
             if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if _switch_to_next_llm_token():
+                if switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
@@ -1733,7 +1682,6 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
             
-            selected_model = enrollment_model if is_enrollment_task else model
             if is_enrollment_task:
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
@@ -1766,7 +1714,7 @@ Focus on:
 - Educational context and completeness"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            response = _llm_generate(selected_model, [
+            response = _llm_generate([
                 {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
                 prompt,
             ])
@@ -1795,7 +1743,7 @@ Focus on:
             error_str = str(e).lower()
             if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if _switch_to_next_llm_token():
+                if switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
@@ -1861,7 +1809,6 @@ Focus on:
 - Quality and completeness of the data
 - Educational context"""
             
-            selected_model = enrollment_model if is_enrollment_task else model
             if is_enrollment_task:
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
@@ -1897,7 +1844,7 @@ Focus on:
 - Educational context"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            response = _llm_generate(selected_model, [prompt])
+            response = _llm_generate([prompt])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1923,7 +1870,7 @@ Focus on:
             error_str = str(e).lower()
             if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if _switch_to_next_llm_token():
+                if switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
