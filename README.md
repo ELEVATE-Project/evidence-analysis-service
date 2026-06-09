@@ -1,166 +1,149 @@
-# Evidence Analysis Service - Setup Guide
+<div align="center">
 
-This README contains setup information only.
+# Evidence Analysis System
 
-## Official Dependency Installation Docs
+AI-powered platform for processing and analyzing CSV-based educational evidence data using Google Gemini, FastAPI, and React.
 
-- Python: https://www.python.org/downloads/
-- pip: https://pip.pypa.io/en/stable/installation/
-- PostgreSQL: https://www.postgresql.org/download/
-- RabbitMQ: https://www.rabbitmq.com/download.html
-- Redis: https://redis.io/docs/latest/operate/oss_and_stack/install/install-redis/
-- Celery (installation): https://docs.celeryq.dev/en/stable/getting-started/introduction.html#installation
-- Node.js + npm (for frontend): https://nodejs.org/en/download
-- Docker Desktop / Docker Engine: https://docs.docker.com/get-docker/
-- Docker Compose: https://docs.docker.com/compose/install/
+![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)
+[![Python](https://img.shields.io/badge/python-3.12+-brightgreen.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.104.1-009688.svg)](https://fastapi.tiangolo.com/)
+[![React](https://img.shields.io/badge/React-18.2.0-61DAFB.svg)](https://react.dev/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-## Local Setup (Backend)
+</div>
 
-1. Navigate to backend directory:
+---
 
-```bash
-cd evidence-analysis-service-p1
+## Supported Operating Systems
+
+- **Ubuntu** 20.04+
+- **macOS** 12 Monterey+
+- **Windows** 11+ (via WSL2)
+
+---
+
+## Architecture
+
+```
+┌─────────────────┐      ┌──────────────────┐      ┌─────────────────┐
+│  React Frontend │─────▶│  FastAPI Backend │─────▶│   PostgreSQL    │
+│   (Port 5173)   │◀─────│   (Port 6002)    │◀─────│   (Port 5432)   │
+└─────────────────┘      └──────────────────┘      └─────────────────┘
+                                  │
+                    ┌─────────────┼─────────────┐
+                    │             │             │
+                    ▼             ▼             ▼
+              ┌──────────┐  ┌──────────┐  ┌──────────┐
+              │ RabbitMQ │  │  Celery  │  │  GCP /   │
+              │  Broker  │  │  Worker  │  │  AWS S3  │
+              └──────────┘  └──────────┘  └──────────┘
 ```
 
-2. Create and activate virtual environment:
+**Backend**: FastAPI · PostgreSQL · Celery · RabbitMQ · SQLAlchemy · Google Gemini  
+**Frontend**: React 18 · Vite · Tailwind CSS · shadcn/ui  
+**Infrastructure**: Docker · Alembic · GCP / AWS S3
 
+---
+
+## Setup & Deployment
+
+<details>
+<summary><b>Docker Setup (Recommended)</b></summary>
+<br>
+
+- [macOS — Docker](documentation/setup-mac-docker.md)
+- [Ubuntu — Docker](documentation/setup-ubuntu-docker.md)
+- [Windows — Docker](documentation/setup-ubuntu-docker.md) (via WSL2, follow Ubuntu guide)
+
+</details>
+
+<details>
+<summary><b>Native Setup</b></summary>
+<br>
+
+- [macOS — Native](documentation/setup-mac-native.md)
+- [Ubuntu — Native](documentation/setup-ubuntu-native.md)
+- [Windows — Native](documentation/setup-ubuntu-native.md) (via WSL2, follow Ubuntu guide)
+
+</details>
+
+---
+
+## API Documentation
+
+- **Swagger UI**: http://localhost:6002/docs — interactive API explorer
+- **ReDoc**: http://localhost:6002/redoc — alternative reference
+- **OpenAPI JSON**: http://localhost:6002/openapi.json
+
+<details>
+<summary>Key API Endpoints</summary>
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/v1/auth/login` | Authenticate user |
+| `GET`  | `/api/v1/auth/me` | Get current user |
+| `POST` | `/api/v1/auth/logout` | Logout user |
+| `GET`  | `/api/v1/executions` | List executions |
+| `POST` | `/api/v1/executions` | Create execution |
+| `GET`  | `/api/v1/executions/{id}` | Get execution details |
+| `POST` | `/api/v1/executions/{id}/run` | Start AI processing |
+| `PATCH`| `/api/v1/executions/{id}` | Update execution |
+| `GET`  | `/api/v1/reports` | List reports |
+| `GET`  | `/api/v1/reports/{id}/download` | Download report |
+| `POST` | `/api/v1/cloud/signed-upload-url` | Get signed upload URL |
+| `POST` | `/api/v1/cloud/signed-download-url` | Get signed download URL |
+
+**Example**:
 ```bash
-python3 -m venv venv
-source venv/bin/activate
+# Login
+curl -X POST http://localhost:6002/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin123"}'
+
+# List executions
+curl http://localhost:6002/api/v1/executions \
+  -H "Authorization: Bearer <token>"
 ```
 
-3. Install Python dependencies:
+</details>
 
-```bash
-pip install -r requirements.txt
-```
+---
 
-4. Configure environment:
+## Service Ports
 
-```bash
-cp .env.example .env
-```
+| Service | Port | URL | Credentials |
+|---------|------|-----|-------------|
+| Frontend | 5173 | http://localhost:5173 | admin / admin123 |
+| Backend API | 8000 | http://localhost:8000 | — |
+| API Docs | 8000 | http://localhost:6002/docs | — |
+| PostgreSQL | 5432 | localhost:5432 | postgres / postgres |
+| RabbitMQ | 5672 | AMQP | guest / guest |
+| RabbitMQ UI | 15672 | http://localhost:15672 | guest / guest |
+| Redis (optional) | 6379 | localhost:6379 | — |
 
-5. Update required `.env` values:
+⚠️ Change default passwords before production deployment.
 
-- Check all the env keys in .env.sample and add values in .env
+---
 
-6. Initialize database:
+## Documentation
 
-```bash
-python db/init_db.py
-python db/seed_data.py
-```
+| Guide | Description |
+|-------|-------------|
+| [Documentation Hub](documentation/README.md) | Full setup index and checklist |
+| [Environment Variables](documentation/environment-setup.md) | Complete `.env` reference |
+| [Troubleshooting](documentation/troubleshooting.md) | Common issues and fixes |
+| [Migration Workflow](documentation/migration-workflow.md) | Alembic migration reference |
 
-7. Run database migrations:
+---
 
-```bash
-alembic upgrade head
-```
+## License
 
-8. Upload sample CSV files to cloud storage:
+MIT License — see [LICENSE](LICENSE) for details.
 
-```bash
-# Upload sample files and update database with cloud paths
-python scripts/upload_sample_csvs.py
-```
+---
 
-**Note:** The upload script should be run after the migration. It uploads sample CSV files from `public/sample-csv/projects/` to cloud storage and updates the database with the file paths.
+<div align="center">
 
-9. Start API server:
+**Made with ❤️ by the Evidence Analysis Team**
 
-```bash
-uvicorn main:app --reload
-```
-
-10. Start Celery worker (separate terminal):
-
-```bash
-celery -A celery_worker.celery_app worker --loglevel=info --concurrency=2
-```
-
-Backend URL: `http://localhost:8000`  
-Swagger Docs: `http://localhost:8000/docs`
-
-## Local Setup (Frontend)
-
-1. Open a new terminal and navigate:
-
-```bash
-cd evidence-analysis-portal-p1
-```
-
-2. Install dependencies and run:
-
-```bash
-npm install
-npm run dev
-```
-
-Frontend URL: `http://localhost:5173`
-
-## Docker Compose Setup (Frontend + Backend on Same Network)
-
-From project root (`Phase1`):
-
-```bash
-docker compose up -d
-```
-
-Services:
-
-- Frontend: `http://localhost:5173`
-- Backend: `http://localhost:8000`
-- PostgreSQL: `localhost:5432`
-- RabbitMQ: `localhost:5672` (Management UI: `http://localhost:15672`)
-- Redis: `localhost:6379`
-
-## Migrations & Scripts
-
-### Database Migrations (Alembic)
-
-**Run migrations:**
-```bash
-alembic upgrade head
-```
-
-**Check current version:**
-```bash
-alembic current
-```
-
-**View migration history:**
-```bash
-alembic history --verbose
-```
-
-**Rollback one migration:**
-```bash
-alembic downgrade -1
-```
-
-**Create new migration:**
-```bash
-alembic revision -m "description"
-```
-
-**Auto-generate migration from model changes:**
-```bash
-alembic revision --autogenerate -m "description"
-```
-
-### Setup Order
-
-**New Installation:**
-```bash
-python db/init_db.py
-python db/seed_data.py
-alembic upgrade head
-python scripts/upload_sample_csvs.py
-```
-
-**Existing Installation:**
-```bash
-alembic upgrade head
-python scripts/upload_sample_csvs.py
-```
+</div>

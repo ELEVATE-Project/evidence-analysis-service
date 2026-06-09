@@ -81,7 +81,7 @@ ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Counters for skipped rows
-skip_task_start = 0
+skip_task_not_in_questions = 0
 skip_evidence_null = 0
 skip_school_mismatch = 0
 skip_invalid_evidence = 0  # Renamed from skip_non_image to handle all invalid evidence types
@@ -261,6 +261,10 @@ def normalize_task_name(name):
     s = s.rstrip("'.\" ").strip()
     # Collapse internal whitespace
     s = re.sub(r'\s+', ' ', s)
+    # NFC normalization: critical for Devanagari text where the same glyph can be
+    # stored as precomposed (NFC) or decomposed (NFD) codepoints across files.
+    import unicodedata
+    s = unicodedata.normalize("NFC", s)
     return s.lower()
 
 # === Helper function to determine evidence type ===
@@ -398,9 +402,11 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         skip_school_mismatch += 1
         continue
 
-    # Rule 1: Skip if task starts with 1 or 8
-    if task.startswith("2") or task.startswith("8"):
-        skip_task_start += 1
+    # Rule 1: Skip if task has no matching question in the Question CSV.
+    # Valid tasks are derived dynamically from the Question CSV — no task numbers hardcoded.
+    _q = lookup_dict.get(task) or lookup_dict_norm.get(task_norm)
+    if not _q:
+        skip_task_not_in_questions += 1
         continue
 
     # Rule 2: Skip if evidence is empty or "null" (after cleaning for check)
@@ -416,9 +422,8 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         continue
 
     # === Step 4: Fill additional columns & Clean District ===
-    # Try exact match first, then fall back to normalized match
-    _q = lookup_dict.get(task) or lookup_dict_norm.get(task_norm)
-    row["Task Evidence Question"] = _q if _q else "Null"
+    # _q already resolved above in Rule 1 — reuse directly.
+    row["Task Evidence Question"] = _q
     row["Task evidence Q and A"] = ""
     row["Task evidence Q and A Reason"] = ""
     row["Relevance Tag"] = ""
@@ -516,8 +521,8 @@ if USE_SCHOOL_FILTER:
 else:
     print(f"{'School ID filtering':<50} {'SKIPPED':<10} {remaining_after_school}")
 
-remaining_after_task = remaining_after_school - skip_task_start
-print(f"{'Task starts with 1 or 8':<50} {skip_task_start:<10} {remaining_after_task}")
+remaining_after_task = remaining_after_school - skip_task_not_in_questions
+print(f"{'Task not found in Question CSV':<50} {skip_task_not_in_questions:<10} {remaining_after_task}")
 
 remaining_after_evidence = remaining_after_task - skip_evidence_null
 print(f"{'Task Evidence empty or null':<50} {skip_evidence_null:<10} {remaining_after_evidence}")
@@ -545,7 +550,7 @@ print(f"✅ Loaded all {total_input_rows} rows from '{INPUT_CSV}' (This is the c
 print("✅ Iterated through all rows with a progress bar.")
 print("\n  For EACH row, the following filters were applied (in order):")
 print("  ➡️ 1. SKIPPED if 'School ID' was not in the valid school list.")
-print("  ➡️ 2. SKIPPED if 'Tasks' value (after cleaning) started with '1' or '8'.")
+print("  ➡️ 2. SKIPPED if 'Tasks' value has no matching question in the Question CSV.")
 print("  ➡️ 3. SKIPPED if 'Task Evidence' (after cleaning) was empty or 'null'.")
 print("  ➡️ 4. SKIPPED if 'Task Evidence' URL was not valid (not image/pdf/excel).")
 

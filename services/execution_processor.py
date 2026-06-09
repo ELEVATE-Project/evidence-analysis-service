@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import traceback
+from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -99,22 +100,23 @@ def _count_csv_rows(file_path: Path, sample_size: int = 10000) -> tuple[int, boo
                 return count, False
         
         # Large files: estimate from sample
+        # Use readline() throughout — next() on a csv.reader disables tell()
         with file_path.open("r", encoding="utf-8", newline="") as csv_file:
-            reader = csv.reader(csv_file)
-            header = next(reader, None)
-            if header is None:
+            header_line = csv_file.readline()
+            if not header_line:
                 return 0, False
-            
+
             header_pos = csv_file.tell()
-            
-            # Read sample rows
+
+            # Read sample rows using readline() to keep tell() functional
             sample_count = 0
-            for i, row in enumerate(reader):
-                if i >= sample_size:
+            for i in range(sample_size):
+                line = csv_file.readline()
+                if not line:
                     break
-                if any((cell or "").strip() for cell in row):
+                if line.strip():
                     sample_count += 1
-            
+
             sample_end_pos = csv_file.tell()
             
             if sample_count == 0:
@@ -414,6 +416,24 @@ def _claim_execution(
     return execution
 
 
+def _read_actual_cost_from_log(api_usage_log_path: Path) -> Decimal | None:
+    """Read the total cost from the api_usage_log.csv written by the processor script."""
+    try:
+        if not api_usage_log_path.exists():
+            return None
+        total = Decimal("0")
+        with open(api_usage_log_path, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                val = row.get("Total_Cost_USD", "").strip()
+                if val:
+                    total += Decimal(val)
+        return total.quantize(Decimal("0.0001"))
+    except Exception as exc:
+        logger.warning("Could not read actual cost from api_usage_log: %s", exc)
+        return None
+
+
 def _mark_execution_completed(
     execution_id: UUID,
     *,
@@ -421,6 +441,7 @@ def _mark_execution_completed(
     output_file_size: int,
     processed_rows: int,
     elapsed_seconds: float,
+    actual_cost: Decimal | None = None,
 ) -> None:
     db = SessionLocal()
     try:
@@ -443,6 +464,8 @@ def _mark_execution_completed(
         execution.completed_at = completed_at
         execution.failure_reason = None
         execution.error_logs = None
+        if actual_cost is not None:
+            execution.actual_cost = actual_cost
         if processed_rows > 0:
             execution.average_processing_time = elapsed_seconds / processed_rows
         db.commit()
@@ -684,12 +707,14 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         )
 
         elapsed_seconds = (datetime.utcnow() - start_ts).total_seconds()
+        actual_cost = _read_actual_cost_from_log(workspace.api_usage_log_file)
         _mark_execution_completed(
             execution.id,
             output_file_url=uploaded_output_path,
             output_file_size=len(output_bytes),
             processed_rows=processed_rows,
             elapsed_seconds=elapsed_seconds,
+            actual_cost=actual_cost,
         )
 
         if settings.EXECUTION_CLEANUP_ON_SUCCESS and workspace.root_dir.exists():

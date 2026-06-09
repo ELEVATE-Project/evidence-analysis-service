@@ -186,6 +186,8 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "possible_values": [PROVIDER_GEMINI, PROVIDER_OPENROUTER],
     },
 
+    # AI models
+
     "GEMINI_API_KEY_1": {
         "message": "Gemini key slot 1",
         "optional": True,
