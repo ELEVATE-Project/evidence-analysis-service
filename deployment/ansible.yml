@@ -52,7 +52,7 @@
       shell: mv "{{ release_path }}"/* {{ current_path }}/
 
     - name: Create Python virtual environment
-      shell: cd {{ current_path }} && python3.12 -m venv venv
+      shell: cd {{ current_path }} && python3.10 -m venv venv
 
     - name: Install Python dependencies
       shell: cd {{ current_path }} && ./venv/bin/pip install --upgrade pip && ./venv/bin/pip install -r requirements.txt
