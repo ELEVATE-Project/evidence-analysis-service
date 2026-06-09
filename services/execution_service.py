@@ -2,11 +2,13 @@
 Execution Service
 Handles execution business logic, file management, and background processing
 """
+import asyncio
 import csv
 import io
 import json
 import logging
 import re
+import unicodedata
 from copy import deepcopy
 from datetime import datetime
 from decimal import Decimal
@@ -49,6 +51,7 @@ from models.schemas import (
 )
 from services.background_worker import BackgroundWorker
 from services.email_service import EmailService
+from services.gemini_runtime import get_gemini_model_name
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
@@ -85,12 +88,16 @@ class ExecutionService:
         return float(value)
 
     @staticmethod
-    def _to_execution_response(execution: Execution) -> ExecutionResponse:
+    def _to_execution_response(execution: Execution, checkpoint_override: Optional[dict] = None) -> ExecutionResponse:
         """Build API response with safe fallbacks for nullable legacy fields."""
         # For in-progress executions, try to get real-time progress from checkpoint file
         processed_rows = execution.processed_rows or 0
         if (execution.status or "").strip().lower() == "in_progress":
-            checkpoint_progress = ExecutionService._read_processor_checkpoint_file(execution.id)
+            # Use pre-fetched checkpoint data when available (avoids per-row file I/O)
+            if checkpoint_override is not None:
+                checkpoint_progress = checkpoint_override
+            else:
+                checkpoint_progress = ExecutionService._read_processor_checkpoint_file(execution.id)
             checkpoint_processed = checkpoint_progress.get('total_processed', 0)
             # Use checkpoint value if it's more recent (higher) than DB value
             if checkpoint_processed > processed_rows:
@@ -113,6 +120,7 @@ class ExecutionService:
             criterias_file_url=execution.criterias_file_url,
             output_file_url=execution.output_file_url,
             estimated_cost=ExecutionService._to_float(execution.estimated_cost),
+            actual_cost=ExecutionService._to_float(execution.actual_cost),
             estimated_time_seconds=execution.estimated_time_seconds,
             failure_reason=execution.failure_reason,
             average_processing_time=ExecutionService._to_float(execution.average_processing_time),
@@ -587,12 +595,35 @@ class ExecutionService:
         self._validate_questions_csv_metadata(headers, source_type)
 
     @staticmethod
-    def _validate_tasks_cross_reference_from_values(input_tasks: set[str], questions_tasks: set[str]) -> None:
-        missing_tasks = questions_tasks - input_tasks
-        if not missing_tasks:
-            return
+    def _normalize_task_string(value: str) -> str:
+        """Normalize a task string for reliable cross-file matching.
 
-        missing_list = list(missing_tasks)[:5]
+        Handles: leading/trailing single/double quotes, extra internal whitespace,
+        Unicode NFC normalization (critical for Hindi/Devanagari text where the
+        same glyph can be encoded as precomposed NFC or decomposed NFD).
+        """
+        # NFC normalization first so subsequent operations work on stable codepoints
+        value = unicodedata.normalize("NFC", value)
+        # Strip surrounding whitespace, then surrounding quote characters
+        value = value.strip().strip("\"'").strip()
+        # Collapse runs of internal whitespace (including NBSP U+00A0, ZWSP, etc.)
+        value = re.sub(r"[\s ​‌‍﻿]+", " ", value).strip()
+        return value
+
+    @staticmethod
+    def _validate_tasks_cross_reference_from_values(input_tasks: set[str], questions_tasks: set[str]) -> None:
+        normalized_input = {ExecutionService._normalize_task_string(t) for t in input_tasks}
+        normalized_questions = {ExecutionService._normalize_task_string(t) for t in questions_tasks}
+        # Build map from normalized → original so error messages show readable originals
+        questions_norm_to_orig = {
+            ExecutionService._normalize_task_string(t): t for t in questions_tasks
+        }
+        missing_normalized = normalized_questions - normalized_input
+        if not missing_normalized:
+            return
+        missing_tasks = {questions_norm_to_orig.get(n, n) for n in missing_normalized}
+
+        missing_list = sorted(missing_tasks)[:5]
         missing_display = ", ".join(missing_list)
         if len(missing_tasks) > 5:
             missing_display += f" (and {len(missing_tasks) - 5} more)"
@@ -791,6 +822,13 @@ class ExecutionService:
             return {}
 
     @staticmethod
+    async def _read_processor_checkpoint_file_async(execution_id: UUID) -> dict[str, Any]:
+        """Non-blocking wrapper: offloads sync file I/O to a thread pool."""
+        return await asyncio.to_thread(
+            ExecutionService._read_processor_checkpoint_file, execution_id
+        )
+
+    @staticmethod
     def _checkpoint(execution: Execution) -> dict[str, Any]:
         checkpoint = deepcopy(execution.checkpoint_data) if isinstance(execution.checkpoint_data, dict) else {}
         files = checkpoint.get("files")
@@ -929,7 +967,7 @@ class ExecutionService:
             organization_code=organization_code,
             name=request_data.name,
             csv_type_id=source_type.type_key,
-            ai_model_id=request_data.ai_model_id or "gemini-2.5-flash",
+            ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
             state=request_data.state,
@@ -1619,7 +1657,7 @@ class ExecutionService:
             organization_code=organization_code,
             name=request_data.name,
             csv_type_id=source_type.type_key,
-            ai_model_id=request_data.ai_model_id or "gemini-2.5-flash",
+            ai_model_id=request_data.ai_model_id or get_gemini_model_name(),
             program_ref_id=request_data.program_ref_id,
             program_name=request_data.program_name,
             state=request_data.state,
@@ -1934,7 +1972,7 @@ class ExecutionService:
             message="Email notification sent successfully.",
         )
 
-    def list_executions(
+    async def list_executions(
         self,
         user_id: str,
         page: int = 1,
@@ -1995,11 +2033,18 @@ class ExecutionService:
             if normalized_search_query:
                 query = query.filter(Execution.name.ilike(f"%{normalized_search_query}%"))
 
-            total = query.count()
-
-            executions = query.order_by(Execution.created_at.desc()).offset(
-                (page - 1) * page_size
-            ).limit(page_size).all()
+            # Single DB round-trip: window function returns count alongside paginated rows
+            count_col = func.count().over().label("total_count")
+            paginated = (
+                query
+                .add_columns(count_col)
+                .order_by(Execution.created_at.desc())
+                .offset((page - 1) * page_size)
+                .limit(page_size)
+                .all()
+            )
+            total = paginated[0].total_count if paginated else 0
+            executions = [row[0] for row in paginated]
         except SQLAlchemyError as exc:
             logger.exception("Failed to query executions")
             raise HTTPException(
@@ -2007,10 +2052,25 @@ class ExecutionService:
                 detail="Failed to fetch executions. Please verify database schema/configuration.",
             ) from exc
 
+        # Fetch checkpoint files for all in-progress executions concurrently (non-blocking)
+        in_progress_execs = [e for e in executions if (e.status or "").strip().lower() == "in_progress"]
+        checkpoint_map: dict[str, dict] = {}
+        if in_progress_execs:
+            checkpoint_results = await asyncio.gather(
+                *[ExecutionService._read_processor_checkpoint_file_async(e.id) for e in in_progress_execs],
+                return_exceptions=True,
+            )
+            for exec_obj, result in zip(in_progress_execs, checkpoint_results):
+                if not isinstance(result, Exception):
+                    checkpoint_map[str(exec_obj.id)] = result
+
         items: list[ExecutionResponse] = []
         for execution in executions:
             try:
-                items.append(self._to_execution_response(execution))
+                items.append(self._to_execution_response(
+                    execution,
+                    checkpoint_override=checkpoint_map.get(str(execution.id)),
+                ))
             except ValidationError:
                 logger.exception("Skipping malformed execution row: %s", getattr(execution, "id", "unknown"))
 

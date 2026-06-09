@@ -204,11 +204,12 @@ class ExecutionResponse(BaseModel):
     criterias_file_url: Optional[str] = None
     output_file_url: Optional[str] = None
     estimated_cost: Optional[float] = None
+    actual_cost: Optional[float] = None
     estimated_time_seconds: Optional[int] = None
     failure_reason: Optional[str] = None
     average_processing_time: Optional[float] = None
     notification_sent: bool = False
-    
+
     class Config:
         from_attributes = True
 
@@ -226,7 +227,6 @@ class ExecutionDetail(ExecutionResponse):
     criterias_mode: Optional[str] = None
     criterias_config: Optional[Dict[str, Any]] = None
     threshold_config: Optional[Dict[str, Any]] = None
-    actual_cost: Optional[float] = None
     input_file_size: Optional[int] = None
     criterias_file_size: Optional[int] = None
     output_file_size: Optional[int] = None
@@ -332,6 +332,17 @@ class ReportDownloadResponse(BaseModel):
     """Signed URL response for report download."""
     download_url: str
     expires_in_seconds: int
+
+
+class ReportDataPageResponse(BaseModel):
+    """Paginated report data response — avoids shipping the full CSV to the browser."""
+    page: int
+    page_size: int
+    total_filtered: int
+    total_all: int
+    rows: list[Dict[str, str]]
+    headers: list[str]
+    summary: Optional[Dict[str, Any]] = None  # populated on every request
 
 
 # ============ Status Schemas ============

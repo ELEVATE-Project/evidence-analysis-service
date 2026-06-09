@@ -170,12 +170,6 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "optional": True,
         "default": "",
     },
-    "LOCAL_STORAGE_PATH": {
-        "message": "Local storage path (unused when cloud provider is aws/gcp)",
-        "optional": True,
-        "default": "./uploads",
-    },
-
     # AI models
     "GEMINI_API_KEY_1": {
         "message": "Gemini key slot 1",
