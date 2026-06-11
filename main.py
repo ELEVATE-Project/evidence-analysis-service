@@ -157,18 +157,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Base path the app is mounted under behind a reverse proxy/gateway
+# (e.g. "/evidence-analysis"). Empty string serves all routes at root.
+BASE_PATH = settings.API_BASE_PATH
+
 # Include routers
-app.include_router(auth.router, prefix="/api/v1/auth", tags=["Authentication"])
-app.include_router(executions.router, prefix="/api/v1/executions", tags=["Executions"])
-app.include_router(cloud_services.router, prefix="/api/v1/cloud-services", tags=["Cloud Services"])
-app.include_router(reports.router, prefix="/api/v1/reports", tags=["Reports"])
-app.include_router(entities.router, prefix="/api/v1", tags=["Entities"])
-app.include_router(config.router, prefix="/api/v1/config", tags=["Config"])
-app.include_router(criteria.router, prefix="/api/v1/criteria", tags=["Criteria Validation"])
-app.include_router(notifications.router, prefix="/api/v1/notifications", tags=["Notifications"])
+app.include_router(auth.router, prefix=f"{BASE_PATH}/api/v1/auth", tags=["Authentication"])
+app.include_router(executions.router, prefix=f"{BASE_PATH}/api/v1/executions", tags=["Executions"])
+app.include_router(cloud_services.router, prefix=f"{BASE_PATH}/api/v1/cloud-services", tags=["Cloud Services"])
+app.include_router(reports.router, prefix=f"{BASE_PATH}/api/v1/reports", tags=["Reports"])
+app.include_router(entities.router, prefix=f"{BASE_PATH}/api/v1", tags=["Entities"])
+app.include_router(config.router, prefix=f"{BASE_PATH}/api/v1/config", tags=["Config"])
+app.include_router(criteria.router, prefix=f"{BASE_PATH}/api/v1/criteria", tags=["Criteria Validation"])
+app.include_router(notifications.router, prefix=f"{BASE_PATH}/api/v1/notifications", tags=["Notifications"])
 
 
-@app.get("/", response_model=RootResponse, include_in_schema=False)
+@app.get(f"{BASE_PATH}/", response_model=RootResponse, include_in_schema=False)
 async def root():
     """Root endpoint"""
     return RootResponse(
@@ -178,7 +182,7 @@ async def root():
     )
 
 
-@app.get("/health", response_model=HealthResponse, include_in_schema=False)
+@app.get(f"{BASE_PATH}/health", response_model=HealthResponse, include_in_schema=False)
 async def health_check():
     """Health check endpoint"""
     return HealthResponse(status="healthy")

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "Evidence Analysis System"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
+
+    # Base path prefix the app is mounted under (e.g. "/evidence-analysis"
+    # when served behind a reverse proxy/gateway). Leave empty to serve at root.
+    API_BASE_PATH: str = ""
     
     # Database
     DATABASE_URL: str = ""
@@ -153,6 +157,19 @@ class Settings(BaseSettings):
                 return False
 
         return value
+
+    @field_validator("API_BASE_PATH", mode="before")
+    @classmethod
+    def normalize_api_base_path(cls, value):
+        """Normalize to '' or a leading-slash path with no trailing slash."""
+        if not isinstance(value, str):
+            return value
+
+        raw = value.strip().rstrip("/")
+        if not raw:
+            return ""
+
+        return raw if raw.startswith("/") else f"/{raw}"
 
     @field_validator("CORS_ORIGINS", "ALLOWED_EXTENSIONS", mode="before")
     @classmethod

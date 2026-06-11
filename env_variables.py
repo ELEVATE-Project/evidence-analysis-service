@@ -29,6 +29,11 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "optional": True,
         "default": False,
     },
+    "API_BASE_PATH": {
+        "message": "Base path prefix the app is mounted under (e.g. '/evidence-analysis')",
+        "optional": True,
+        "default": "",
+    },
 
     # Core startup requirements
     "DATABASE_URL": {
