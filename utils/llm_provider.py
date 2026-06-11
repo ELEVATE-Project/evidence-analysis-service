@@ -380,13 +380,21 @@ def _openrouter_generate(
             "Install it with: pip install 'openai>=1.0.0'"
         ) from exc
     client = openai.OpenAI(base_url=settings.OPENROUTER_BASE_URL, api_key=api_key)
-    temperature = float((generation_config or {}).get("temperature", 0.1))
+    config = generation_config or {}
+    temperature = float(config.get("temperature", 0.1))
     message_content = _parts_to_openai_content(parts)
-    response = client.chat.completions.create(
-        model=model_name,
-        temperature=temperature,
-        messages=[{"role": "user", "content": message_content}],
+    create_kwargs: dict[str, Any] = {
+        "model": model_name,
+        "temperature": temperature,
+        "messages": [{"role": "user", "content": message_content}],
+    }
+    if config.get("response_format") == "json_object":
+        create_kwargs["response_format"] = {"type": "json_object"}
+    logger.debug(
+        "openrouter_request  model=%s  json_format_enforced=%s  temperature=%.2f",
+        model_name, "response_format" in create_kwargs, temperature,
     )
+    response = client.chat.completions.create(**create_kwargs)
     text = (response.choices[0].message.content or "") if response.choices else ""
     usage = getattr(response, "usage", None)
     return LLMResponse(

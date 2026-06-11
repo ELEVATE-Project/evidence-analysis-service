@@ -846,11 +846,12 @@ llm_token_rotation_lock = threading.Lock()
 def get_next_llm_token():
     global current_llm_token_index
     with llm_token_rotation_lock:
-        if current_llm_token_index < len(_LLM_TOKENS):
-            token = _LLM_TOKENS[current_llm_token_index]
-            logging.info("[LLM] Using token: -----")
-            return token
-        return None
+        index = min(current_llm_token_index, len(_LLM_TOKENS) - 1)
+        if current_llm_token_index >= len(_LLM_TOKENS):
+            logging.debug("[LLM] All tokens exhausted; reusing last valid token index=%d for retry", index)
+        token = _LLM_TOKENS[index]
+        logging.info("[LLM] Using token: -----")
+        return token
 
 def switch_to_next_llm_token():
     global current_llm_token_index
