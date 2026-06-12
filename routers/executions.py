@@ -271,11 +271,11 @@ async def list_executions(
     page_size: int = Query(20, ge=1, le=500),
     status_filter: Optional[str] = None,
     status_group: Optional[str] = None,
-    state_filter: Optional[str] = None,
-    district_filter: Optional[str] = None,
+    states: Optional[str] = Query(None, description="Comma-separated state names, e.g. Bihar,Haryana"),
     search_query: Optional[str] = None,
 ):
     """List executions with pagination and optional server-side filters."""
+    states_filter = [s.strip() for s in states.split(",") if s.strip()] if states else None
     try:
         return await execution_service.list_executions(
             user_id=current_user.id,
@@ -283,8 +283,7 @@ async def list_executions(
             page_size=page_size,
             status_filter=status_filter,
             status_group=status_group,
-            state_filter=state_filter,
-            district_filter=district_filter,
+            states_filter=states_filter,
             search_query=search_query,
         )
     except HTTPException:
