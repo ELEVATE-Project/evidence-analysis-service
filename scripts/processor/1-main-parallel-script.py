@@ -24,7 +24,7 @@ load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
 # Allow importing from the service package (services/, core/, etc.)
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
-from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER
+from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER, OPENROUTER_MODELS_URL
 from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
 import time
@@ -219,6 +219,66 @@ elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
 else:
     raise ValueError(f"Unsupported LLM_PROVIDER: {_LLM_PROVIDER_NAME!r}")
 
+_OPENROUTER_PRICING_FETCH_ATTEMPTS = 3
+_OPENROUTER_PRICING_FETCH_BACKOFF_SECONDS = 1.0
+
+
+def _fetch_openrouter_model_pricing(model_name):
+    """Fetch live per-token pricing for `model_name` from OpenRouter's /models endpoint.
+
+    Retries a few times to ride out transient network errors. Returns a dict
+    shaped like a GEMINI_PRICING entry (price per 1M tokens), or None if the
+    model isn't listed or every attempt fails.
+    """
+    for attempt in range(1, _OPENROUTER_PRICING_FETCH_ATTEMPTS + 1):
+        try:
+            response = httpx.get(OPENROUTER_MODELS_URL, timeout=10)
+            response.raise_for_status()
+            for model in response.json().get("data", []):
+                if model.get("id") == model_name:
+                    pricing = model.get("pricing", {})
+                    return {
+                        "input_price_per_million": float(pricing.get("prompt", 0)) * 1_000_000,
+                        "output_price_per_million": float(pricing.get("completion", 0)) * 1_000_000,
+                    }
+            logger.warning("openrouter_pricing_not_found  model=%s", model_name)
+            return None
+        except Exception as exc:
+            logger.warning(
+                "openrouter_pricing_fetch_failed  model=%s  attempt=%d/%d  error=%s",
+                model_name, attempt, _OPENROUTER_PRICING_FETCH_ATTEMPTS, exc,
+            )
+            if attempt < _OPENROUTER_PRICING_FETCH_ATTEMPTS:
+                time.sleep(_OPENROUTER_PRICING_FETCH_BACKOFF_SECONDS * attempt)
+    return None
+
+
+# Resolved once at startup so per-row cost calculations don't re-fetch.
+_OPENROUTER_MODEL_PRICING = (
+    _fetch_openrouter_model_pricing(LLM_MODEL_NAME)
+    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER
+    else None
+)
+
+
+def _resolve_model_pricing(model_name):
+    """Resolve pricing for `model_name` for the active LLM_PROVIDER.
+
+    - openrouter: use pricing fetched live from OpenRouter's /models endpoint.
+      If that lookup failed at startup, return None — the caller must record
+      the cost as unavailable rather than substituting another model's rates.
+    - gemini: look up the static GEMINI_PRICING table (no live pricing API
+      exists for Gemini). If `model_name` isn't in the table, return None
+      rather than silently substituting gemini-2.0-flash's rates.
+    """
+    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+        return _OPENROUTER_MODEL_PRICING
+    elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
+        pricing = GEMINI_PRICING.get(model_name)
+        if pricing is None:
+            logger.warning("gemini_pricing_not_found  model=%s", model_name)
+        return pricing
+
 # Retriable-error markers for the token-rotation retry handlers below.
 _RETRY_ERROR_MARKERS = ["rate limit", "quota", "429", "resource_exhausted"]
 if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
@@ -372,6 +432,7 @@ def initialize_api_usage_log():
                 'Input_Cost_USD',
                 'Output_Cost_USD',
                 'Total_Cost_USD',
+                'Pricing_Status',
                 'Status',
                 'Error_Message'
             ])
@@ -406,12 +467,19 @@ def log_api_usage(worker_id, input_file, row_number, school_id, task, model_name
             output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
             total_tokens = getattr(response.usage_metadata, 'total_token_count', 0)
         
-        # Calculate costs based on model pricing
-        pricing = GEMINI_PRICING.get(model_name, GEMINI_PRICING.get("gemini-2.0-flash"))
-        input_cost = (input_tokens / 1_000_000) * pricing["input_price_per_million"]
-        output_cost = (output_tokens / 1_000_000) * pricing["output_price_per_million"]
-        total_cost = input_cost + output_cost
-        
+        # Calculate costs based on model pricing. If pricing couldn't be resolved
+        # (e.g. OpenRouter /models lookup failed for this model), record the
+        # cost as unavailable rather than substituting another model's rates.
+        pricing = _resolve_model_pricing(model_name)
+        if pricing is None:
+            input_cost = output_cost = total_cost = 0.0
+            pricing_status = 'unavailable'
+        else:
+            input_cost = (input_tokens / 1_000_000) * pricing["input_price_per_million"]
+            output_cost = (output_tokens / 1_000_000) * pricing["output_price_per_million"]
+            total_cost = input_cost + output_cost
+            pricing_status = 'ok'
+
         # Thread-safe write to CSV
         with api_usage_lock:
             with open(API_USAGE_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
@@ -432,6 +500,7 @@ def log_api_usage(worker_id, input_file, row_number, school_id, task, model_name
                     f"{input_cost:.6f}",
                     f"{output_cost:.6f}",
                     f"{total_cost:.6f}",
+                    pricing_status,
                     status,
                     error_message[:100] if error_message else ''  # Truncate error to 100 chars
                 ])

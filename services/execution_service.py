@@ -2019,7 +2019,7 @@ class ExecutionService:
 
             if states_filter:
                 query = query.filter(
-                    or_(Execution.states.contains([s]) for s in states_filter)
+                    or_(*[Execution.states.contains([s]) for s in states_filter])
                 )
 
             normalized_search_query = (search_query or "").strip()
