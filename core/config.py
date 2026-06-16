@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Evidence Analysis System"
     PORTAL_BASE_URL: str = "http://localhost:5173"
     
+    # Server
+    APP_PORT: int = 8000
+
     # Background Processing
     MAX_CONCURRENT_JOBS: int = 5
     WORKER_CHECK_INTERVAL: int = 5  # seconds
