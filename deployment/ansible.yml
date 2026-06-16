@@ -83,8 +83,12 @@
     - name: Delete release folder
       shell: rm -rf {{ release_path }}
 
+    - name: Read APP_PORT from .env
+      shell: "grep '^APP_PORT=' {{ current_path }}/.env | cut -d'=' -f2"
+      register: app_port_result
+
     - name: Start backend with pm2
-      command: "pm2 start {{ current_path }}/venv/bin/uvicorn --cwd={{ current_path }} --name evidence-backend --interpreter {{ current_path }}/venv/bin/python -- main:app --host 0.0.0.0 --port 8120"
+      command: "pm2 start {{ current_path }}/venv/bin/uvicorn --cwd={{ current_path }} --name evidence-backend --interpreter {{ current_path }}/venv/bin/python -- main:app --host 0.0.0.0 --port {{ app_port_result.stdout | default('8000') }}"
       register: backendPm2Info
 
     - name: debug backend info
