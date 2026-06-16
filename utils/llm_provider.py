@@ -61,6 +61,20 @@ _PLACEHOLDER_MARKERS = (
 
 
 def _looks_like_placeholder(value: str) -> bool:
+    """
+    Return True if *value* is blank or looks like an unfilled template placeholder.
+
+    Used to filter out API keys that were copied verbatim from .env.example without
+    being replaced (e.g. 'your-api-key-here', '<GEMINI_KEY>', 'replace_me').
+    Checks against a fixed set of marker strings defined in _PLACEHOLDER_MARKERS.
+
+    Args:
+        value: Raw API key string read from env or settings.
+
+    Returns:
+        True  — value is empty, whitespace-only, or contains a placeholder marker.
+        False — value looks like a real key and should be used for LLM calls.
+    """
     normalized = (value or "").strip().lower()
     if not normalized:
         return True
