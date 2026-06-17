@@ -424,33 +424,34 @@ def _read_resume_state(output_dir, input_filename, worker_id):
     """
     processed_keys = set()
     relevant_count_dict = {}
-    partial_output = os.path.join(output_dir, input_filename)
+    # Output files are named "processed_<stem>.csv" — not "<stem>.csv"
+    partial_output = os.path.join(output_dir, f"processed_{input_filename.split('.')[0]}.csv")
     if not os.path.isfile(partial_output):
         return processed_keys, relevant_count_dict
     try:
-        needed = {"UUID", "Tasks", "Task Evidence", "Relevance Tag"}
+        needed = {"UUID", INPUT_TASK_COLUMN, "Task Evidence", "Relevance Tag"}
         df = pd.read_csv(
             partial_output,
             usecols=lambda c: c in needed,
             engine="python",
             on_bad_lines="skip",
         )
-        if {"UUID", "Tasks", "Task Evidence"}.issubset(df.columns):
+        if {"UUID", INPUT_TASK_COLUMN, "Task Evidence"}.issubset(df.columns):
             for _, r in df.iterrows():
                 uuid = str(r["UUID"]).strip()
-                task = str(r["Tasks"]).strip()
+                task = str(r[INPUT_TASK_COLUMN]).strip()
                 url  = str(r["Task Evidence"]).strip()
                 if url and url.lower() not in ("nan", "null", "none", ""):
                     processed_keys.add((uuid, task, url))
-        if {"UUID", "Tasks", "Relevance Tag"}.issubset(df.columns):
+        if {"UUID", INPUT_TASK_COLUMN, "Relevance Tag"}.issubset(df.columns):
             rel_rows = df[df["Relevance Tag"] == "Relevant"]
             for _, r in rel_rows.iterrows():
-                key = (str(r["UUID"]).strip(), str(r["Tasks"]).strip())
+                key = (str(r["UUID"]).strip(), str(r[INPUT_TASK_COLUMN]).strip())
                 relevant_count_dict[key] = relevant_count_dict.get(key, 0) + 1
         if processed_keys or relevant_count_dict:
             logging.info(
                 f"[Worker {worker_id}] [Resume] {len(processed_keys)} rows already done, "
-                f"{len(relevant_count_dict)} (UUID,Tasks) keys with Relevant count — from output CSV"
+                f"{len(relevant_count_dict)} (UUID, {INPUT_TASK_COLUMN}) keys with Relevant count — from output CSV"
             )
     except Exception as e:
         logging.warning(
@@ -2117,7 +2118,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             def _already_done(row):
                 return (
                     str(row.get("UUID", "")).strip(),
-                    str(row.get("Tasks", "")).strip(),
+                    str(row.get(INPUT_TASK_COLUMN, "")).strip(),
                     str(row.get("Task Evidence", "")).strip(),
                 ) in resume_processed_keys
             mask = df_filtered.apply(_already_done, axis=1)
