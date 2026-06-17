@@ -554,7 +554,13 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "Execution is missing input/questions file URLs."
             )
 
-        _cleanup_workspace_root(execution.id)
+        if settings.PROCESSOR_RESUME_FROM_CHECKPOINT:
+            _resume_root = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution.id)
+            if _resume_root.exists():
+                logger.info("resume_skip_cleanup  execution=%s  workspace=%s", execution.id, _resume_root)
+            # workspace absent on first run — _build_workspace creates it fresh below
+        else:
+            _cleanup_workspace_root(execution.id)
         workspace = _build_workspace(execution.id)
 
         input_bytes = _run_async(storage_service.download_file(execution.input_file_url))
@@ -586,10 +592,25 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         processor_script = _resolve_script_path(settings.PROCESSOR_SCRIPT_PATH)
 
         base_env = _inject_llm_env(os.environ.copy())
+
+        # Per-(user, task) relevant-evidence cap config for this execution. Resolved once
+        # here because BOTH subprocesses need it: the pre-processor must keep each
+        # (UUID, task) group inside one split file (group-aware splitting), and the
+        # processor enforces the cap. Driven solely by this execution's threshold_config.
+        cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
+        cap_enabled = bool(cap_config.get("enable_relevant_cap"))
+        max_relevant = (
+            cap_config.get("max_relevant_per_user_task") or settings.MAX_RELEVANT_PER_USER_TASK
+        )
+
         preprocessor_env = {
             **base_env,
             "PYTHONUNBUFFERED": "1",
         }
+        if cap_enabled:
+            # Group-aware splitting is only needed (and only correct) when the cap is on.
+            # When off, the pre-processor keeps its original fixed-size splitting untouched.
+            preprocessor_env["PREPROCESS_GROUP_AWARE_SPLIT"] = "true"
         configured_columns = _resolve_processor_columns_from_config(db, execution)
         question_task_column = configured_columns.get("task_column", "")
         question_text_column = configured_columns.get("question_text_column", "")
@@ -664,6 +685,18 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = question_task_column
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
+
+        # Per-(user, task) relevant-evidence cap (config resolved above). The per-execution
+        # setting is the single source of truth, so set the flag explicitly either way for
+        # determinism. Passed via env, not CLI, so the values never appear in `ps`.
+        processor_env["ENABLE_RELEVANT_CAP"] = "true" if cap_enabled else "false"
+        if cap_enabled:
+            processor_env["MAX_RELEVANT_PER_USER_TASK"] = str(max_relevant)
+            logger.info(
+                "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
+                execution.id,
+                max_relevant,
+            )
 
         processor_cmd = [
             sys.executable,

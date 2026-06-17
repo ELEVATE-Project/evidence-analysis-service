@@ -121,7 +121,12 @@ class Settings(BaseSettings):
     PROCESSOR_RESUME_FROM_CHECKPOINT: bool = False
     ESTIMATED_COST_PER_INPUT_ROW: float = 0.001
     ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
-    
+
+    # Relevant-evidence cap (per user+task). Normally opt-in per execution via the create
+    # form (the limit rides inside Execution.threshold_config). This service-level value is
+    # only the fallback used if an execution enables the cap without specifying a number.
+    MAX_RELEVANT_PER_USER_TASK: int = 2
+
     # File Splitting Configuration
     # Manual mode: Set SPLIT_FILES and ROWS_PER_FILE to specific values
     # Dynamic mode: Leave unset or empty, system will calculate optimal splits
