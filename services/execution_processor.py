@@ -27,8 +27,8 @@ from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from services.email_service import EmailService
-from services.gemini_runtime import build_gemini_env_overrides
 from services.storage_service import StorageService
+from utils.llm_provider import build_llm_env_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -367,13 +367,14 @@ def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     )
 
 
-def _inject_gemini_env(base_env: dict[str, str]) -> dict[str, str]:
+def _inject_llm_env(base_env: dict[str, str]) -> dict[str, str]:
     """
-    Ensure processor subprocess receives Gemini auth/model env even when
-    parent process loaded values via pydantic settings only.
+    Ensure the processor subprocess receives LLM auth/model env even when
+    the parent process loaded values only via pydantic settings.
+    Propagates LLM_PROVIDER and the corresponding provider credentials.
     """
     env = dict(base_env)
-    env.update(build_gemini_env_overrides(base_env))
+    env.update(build_llm_env_overrides(base_env))
     return env
 
 
@@ -584,7 +585,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         preprocessor_script = _resolve_script_path(settings.PREPROCESS_SCRIPT_PATH)
         processor_script = _resolve_script_path(settings.PROCESSOR_SCRIPT_PATH)
 
-        base_env = _inject_gemini_env(os.environ.copy())
+        base_env = _inject_llm_env(os.environ.copy())
         preprocessor_env = {
             **base_env,
             "PYTHONUNBUFFERED": "1",

@@ -11,7 +11,6 @@ import mimetypes
 import re
 from urllib.parse import urlparse
 
-import google.generativeai as genai
 import httpx
 import typing_extensions as typing
 from fastapi import HTTPException, status
@@ -22,7 +21,8 @@ from models.schemas import (
     CriteriaValidationRequest,
     CriteriaValidationResponse,
 )
-from services.gemini_runtime import get_gemini_model_name, get_gemini_tokens
+from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER
+from utils.llm_provider import generate_content, get_llm_model_name, get_llm_provider_name, get_llm_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +204,7 @@ class CriteriaValidationService:
         *,
         evidence_criteria: list[str],
         model_name: str,
+        source: str = PROVIDER_GEMINI,
     ) -> CriteriaValidationResponse:
         raw_answers = payload.get("answers")
         raw_reasonings = payload.get("reasonings")
@@ -242,7 +243,7 @@ class CriteriaValidationService:
         ]
 
         return CriteriaValidationResponse(
-            source="gemini",
+            source=source,
             model=model_name,
             relevance_tag=relevance_tag,
             criteria_results=criteria_results,
@@ -315,32 +316,43 @@ class CriteriaValidationService:
         image_bytes, mime_type = await self._download_image(evidence_url)
         prompt_text = self._build_prompt(request_data.prompt, evidence_criteria)
 
-        gemini_tokens = get_gemini_tokens()
-        if not gemini_tokens:
+        llm_tokens = get_llm_tokens()
+        if not llm_tokens:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Gemini configuration is missing. Please contact support.",
+                detail="LLM configuration is missing. Please contact support.",
             )
 
-        model_name = get_gemini_model_name()
+        model_name = get_llm_model_name()
+        provider_name = get_llm_provider_name()
         last_error: Exception | None = None
 
-        for token in gemini_tokens:
+        if provider_name == PROVIDER_GEMINI:
+            structured_generation_config: dict = {
+                "response_mime_type": "application/json",
+                "response_schema": GeminiCriteriaResponse,
+            }
+        elif provider_name == PROVIDER_OPENROUTER:
+            structured_generation_config = {"response_format": "json_object"}
+        else:
+            structured_generation_config = {}
+
+        logger.debug(
+            "criteria_validation_request  provider=%s  model=%s  generation_config_keys=%s  criteria_count=%d",
+            provider_name, model_name, list(structured_generation_config.keys()), len(evidence_criteria),
+        )
+
+        for token in llm_tokens:
             try:
-                genai.configure(api_key=token)
-                content_parts = [
-                    {"mime_type": mime_type, "data": image_bytes},
-                    prompt_text,
-                ]
+                content_parts = [{"mime_type": mime_type, "data": image_bytes}, prompt_text]
                 try:
-                    model = genai.GenerativeModel(
+                    response = await asyncio.to_thread(
+                        generate_content,
+                        content_parts,
+                        api_key=token,
                         model_name=model_name,
-                        generation_config={
-                            "response_mime_type": "application/json",
-                            "response_schema": GeminiCriteriaResponse,
-                        },
+                        generation_config=structured_generation_config,
                     )
-                    response = await asyncio.to_thread(model.generate_content, content_parts)
                 except Exception as strict_exc:  # noqa: BLE001
                     strict_error = str(strict_exc).lower()
                     if any(
@@ -348,19 +360,34 @@ class CriteriaValidationService:
                         for marker in ("response_schema", "response_mime_type", "unknown field")
                     ):
                         logger.warning(
-                            "Gemini SDK/config compatibility issue for model=%s. Retrying without schema config.",
-                            model_name,
+                            "%s SDK/config compatibility issue for model=%s. Retrying without schema config.",
+                            provider_name, model_name,
                         )
-                        model = genai.GenerativeModel(model_name=model_name)
-                        response = await asyncio.to_thread(model.generate_content, content_parts)
+                        response = await asyncio.to_thread(
+                            generate_content,
+                            content_parts,
+                            api_key=token,
+                            model_name=model_name,
+                        )
                     else:
                         raise
 
-                payload = self._extract_json_payload(getattr(response, "text", ""))
+                response_text = getattr(response, "text", "") or ""
+                payload = self._extract_json_payload(response_text)
+                logger.debug(
+                    "criteria_validation_response  provider=%s  model=%s  response_chars=%d  payload_parsed=%s  payload_keys=%s",
+                    provider_name, model_name, len(response_text), bool(payload), list(payload.keys()),
+                )
+                if not payload:
+                    logger.warning(
+                        "criteria_validation_empty_payload  provider=%s  model=%s  response_preview=%s",
+                        provider_name, model_name, response_text[:200],
+                    )
                 normalized_response = self._normalize_output(
                     payload,
                     evidence_criteria=evidence_criteria,
                     model_name=model_name,
+                    source=provider_name,
                 )
                 return normalized_response
             except Exception as exc:  # noqa: BLE001

@@ -8,6 +8,7 @@ from pathlib import Path
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import List
+from core.constants import PROVIDER_GEMINI
 from env_variables import validate_environment
 
 SERVICE_ROOT = Path(__file__).resolve().parent.parent
@@ -21,6 +22,10 @@ class Settings(BaseSettings):
     APP_NAME: str = "Evidence Analysis System"
     APP_VERSION: str = "1.0.0"
     DEBUG: bool = False
+
+    # Base path prefix the app is mounted under (e.g. "/evidence-analysis"
+    # when served behind a reverse proxy/gateway). Leave empty to serve at root.
+    API_BASE_PATH: str = ""
     
     # Database
     DATABASE_URL: str = ""
@@ -57,11 +62,21 @@ class Settings(BaseSettings):
     CLOUD_STORAGE_SECRET: str = ""
     CLOUD_STORAGE_BUCKET_TYPE: str = "private"
     
+    # Local Storage
+    LOCAL_STORAGE_PATH: str = "./uploads"
+    
+    # LLM Provider Selection
+    LLM_PROVIDER: str = PROVIDER_GEMINI
+
     # AI Models (Gemini)
     GEMINI_API_KEY_1: str = ""
     GEMINI_API_KEY_2: str = ""
     GEMINI_API_KEY_3: str = ""
     GEMINI_MODEL: str = "gemini-2.5-flash"
+
+    # OpenRouter
+    OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     
     # Notification control
     IS_NOTIFICATION_ENABLED: bool = True
@@ -80,6 +95,9 @@ class Settings(BaseSettings):
     SMTP_FROM_NAME: str = "Evidence Analysis System"
     PORTAL_BASE_URL: str = "http://localhost:5173"
     
+    # Server
+    APP_PORT: int = 8000
+
     # Background Processing
     MAX_CONCURRENT_JOBS: int = 5
     WORKER_CHECK_INTERVAL: int = 5  # seconds
@@ -143,6 +161,19 @@ class Settings(BaseSettings):
 
         return value
 
+    @field_validator("API_BASE_PATH", mode="before")
+    @classmethod
+    def normalize_api_base_path(cls, value):
+        """Normalize to '' or a leading-slash path with no trailing slash."""
+        if not isinstance(value, str):
+            return value
+
+        raw = value.strip().rstrip("/")
+        if not raw:
+            return ""
+
+        return raw if raw.startswith("/") else f"/{raw}"
+
     @field_validator("CORS_ORIGINS", "ALLOWED_EXTENSIONS", mode="before")
     @classmethod
     def parse_list_settings(cls, value):
@@ -165,7 +196,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = str(ENV_FILE_PATH)
         case_sensitive = True
-        extra = "ignore"
+        extra = "allow"
 
 
 # Initialize settings

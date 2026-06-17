@@ -1,10 +1,10 @@
 import os
+import sys
 import argparse
 import ast
 import concurrent.futures
 import pandas as pd
 import json
-import google.generativeai as genai
 import httpx
 import base64
 import typing_extensions as typing
@@ -21,6 +21,11 @@ from dotenv import load_dotenv
 # Load .env from service root explicitly so subprocess cwd doesn't matter.
 SERVICE_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
+# Allow importing from the service package (services/, core/, etc.)
+if str(SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVICE_ROOT))
+from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER, OPENROUTER_MODELS_URL
+from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
 import time
 from collections import deque
@@ -204,20 +209,84 @@ GEMINI_PRICING = {
 
 GEMINI_MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
 
+_LLM_PROVIDER_NAME = (os.getenv("LLM_PROVIDER") or PROVIDER_GEMINI).strip().lower()
 
-def _looks_like_placeholder_secret(value: str) -> bool:
-    lower = (value or "").strip().lower()
-    if not lower:
-        return True
-    placeholder_markers = [
-        "your_gemini_api_key",
-        "your-api-key",
-        "replace_me",
-        "changeme",
-        "example",
-        "dummy",
-    ]
-    return any(marker in lower for marker in placeholder_markers)
+if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+    OPENROUTER_MODEL_NAME = (os.getenv("OPENROUTER_MODEL") or "google/gemini-2.5-flash-lite").strip()
+    LLM_MODEL_NAME = OPENROUTER_MODEL_NAME
+elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
+    LLM_MODEL_NAME = GEMINI_MODEL_NAME
+else:
+    raise ValueError(f"Unsupported LLM_PROVIDER: {_LLM_PROVIDER_NAME!r}")
+
+_OPENROUTER_PRICING_FETCH_ATTEMPTS = 3
+_OPENROUTER_PRICING_FETCH_BACKOFF_SECONDS = 1.0
+
+
+def _fetch_openrouter_model_pricing(model_name):
+    """Fetch live per-token pricing for `model_name` from OpenRouter's /models endpoint.
+
+    Retries a few times to ride out transient network errors. Returns a dict
+    shaped like a GEMINI_PRICING entry (price per 1M tokens), or None if the
+    model isn't listed or every attempt fails.
+    """
+    for attempt in range(1, _OPENROUTER_PRICING_FETCH_ATTEMPTS + 1):
+        try:
+            response = httpx.get(OPENROUTER_MODELS_URL, timeout=10)
+            response.raise_for_status()
+            for model in response.json().get("data", []):
+                if model.get("id") == model_name:
+                    pricing = model.get("pricing", {})
+                    return {
+                        "input_price_per_million": float(pricing.get("prompt", 0)) * 1_000_000,
+                        "output_price_per_million": float(pricing.get("completion", 0)) * 1_000_000,
+                    }
+            logger.warning("openrouter_pricing_not_found  model=%s", model_name)
+            return None
+        except Exception as exc:
+            logger.warning(
+                "openrouter_pricing_fetch_failed  model=%s  attempt=%d/%d  error=%s",
+                model_name, attempt, _OPENROUTER_PRICING_FETCH_ATTEMPTS, exc,
+            )
+            if attempt < _OPENROUTER_PRICING_FETCH_ATTEMPTS:
+                time.sleep(_OPENROUTER_PRICING_FETCH_BACKOFF_SECONDS * attempt)
+    return None
+
+
+# Resolved once at startup so per-row cost calculations don't re-fetch.
+_OPENROUTER_MODEL_PRICING = (
+    _fetch_openrouter_model_pricing(LLM_MODEL_NAME)
+    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER
+    else None
+)
+
+
+def _resolve_model_pricing(model_name):
+    """Resolve pricing for `model_name` for the active LLM_PROVIDER.
+
+    - openrouter: use pricing fetched live from OpenRouter's /models endpoint.
+      If that lookup failed at startup, return None — the caller must record
+      the cost as unavailable rather than substituting another model's rates.
+    - gemini: look up the static GEMINI_PRICING table (no live pricing API
+      exists for Gemini). If `model_name` isn't in the table, return None
+      rather than silently substituting gemini-2.0-flash's rates.
+    """
+    if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+        return _OPENROUTER_MODEL_PRICING
+    elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
+        pricing = GEMINI_PRICING.get(model_name)
+        if pricing is None:
+            logger.warning("gemini_pricing_not_found  model=%s", model_name)
+        return pricing
+
+# Retriable-error markers for the token-rotation retry handlers below.
+_RETRY_ERROR_MARKERS = ["rate limit", "quota", "429", "resource_exhausted"]
+if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+    _RETRY_ERROR_MARKERS = _RETRY_ERROR_MARKERS + ["401", "unauthorized", "user not found"]
+elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
+    pass  # Gemini uses the base markers above
+
+
 
 # ===== CHECKPOINT MANAGEMENT FUNCTIONS =====
 
@@ -363,6 +432,7 @@ def initialize_api_usage_log():
                 'Input_Cost_USD',
                 'Output_Cost_USD',
                 'Total_Cost_USD',
+                'Pricing_Status',
                 'Status',
                 'Error_Message'
             ])
@@ -397,12 +467,19 @@ def log_api_usage(worker_id, input_file, row_number, school_id, task, model_name
             output_tokens = getattr(response.usage_metadata, 'candidates_token_count', 0)
             total_tokens = getattr(response.usage_metadata, 'total_token_count', 0)
         
-        # Calculate costs based on model pricing
-        pricing = GEMINI_PRICING.get(model_name, GEMINI_PRICING.get("gemini-2.0-flash"))
-        input_cost = (input_tokens / 1_000_000) * pricing["input_price_per_million"]
-        output_cost = (output_tokens / 1_000_000) * pricing["output_price_per_million"]
-        total_cost = input_cost + output_cost
-        
+        # Calculate costs based on model pricing. If pricing couldn't be resolved
+        # (e.g. OpenRouter /models lookup failed for this model), record the
+        # cost as unavailable rather than substituting another model's rates.
+        pricing = _resolve_model_pricing(model_name)
+        if pricing is None:
+            input_cost = output_cost = total_cost = 0.0
+            pricing_status = 'unavailable'
+        else:
+            input_cost = (input_tokens / 1_000_000) * pricing["input_price_per_million"]
+            output_cost = (output_tokens / 1_000_000) * pricing["output_price_per_million"]
+            total_cost = input_cost + output_cost
+            pricing_status = 'ok'
+
         # Thread-safe write to CSV
         with api_usage_lock:
             with open(API_USAGE_LOG_FILE, 'a', newline='', encoding='utf-8') as f:
@@ -423,6 +500,7 @@ def log_api_usage(worker_id, input_file, row_number, school_id, task, model_name
                     f"{input_cost:.6f}",
                     f"{output_cost:.6f}",
                     f"{total_cost:.6f}",
+                    pricing_status,
                     status,
                     error_message[:100] if error_message else ''  # Truncate error to 100 chars
                 ])
@@ -654,52 +732,36 @@ def load_questions_mapping(questions_file):
     combined = {**questions_map_raw, **questions_map}
     return combined
 
-def get_gemini_tokens_from_env():
-    """
-    Load Gemini keys from common env naming conventions in deterministic order.
-    Supported:
-      - GEMINI_TOKEN, GEMINI_TOKEN_1..N
-      - GEMINI_API_KEY, GEMINI_API_KEY_1..N
-    """
-    ordered_keys = [
-        "GEMINI_TOKEN",
-        "GEMINI_TOKEN_1",
-        "GEMINI_TOKEN_2",
-        "GEMINI_TOKEN_3",
-        "GEMINI_API_KEY",
-        "GEMINI_API_KEY_1",
-        "GEMINI_API_KEY_2",
-        "GEMINI_API_KEY_3",
-    ]
+def _load_tokens_from_env(prefixes: list, label: str) -> list:
     tokens = []
     seen = set()
-    for key in ordered_keys:
-        val = (os.getenv(key, "") or "").strip()
-        if val and val not in seen:
-            tokens.append(val)
-            seen.add(val)
-
+    for key in sorted(os.environ.keys()):
+        if any(key.startswith(p) for p in prefixes):
+            val = (os.getenv(key, "") or "").strip()
+            if val and val not in seen and not _looks_like_placeholder(val):
+                tokens.append(val)
+                seen.add(val)
     if not tokens:
-        for key in sorted(os.environ.keys()):
-            if key.startswith("GEMINI_TOKEN") or key.startswith("GEMINI_API_KEY"):
-                val = (os.getenv(key, "") or "").strip()
-                if val and val not in seen:
-                    tokens.append(val)
-                    seen.add(val)
-
-    valid_tokens = [token for token in tokens if not _looks_like_placeholder_secret(token)]
-    if not valid_tokens:
-        logging.error(
-            "[Gemini] No valid Gemini tokens found. Checked GEMINI_TOKEN* and GEMINI_API_KEY* "
-            "(empty/placeholder values were ignored)."
-        )
+        logging.error("[%s] No valid tokens found. (empty/placeholder values were ignored)", label)
     else:
-        logging.info("[Gemini] Loaded %s token(s) from environment", len(valid_tokens))
-    return valid_tokens
+        logging.info("[%s] Loaded %s token(s) from environment", label, len(tokens))
+    return tokens
 
-GEMINI_TOKENS = get_gemini_tokens_from_env()
 
-current_token_index = 0
+def get_gemini_tokens_from_env():
+    return _load_tokens_from_env(["GEMINI_TOKEN", "GEMINI_API_KEY"], "Gemini")
+
+
+def get_openrouter_tokens_from_env():
+    return _load_tokens_from_env(["OPENROUTER_API_KEY_"], "OpenRouter")
+
+
+if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
+    _LLM_TOKENS = get_openrouter_tokens_from_env()
+elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
+    _LLM_TOKENS = get_gemini_tokens_from_env()
+else:
+    raise ValueError(f"Unsupported LLM_PROVIDER: {_LLM_PROVIDER_NAME!r}")
 
 def _build_generation_config():
     return {
@@ -847,34 +909,30 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
     return response_json
 
 
-def get_next_gemini_token():
-    global current_token_index
-    if current_token_index < len(GEMINI_TOKENS):
-        token = GEMINI_TOKENS[current_token_index]
-        logging.info(f"[Gemini] Using token: -----")
-        return token
-    return None
+current_llm_token_index = 0
+llm_token_rotation_lock = threading.Lock()
 
-def switch_to_next_token():
-    global current_token_index
-    current_token_index += 1
-    if current_token_index >= len(GEMINI_TOKENS):
-        logging.error("[Gemini] All tokens exhausted!")
-        return None
-    token = get_next_gemini_token()
-    if token:
-        genai.configure(api_key=token)
-        global model, enrollment_model
-        model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
-            generation_config=_build_generation_config(),
-        )
-        enrollment_model = genai.GenerativeModel(
-            model_name=GEMINI_MODEL_NAME,
-            generation_config=_build_generation_config(),
-        )
+def get_next_llm_token():
+    global current_llm_token_index
+    with llm_token_rotation_lock:
+        index = min(current_llm_token_index, len(_LLM_TOKENS) - 1)
+        if current_llm_token_index >= len(_LLM_TOKENS):
+            logging.debug("[LLM] All tokens exhausted; reusing last valid token index=%d for retry", index)
+        token = _LLM_TOKENS[index]
+        logging.info("[LLM] Using token: -----")
         return token
-    return None
+
+def switch_to_next_llm_token():
+    global current_llm_token_index
+    with llm_token_rotation_lock:
+        current_llm_token_index += 1
+        if current_llm_token_index >= len(_LLM_TOKENS):
+            logging.error("[LLM] All tokens exhausted!")
+            return None
+        token = _LLM_TOKENS[current_llm_token_index]
+        logging.info("[LLM] Using token: -----")
+        return token
+
 
 # === Gemini Model Setup ===
 class AnalysisResponse(typing.TypedDict):
@@ -888,23 +946,17 @@ class EnrollmentAnalysisResponse(typing.TypedDict):
     enrollment_2025: int | None
     enrollment_increase_percentage: float | None
 
-initial_token = get_next_gemini_token()
-if not initial_token:
-    raise ValueError("[Gemini] No valid Gemini tokens found!")
+if not _LLM_TOKENS:
+    raise ValueError(f"[{_LLM_PROVIDER_NAME}] No valid tokens found!")
 
-genai.configure(api_key=initial_token)
 
-# Standard model for regular tasks
-model = genai.GenerativeModel(
-    model_name=GEMINI_MODEL_NAME,
-    generation_config=_build_generation_config(),
-)
-
-# Enrollment model with enhanced schema
-enrollment_model = genai.GenerativeModel(
-    model_name=GEMINI_MODEL_NAME,
-    generation_config=_build_generation_config(),
-)
+def _llm_generate(parts):
+    return generate_content(
+        parts,
+        api_key=get_next_llm_token(),
+        model_name=LLM_MODEL_NAME,
+        generation_config=_build_generation_config(),
+    )
 
 # === 🆕 Extra Keys Extraction Function ===
 def extract_extra_keys(text_fields, task_name=None):
@@ -1374,10 +1426,7 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
 
-            # Select model and update prompt based on task type
-            selected_model = model
             if is_enrollment_task:
-                selected_model = enrollment_model
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
 
@@ -1498,7 +1547,7 @@ CORRECT JSON Response:
 ====================================================================================
 """
 
-            response = selected_model.generate_content([
+            response = _llm_generate([
                 {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
                 prompt,
             ])
@@ -1515,7 +1564,7 @@ CORRECT JSON Response:
                 row_number=row_number or 0,
                 school_id=school_id or "unknown",
                 task=task_name or "unknown",
-                model_name=GEMINI_MODEL_NAME,
+                model_name=LLM_MODEL_NAME,
                 api_call_type=api_call_type,
                 response=response,
                 status='success',
@@ -1525,9 +1574,9 @@ CORRECT JSON Response:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_token():
+                if switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
@@ -1649,9 +1698,7 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
             
-            selected_model = model
             if is_enrollment_task:
-                selected_model = enrollment_model
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
 
@@ -1683,7 +1730,7 @@ Focus on:
 - Educational context and completeness"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            response = selected_model.generate_content([
+            response = _llm_generate([
                 {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
                 prompt,
             ])
@@ -1700,7 +1747,7 @@ Focus on:
                 row_number=row_number or 0,
                 school_id=school_id or "unknown",
                 task=task_name or "unknown",
-                model_name=GEMINI_MODEL_NAME,
+                model_name=LLM_MODEL_NAME,
                 api_call_type=api_call_type,
                 response=response,
                 status='success',
@@ -1710,9 +1757,9 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_token():
+                if switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
@@ -1778,9 +1825,7 @@ Focus on:
 - Quality and completeness of the data
 - Educational context"""
             
-            selected_model = model
             if is_enrollment_task:
-                selected_model = enrollment_model
                 # Update the example to show enrollment fields
                 prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
 
@@ -1815,7 +1860,7 @@ Focus on:
 - Educational context"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            response = selected_model.generate_content([prompt])
+            response = _llm_generate([prompt])
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1829,7 +1874,7 @@ Focus on:
                 row_number=row_number or 0,
                 school_id=school_id or "unknown",
                 task=task_name or "unknown",
-                model_name=GEMINI_MODEL_NAME,
+                model_name=LLM_MODEL_NAME,
                 api_call_type=api_call_type,
                 response=response,
                 status='success',
@@ -1839,9 +1884,9 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_token():
+                if switch_to_next_llm_token():
                     continue
                 else:
                     logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
