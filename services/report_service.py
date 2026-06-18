@@ -329,11 +329,16 @@ class ReportService:
         Python equivalent of StandardReportRenderer.jsx::computeReportData().
         Returns the same aggregated structure the frontend expects.
         """
-        RELEVANCE_TYPES = {"Relevant", "Partially Relevant", "Irrelevant"}
+        # notValidated = row never sent to the AI for an execution-config reason: the relevant-
+        # evidence cap was reached for this (UUID, Tasks) pair, or the row's evidence type was
+        # excluded by the execution's evidence-type filter. It's a distinct bucket: counted in
+        # "total" but never folded into Relevant/Partially Relevant/Irrelevant, and excluded from
+        # rel_score's numerator and denominator.
+        RELEVANCE_TYPES = {"Relevant", "Partially Relevant", "Irrelevant", "notValidated"}
         MAX_TOP = 15
 
         def create_node() -> Dict[str, Any]:
-            return {"total": 0, "Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0}
+            return {"total": 0, "Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0, "notValidated": 0}
 
         def update_node(node: Dict[str, Any], tag: str) -> None:
             node["total"] += 1
@@ -341,8 +346,12 @@ class ReportService:
                 node[tag] += 1
 
         def rel_score(node: Dict[str, Any]) -> float:
-            t = node["total"]
-            return ((node["Relevant"] + node["Partially Relevant"] * 0.5) / t * 100) if t else 0.0
+            # notValidated rows were never evaluated (relevant-cap reached, or evidence-type
+            # excluded) — excluding them from the denominator keeps the score scoped to evaluated
+            # evidence only. "total" itself is left untouched; it must still include notValidated
+            # rows everywhere else.
+            evaluated = node["total"] - node.get("notValidated", 0)
+            return ((node["Relevant"] + node["Partially Relevant"] * 0.5) / evaluated * 100) if evaluated else 0.0
 
         def parse_subject(task: str) -> str:
             if "विज्ञान" in task:
@@ -399,7 +408,7 @@ class ReportService:
             return "week" if diff_days <= 183 else "month"
 
         # Accumulation structures
-        relevance_counts = {"Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0}
+        relevance_counts = {"Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0, "notValidated": 0}
         states_set: set[str] = set()
         users_set: set[str] = set()
         schools_set: set[str] = set()
