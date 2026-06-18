@@ -2456,9 +2456,11 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "user_owned_file": user_owned_filename,
                 "rows_attempted": processed_count,
                 "api_calls": rows_processed_new,  # Only count new API calls
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag != 'Irrelevant'),
+                # notValidated rows were skipped by the relevant-cap with no API call — exclude
+                # them from success/failure so these stay scoped to rows actually sent to the AI.
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', 'notValidated')),
                 "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag != 'Irrelevant'],
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', 'notValidated')],
                 "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
                 "user_owned_count": len(user_owned_df),
                 "standard_count": len(df_to_save) - len(user_owned_df),
@@ -2471,9 +2473,11 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "output_file": output_filename,
                 "rows_attempted": processed_count,
                 "api_calls": rows_processed_new,  # Only count new API calls
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag != 'Irrelevant'),
+                # notValidated rows were skipped by the relevant-cap with no API call — exclude
+                # them from success/failure so these stay scoped to rows actually sent to the AI.
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', 'notValidated')),
                 "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag != 'Irrelevant'],
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', 'notValidated')],
                 "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
                 "user_owned_count": 0,
                 "standard_count": len(df_to_save),
