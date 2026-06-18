@@ -410,13 +410,19 @@ def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None, ca
     checkpoint_data[file_name]['total_processed'] = len(checkpoint_data[file_name]['processed_ids'])
     checkpoint_data[file_name]['last_updated'] = time.strftime('%Y-%m-%d %H:%M:%S')
 
-def _read_resume_state(output_dir, input_filename, worker_id):
+def _read_resume_state(output_dir, input_filename, worker_id, identity_col="UUID"):
     """
     Read the partial output CSV for this worker to rebuild resume state.
 
+    identity_col: column used as the per-row identity in processed_keys — "UUID" when the
+    input has one, else "School ID" (the same field the old hash-based checkpoint used), so
+    datasets without a UUID column still get row-skip resume. Callers must use the same
+    identity_col when checking a row against the returned processed_keys.
+
     Returns:
-        processed_keys: set of (uuid, task, task_evidence) — rows to skip
-        relevant_count_per_key: dict of (uuid, task) -> int — cap counter state
+        processed_keys: set of (identity, task, task_evidence) — rows to skip
+        relevant_count_per_key: dict of (uuid, task) -> int — cap counter state (always
+        keyed by UUID specifically; the cap itself is disabled when UUID is unavailable)
 
     Reading the output CSV (instead of the checkpoint JSON) means resume state
     survives service-level reruns: the partial output is already flushed to disk
@@ -429,20 +435,20 @@ def _read_resume_state(output_dir, input_filename, worker_id):
     if not os.path.isfile(partial_output):
         return processed_keys, relevant_count_dict
     try:
-        needed = {"UUID", INPUT_TASK_COLUMN, "Task Evidence", "Relevance Tag"}
+        needed = {"UUID", "School ID", INPUT_TASK_COLUMN, "Task Evidence", "Relevance Tag"}
         df = pd.read_csv(
             partial_output,
             usecols=lambda c: c in needed,
             engine="python",
             on_bad_lines="skip",
         )
-        if {"UUID", INPUT_TASK_COLUMN, "Task Evidence"}.issubset(df.columns):
+        if {identity_col, INPUT_TASK_COLUMN, "Task Evidence"}.issubset(df.columns):
             for _, r in df.iterrows():
-                uuid = str(r["UUID"]).strip()
+                ident = str(r[identity_col]).strip()
                 task = str(r[INPUT_TASK_COLUMN]).strip()
                 url  = str(r["Task Evidence"]).strip()
                 if url and url.lower() not in ("nan", "null", "none", ""):
-                    processed_keys.add((uuid, task, url))
+                    processed_keys.add((ident, task, url))
         if {"UUID", INPUT_TASK_COLUMN, "Relevance Tag"}.issubset(df.columns):
             rel_rows = df[df["Relevance Tag"] == "Relevant"]
             for _, r in rel_rows.iterrows():
@@ -450,8 +456,9 @@ def _read_resume_state(output_dir, input_filename, worker_id):
                 relevant_count_dict[key] = relevant_count_dict.get(key, 0) + 1
         if processed_keys or relevant_count_dict:
             logging.info(
-                f"[Worker {worker_id}] [Resume] {len(processed_keys)} rows already done, "
-                f"{len(relevant_count_dict)} (UUID, {INPUT_TASK_COLUMN}) keys with Relevant count — from output CSV"
+                f"[Worker {worker_id}] [Resume] {len(processed_keys)} rows already done "
+                f"(identity={identity_col}), {len(relevant_count_dict)} (UUID, {INPUT_TASK_COLUMN}) "
+                f"keys with Relevant count — from output CSV"
             )
     except Exception as e:
         logging.warning(
@@ -2108,16 +2115,22 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # ===== RESUME STATE: read partial output CSV once, use for both row-skip and cap rebuild =====
         # Using the output CSV (not the checkpoint JSON) means state survives service-level reruns:
         # the partial output is flushed to disk progressively; the checkpoint JSON is ephemeral.
+        # Identity column for row-skip matching: UUID when the input has one, else fall back to
+        # School ID (what the old hash-based checkpoint keyed on) so datasets without a UUID
+        # column still get basic resume protection instead of silently reprocessing everything.
+        resume_identity_col = "UUID" if "UUID" in df_filtered.columns else "School ID"
         resume_processed_keys = set()
         resume_relevant_counts = {}
         if RESUME_FROM_CHECKPOINT:
-            resume_processed_keys, resume_relevant_counts = _read_resume_state(OUTPUT_DIR, input_filename, worker_id)
+            resume_processed_keys, resume_relevant_counts = _read_resume_state(
+                OUTPUT_DIR, input_filename, worker_id, identity_col=resume_identity_col
+            )
 
         # ===== CHECKPOINT: Filter out already-processed rows BEFORE processing =====
         if resume_processed_keys:
             def _already_done(row):
                 return (
-                    str(row.get("UUID", "")).strip(),
+                    str(row.get(resume_identity_col, "")).strip(),
                     str(row.get(INPUT_TASK_COLUMN, "")).strip(),
                     str(row.get("Task Evidence", "")).strip(),
                 ) in resume_processed_keys
@@ -2226,8 +2239,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             # Computed once per row and reused by the success-path increment below. Mirrors
             # the "no question" skip path above to keep the parallel output lists aligned
             # (one append per list + processed_count += 1), but makes no API call.
-            cap_key = (str(row.get("UUID", "")).strip(), task_name_raw) if cap_enabled else None
-            if cap_key and cap_key[0] and relevant_count_per_key.get(cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
+            # A blank/NaN UUID must not become a shared cap_key — str(nan) == "nan", which is
+            # truthy, so rows with missing UUIDs would otherwise all be grouped under the same
+            # ("nan", task) key and capped together even though they belong to different users.
+            _row_uuid = str(row.get("UUID", "")).strip()
+            cap_key = (_row_uuid, task_name_raw) if cap_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
+            if cap_key and relevant_count_per_key.get(cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
                 logging.info(f"[Worker {worker_id}] Row {idx+1} — Relevant cap reached for (UUID, task); marking notValidated")
                 task_types.append("Capped")
                 task_evidence_qa.append(None)
