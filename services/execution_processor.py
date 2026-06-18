@@ -596,6 +596,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if question_task_column:
             preprocessor_env["PREPROCESS_QUESTION_TASK_COLUMN"] = question_task_column
 
+        processing_config = execution.processing_config if isinstance(execution.processing_config, dict) else {}
+        evidence_types = processing_config.get("evidence_types")
+        evidence_types = evidence_types if isinstance(evidence_types, list) and evidence_types else None
+
         preprocessor_cmd = [
             sys.executable,
             str(preprocessor_script),
@@ -617,7 +621,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "--use-school-filter",
             "false",
         ])
-        
+
+        if evidence_types:
+            preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
+
         _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
 
         # Handle split files or single file based on strategy
@@ -664,6 +671,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = question_task_column
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
+        if evidence_types:
+            # Defense-in-depth: re-checked by the processor in case a pre-split file
+            # from an earlier config gets reused on a re-run.
+            processor_env["ALLOWED_EVIDENCE_TYPES"] = ",".join(evidence_types)
 
         processor_cmd = [
             sys.executable,

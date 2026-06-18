@@ -37,6 +37,13 @@ PDF_FORMATS = {".pdf"}
 EXCEL_FORMATS = {".xlsx", ".xls"}
 ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 
+# Defense-in-depth re-check of the execution's evidence-type filter (primary enforcement is in
+# the pre-processor; this guards against a pre-split file from an earlier config being reused).
+# Absent/empty env = no restriction, all types allowed.
+ALLOWED_EVIDENCE_TYPES = {
+    t.strip().lower() for t in os.getenv("ALLOWED_EVIDENCE_TYPES", "").split(",") if t.strip()
+} or None
+
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run evidence processor pipeline.")
@@ -2140,7 +2147,15 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
             # Determine evidence type and route to appropriate processor
             evidence_type = get_evidence_type(task_evidence)
-            if evidence_type:
+            if evidence_type and ALLOWED_EVIDENCE_TYPES is not None and evidence_type not in ALLOWED_EVIDENCE_TYPES:
+                logging.info(f"[Worker {worker_id}] Excluding {evidence_type} evidence at row {idx+1} (not in ALLOWED_EVIDENCE_TYPES)")
+                task_evidence_qa.append(None)
+                task_evidence_qa_reason.append(None)
+                relevance_tags.append('Irrelevant')
+                task_types[-1] = "Excluded"  # overwrite the User-Owned/Standard type appended above
+                for key in EXTRA_KEYS.keys():
+                    extra_keys_data[key].append(None)
+            elif evidence_type:
                 logging.info(f"[Worker {worker_id}] Processing {evidence_type} {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
                 
                 # Route to appropriate processor based on evidence type

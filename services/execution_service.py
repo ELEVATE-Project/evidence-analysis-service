@@ -30,6 +30,7 @@ from models.schemas import (
     CloudDownloadableUrlResponse,
     CloudSignedUrlRequest,
     CloudSignedUrlResponse,
+    ExecutionCreate,
     ExecutionCreateRequest,
     ExecutionDetail,
     ExecutionFileCheckpointState,
@@ -349,6 +350,14 @@ class ExecutionService:
         if isinstance(source_type.default_thresholds, dict):
             return deepcopy(source_type.default_thresholds)
         return {}
+
+    @staticmethod
+    def _resolve_processing_config(request_data: ExecutionCreate) -> Optional[dict[str, Any]]:
+        """Build the processing_config JSONB payload. None (not {}) when nothing was configured,
+        so a proper subset of evidence types is distinguishable from "no restriction"."""
+        if request_data.evidence_types:
+            return {"evidence_types": request_data.evidence_types}
+        return None
 
     @staticmethod
     def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
@@ -960,6 +969,7 @@ class ExecutionService:
         self._validate_scope_metadata(request_data, source_type)
         criterias_mode = self._resolve_criterias_mode(source_type)
         threshold_config = self._resolve_threshold_config(source_type)
+        processing_config = self._resolve_processing_config(request_data)
 
         execution = Execution(
             tenant_code=tenant_code,
@@ -972,6 +982,7 @@ class ExecutionService:
             states=request_data.states or [],
             criterias_mode=criterias_mode,
             threshold_config=threshold_config,
+            processing_config=processing_config,
             status="draft",
             created_by=current_user.id,
             checkpoint_data={"files": {"input": {}, "questions": {}}},
@@ -1649,6 +1660,7 @@ class ExecutionService:
         self._validate_scope_metadata(request_data, source_type)
         criterias_mode = self._resolve_criterias_mode(source_type)
         threshold_config = self._resolve_threshold_config(source_type)
+        processing_config = self._resolve_processing_config(request_data)
 
         execution = Execution(
             tenant_code=tenant_code,
@@ -1661,6 +1673,7 @@ class ExecutionService:
             states=request_data.states or [],
             criterias_mode=criterias_mode,
             threshold_config=threshold_config,
+            processing_config=processing_config,
             status="draft",
             created_by=current_user.id,
             input_file_size=request_data.input_file.size_bytes,
@@ -1893,6 +1906,7 @@ class ExecutionService:
                 "criterias_mode": execution.criterias_mode,
                 "criterias_config": execution.criterias_config,
                 "threshold_config": execution.threshold_config,
+                "processing_config": execution.processing_config,
                 "actual_cost": self._to_float(execution.actual_cost),
                 "estimated_cost": self._to_float(execution.estimated_cost),
                 "input_file_size": execution.input_file_size,
@@ -2138,6 +2152,7 @@ class ExecutionService:
             'states',
             'program_ref_id',
             'program_name',
+            'evidence_types',
         }
 
         for field in allowed_fields:
@@ -2160,6 +2175,19 @@ class ExecutionService:
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="states must be a non-empty array if provided."
                     )
+
+            if field == 'evidence_types':
+                # evidence_types doesn't live on the ORM model directly — it rides inside the
+                # generic processing_config JSONB blob, merged so other future keys survive.
+                current_processing_config = (
+                    dict(execution.processing_config) if isinstance(execution.processing_config, dict) else {}
+                )
+                if value:
+                    current_processing_config['evidence_types'] = value
+                else:
+                    current_processing_config.pop('evidence_types', None)
+                execution.processing_config = current_processing_config or None
+                continue
 
             # Optional fields support explicit clears via null.
             setattr(execution, field, value)

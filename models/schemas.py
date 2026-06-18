@@ -76,6 +76,7 @@ class ExecutionCreate(BaseModel):
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
     states: Optional[List[str]] = None
+    evidence_types: Optional[List[str]] = None
 
     @field_validator("states", mode="before")
     @classmethod
@@ -88,6 +89,22 @@ class ExecutionCreate(BaseModel):
         if len(v) > 0 and not cleaned:
             raise ValueError("states must contain at least one non-empty string")
         return cleaned or None
+
+    @field_validator("evidence_types", mode="before")
+    @classmethod
+    def validate_evidence_types(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            raise ValueError("evidence_types must be an array of strings")
+        allowed = {"image", "pdf", "excel"}
+        cleaned = sorted({str(t).strip().lower() for t in v if str(t).strip()})
+        if not cleaned:
+            return None
+        invalid = [t for t in cleaned if t not in allowed]
+        if invalid:
+            raise ValueError(f"evidence_types must be a subset of {sorted(allowed)}, got invalid: {invalid}")
+        return cleaned
 
 
 class FileUploadDescriptor(BaseModel):
@@ -194,6 +211,7 @@ class ExecutionUpdate(BaseModel):
     failure_reason: Optional[str] = None
     processed_rows: Optional[int] = None
     total_rows: Optional[int] = None
+    evidence_types: Optional[List[str]] = None
 
     @field_validator("states", mode="before")
     @classmethod
@@ -206,6 +224,22 @@ class ExecutionUpdate(BaseModel):
         if len(v) > 0 and not cleaned:
             raise ValueError("states must contain at least one non-empty string")
         return cleaned or None
+
+    @field_validator("evidence_types", mode="before")
+    @classmethod
+    def validate_evidence_types(cls, v: Any) -> Optional[List[str]]:
+        if v is None:
+            return None
+        if not isinstance(v, list):
+            raise ValueError("evidence_types must be an array of strings")
+        allowed = {"image", "pdf", "excel"}
+        cleaned = sorted({str(t).strip().lower() for t in v if str(t).strip()})
+        if not cleaned:
+            return None
+        invalid = [t for t in cleaned if t not in allowed]
+        if invalid:
+            raise ValueError(f"evidence_types must be a subset of {sorted(allowed)}, got invalid: {invalid}")
+        return cleaned
 
 
 class ExecutionResponse(BaseModel):
@@ -246,6 +280,7 @@ class ExecutionDetail(ExecutionResponse):
     criterias_mode: Optional[str] = None
     criterias_config: Optional[Dict[str, Any]] = None
     threshold_config: Optional[Dict[str, Any]] = None
+    processing_config: Optional[Dict[str, Any]] = None
     input_file_size: Optional[int] = None
     criterias_file_size: Optional[int] = None
     output_file_size: Optional[int] = None

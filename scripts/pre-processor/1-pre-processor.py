@@ -30,6 +30,11 @@ def _parse_args():
     parser.add_argument("--split-files", default=None, choices=["yes", "no"], help="Split output files or not")
     parser.add_argument("--rows-per-file", default=None, type=int, help="Rows per split file")
     parser.add_argument("--use-school-filter", default=None, help="Enable school filtering (true/false)")
+    parser.add_argument(
+        "--evidence-types",
+        default=None,
+        help="Comma list of allowed evidence types (image,pdf,excel); absent or empty = all",
+    )
     return parser.parse_args()
 
 ARGS = _parse_args()
@@ -57,6 +62,11 @@ use_school_filter_value = (
 )
 USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by school_list.csv
 
+evidence_types_value = ARGS.evidence_types or os.getenv("PREPROCESS_EVIDENCE_TYPES", "")
+ALLOWED_EVIDENCE_TYPES = {
+    t.strip().lower() for t in evidence_types_value.split(",") if t.strip()
+} or None  # None = no restriction, all types allowed
+
 # === SPLIT CONFIGURATION ===
 SPLIT_FILES = ARGS.split_files or os.getenv("PREPROCESS_SPLIT_FILES") or os.getenv("SPLIT_FILES", "yes")
 ROWS_PER_FILE = ARGS.rows_per_file or int(os.getenv("PREPROCESS_ROWS_PER_FILE", os.getenv("ROWS_PER_FILE", "15000")))
@@ -66,6 +76,7 @@ print(f"🔧 Configuration Loaded:")
 print(f"   SPLIT_FILES: {SPLIT_FILES}")
 print(f"   ROWS_PER_FILE: {ROWS_PER_FILE}")
 print(f"   USE_SCHOOL_FILTER: {USE_SCHOOL_FILTER}")
+print(f"   ALLOWED_EVIDENCE_TYPES: {sorted(ALLOWED_EVIDENCE_TYPES) if ALLOWED_EVIDENCE_TYPES else 'all'}")
 print(f"   TASK_MATCH_COLUMN_CONFIG: {TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
 print(f"   QUESTION_TASK_COLUMN_FALLBACK: {DEFAULT_QUESTION_TASK_COLUMN}")
 print(f"   INPUT_TASK_COLUMN_FALLBACK: {DEFAULT_INPUT_TASK_COLUMN}")
@@ -85,6 +96,7 @@ skip_task_not_in_questions = 0
 skip_evidence_null = 0
 skip_school_mismatch = 0
 skip_invalid_evidence = 0  # Renamed from skip_non_image to handle all invalid evidence types
+skip_evidence_type_excluded = 0  # Evidence type valid but not in ALLOWED_EVIDENCE_TYPES
 total_input_rows = 0 # This will be set correctly below
 
 # === Step 1: Load FILTER_CSV school codes into a set ===
@@ -421,6 +433,11 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         skip_invalid_evidence += 1
         continue
 
+    # Rule 3b: Skip if evidence type is valid but excluded by the execution's evidence-type filter
+    if ALLOWED_EVIDENCE_TYPES is not None and evidence_type not in ALLOWED_EVIDENCE_TYPES:
+        skip_evidence_type_excluded += 1
+        continue
+
     # === Step 4: Fill additional columns & Clean District ===
     # _q already resolved above in Rule 1 — reuse directly.
     row["Task Evidence Question"] = _q
@@ -529,6 +546,12 @@ print(f"{'Task Evidence empty or null':<50} {skip_evidence_null:<10} {remaining_
 
 remaining_after_invalid = remaining_after_evidence - skip_invalid_evidence
 print(f"{'Task Evidence is not valid (not image/pdf/excel)':<50} {skip_invalid_evidence:<10} {remaining_after_invalid}")
+
+remaining_after_type_excluded = remaining_after_invalid - skip_evidence_type_excluded
+if ALLOWED_EVIDENCE_TYPES is not None:
+    print(f"{'Evidence type excluded by execution filter':<50} {skip_evidence_type_excluded:<10} {remaining_after_type_excluded}")
+else:
+    print(f"{'Evidence type filtering':<50} {'SKIPPED':<10} {remaining_after_type_excluded}")
 
 print(f"\n{'='*70}")
 print(f"Final output CSV rows: {len(filtered_rows)}")
