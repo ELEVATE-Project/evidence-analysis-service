@@ -329,9 +329,11 @@ class ReportService:
         Python equivalent of StandardReportRenderer.jsx::computeReportData().
         Returns the same aggregated structure the frontend expects.
         """
-        # notValidated = row skipped by the per-(user, task) evidence cap (no AI call made).
-        # It's a distinct bucket: counted in "total" but never folded into Relevant/
-        # Partially Relevant/Irrelevant, and excluded from rel_score's relevance numerator.
+        # notValidated = row never sent to the AI for an execution-config reason: the relevant-
+        # evidence cap was reached for this (UUID, Tasks) pair, or the row's evidence type was
+        # excluded by the execution's evidence-type filter. It's a distinct bucket: counted in
+        # "total" but never folded into Relevant/Partially Relevant/Irrelevant, and excluded from
+        # rel_score's numerator and denominator.
         RELEVANCE_TYPES = {"Relevant", "Partially Relevant", "Irrelevant", "notValidated"}
         MAX_TOP = 15
 
@@ -344,9 +346,10 @@ class ReportService:
                 node[tag] += 1
 
         def rel_score(node: Dict[str, Any]) -> float:
-            # notValidated rows were never evaluated (cap-skipped, no AI call) — excluding
-            # them from the denominator keeps the score scoped to evaluated evidence only.
-            # "total" itself is left untouched; it must still include notValidated rows.
+            # notValidated rows were never evaluated (relevant-cap reached, or evidence-type
+            # excluded) — excluding them from the denominator keeps the score scoped to evaluated
+            # evidence only. "total" itself is left untouched; it must still include notValidated
+            # rows everywhere else.
             evaluated = node["total"] - node.get("notValidated", 0)
             return ((node["Relevant"] + node["Partially Relevant"] * 0.5) / evaluated * 100) if evaluated else 0.0
 
