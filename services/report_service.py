@@ -329,11 +329,14 @@ class ReportService:
         Python equivalent of StandardReportRenderer.jsx::computeReportData().
         Returns the same aggregated structure the frontend expects.
         """
-        RELEVANCE_TYPES = {"Relevant", "Partially Relevant", "Irrelevant"}
+        # notValidated = row skipped by the per-(user, task) evidence cap (no AI call made).
+        # It's a distinct bucket: counted in "total" but never folded into Relevant/
+        # Partially Relevant/Irrelevant, and excluded from rel_score's relevance numerator.
+        RELEVANCE_TYPES = {"Relevant", "Partially Relevant", "Irrelevant", "notValidated"}
         MAX_TOP = 15
 
         def create_node() -> Dict[str, Any]:
-            return {"total": 0, "Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0}
+            return {"total": 0, "Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0, "notValidated": 0}
 
         def update_node(node: Dict[str, Any], tag: str) -> None:
             node["total"] += 1
@@ -399,7 +402,7 @@ class ReportService:
             return "week" if diff_days <= 183 else "month"
 
         # Accumulation structures
-        relevance_counts = {"Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0}
+        relevance_counts = {"Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0, "notValidated": 0}
         states_set: set[str] = set()
         users_set: set[str] = set()
         schools_set: set[str] = set()
