@@ -301,6 +301,22 @@ def _cleanup_workspace_root(execution_id: UUID) -> None:
         ) from exc
 
 
+def _clean_preprocessing_dirs(workspace: ExecutionWorkspace) -> None:
+    """Clear pre-processor output and processor input before every run, including resumes.
+
+    These directories are fully regenerated each run (split files or a single preprocessed
+    CSV, then copied into processor_input_dir). If a prior attempt used a different splitting
+    strategy (e.g. single-file vs. split, or a different split count), stale files left behind
+    get picked up alongside the new ones and reprocessed as duplicates. processor_output_dir is
+    intentionally left untouched — it holds the partial merged output _read_resume_state() needs
+    to skip already-processed rows on resume.
+    """
+    for stale_dir in (workspace.preprocessor_output_dir, workspace.processor_input_dir):
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir)
+        stale_dir.mkdir(parents=True, exist_ok=True)
+
+
 def _resolve_processor_columns_from_config(db: Session, execution: Execution) -> dict[str, str]:
     columns: dict[str, str] = {}
     csv_type_id = (execution.csv_type_id or "").strip()
@@ -562,6 +578,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         else:
             _cleanup_workspace_root(execution.id)
         workspace = _build_workspace(execution.id)
+        _clean_preprocessing_dirs(workspace)
 
         input_bytes = _run_async(storage_service.download_file(execution.input_file_url))
         questions_bytes = _run_async(storage_service.download_file(execution.criterias_file_url))

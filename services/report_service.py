@@ -344,8 +344,11 @@ class ReportService:
                 node[tag] += 1
 
         def rel_score(node: Dict[str, Any]) -> float:
-            t = node["total"]
-            return ((node["Relevant"] + node["Partially Relevant"] * 0.5) / t * 100) if t else 0.0
+            # notValidated rows were never evaluated (cap-skipped, no AI call) — excluding
+            # them from the denominator keeps the score scoped to evaluated evidence only.
+            # "total" itself is left untouched; it must still include notValidated rows.
+            evaluated = node["total"] - node.get("notValidated", 0)
+            return ((node["Relevant"] + node["Partially Relevant"] * 0.5) / evaluated * 100) if evaluated else 0.0
 
         def parse_subject(task: str) -> str:
             if "विज्ञान" in task:
