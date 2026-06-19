@@ -146,46 +146,6 @@ def _count_csv_rows(file_path: Path, sample_size: int = 10000) -> tuple[int, boo
         return 1000, True
 
 
-def _strip_not_validated_rows(csv_path: Path) -> int:
-    """
-    Remove rows tagged Relevance Tag='notValidated' from the final output before delivery.
-
-    These rows were never sent to the AI (relevant-evidence cap reached, or — once the
-    evidence-type-filter feature is merged — evidence type excluded by config), so they don't
-    belong in the deliverable. Mirrors the cap feature's origin in the sister repo, which has
-    an equivalent manual cleanup step (processor/5-remove-notvalidated.py) run before final
-    delivery; this makes that step automatic instead of a separate manual pass.
-
-    Returns the number of rows removed. No-op (0) if the column is absent or empty.
-    """
-    tmp_path = csv_path.with_suffix(csv_path.suffix + ".tmp")
-    removed = 0
-    try:
-        with csv_path.open("r", encoding="utf-8", newline="") as infile, \
-                tmp_path.open("w", encoding="utf-8", newline="") as outfile:
-            reader = csv.DictReader(infile)
-            if not reader.fieldnames or "Relevance Tag" not in reader.fieldnames:
-                tmp_path.unlink(missing_ok=True)
-                return 0
-            writer = csv.DictWriter(outfile, fieldnames=reader.fieldnames)
-            writer.writeheader()
-            for row in reader:
-                if row.get("Relevance Tag") == "notValidated":
-                    removed += 1
-                    continue
-                writer.writerow(row)
-    except Exception as exc:
-        logger.warning(f"Error stripping notValidated rows from {csv_path}: {exc}. Leaving file as-is.")
-        tmp_path.unlink(missing_ok=True)
-        return 0
-
-    if removed:
-        tmp_path.replace(csv_path)
-    else:
-        tmp_path.unlink(missing_ok=True)
-    return removed
-
-
 def _calculate_optimal_split_count(
     row_count: int,
 ) -> tuple[bool, int, int, str]:
@@ -778,14 +738,6 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if not workspace.final_output_csv.exists():
             raise ExecutionProcessingError(
                 f"Merged output file not found: {workspace.final_output_csv}"
-            )
-
-        removed_not_validated = _strip_not_validated_rows(workspace.final_output_csv)
-        if removed_not_validated:
-            logger.info(
-                "stripped_not_validated_rows  execution=%s  removed=%d",
-                execution.id,
-                removed_not_validated,
             )
 
         output_bytes = workspace.final_output_csv.read_bytes()
