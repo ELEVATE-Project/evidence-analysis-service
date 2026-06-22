@@ -118,6 +118,11 @@ class Settings(BaseSettings):
     PREPROCESS_SCRIPT_PATH: str = "scripts/pre-processor/1-pre-processor.py"
     PROCESSOR_SCRIPT_PATH: str = "scripts/processor/1-main-parallel-script.py"
     PROCESSOR_MAX_ROWS: int = 0
+    # Strip rows with no AI-evaluation result (notValidated/Failed/Unsupported/blank-tag) from
+    # the delivered output CSV before upload. The unfiltered merged output is always uploaded
+    # to cloud storage first regardless of this setting, so disabling it only changes what the
+    # deliverable looks like — the full audit trail is never lost.
+    REMOVE_INVALID_ROWS_FROM_OUTPUT: bool = True
     ESTIMATED_COST_PER_INPUT_ROW: float = 0.001
     ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
 

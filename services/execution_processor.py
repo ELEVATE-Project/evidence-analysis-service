@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import importlib.util
 import logging
 import os
 import shutil
@@ -13,6 +14,7 @@ import socket
 import subprocess
 import sys
 import traceback
+from copy import deepcopy
 from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime
@@ -72,6 +74,21 @@ def _resolve_script_path(raw_path: str) -> Path:
     if not candidate.exists():
         raise ExecutionProcessingError(f"Script not found: {candidate}")
     return candidate
+
+
+def _load_remove_not_validated_fn():
+    """Load remove_not_validated() from scripts/processor/2-remove-notvalidated.py.
+
+    That script's filename starts with a digit and contains a hyphen, so it isn't a
+    valid Python module name and can't be reached with a normal `import` statement —
+    loaded dynamically by file path instead, to reuse its row-removal logic here
+    rather than duplicating it.
+    """
+    script_path = SERVICE_ROOT / "scripts" / "processor" / "2-remove-notvalidated.py"
+    spec = importlib.util.spec_from_file_location("remove_notvalidated_script", script_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.remove_not_validated
 
 
 def _count_csv_rows(file_path: Path, sample_size: int = 10000) -> tuple[int, bool]:
@@ -444,6 +461,7 @@ def _mark_execution_completed(
     processed_rows: int,
     elapsed_seconds: float,
     actual_cost: Decimal | None = None,
+    unfiltered_output: dict[str, Any] | None = None,
 ) -> None:
     db = SessionLocal()
     try:
@@ -468,6 +486,16 @@ def _mark_execution_completed(
         execution.error_logs = None
         if actual_cost is not None:
             execution.actual_cost = actual_cost
+        if unfiltered_output is not None:
+            # Reuses the existing checkpoint_data["files"] shape (already tracks input/
+            # questions file state) rather than adding a new column for this audit trail.
+            checkpoint = deepcopy(execution.checkpoint_data) if isinstance(execution.checkpoint_data, dict) else {}
+            files = checkpoint.get("files")
+            if not isinstance(files, dict):
+                files = {}
+            files["unfiltered_output"] = unfiltered_output
+            checkpoint["files"] = files
+            execution.checkpoint_data = checkpoint
         if processed_rows > 0:
             execution.average_processing_time = elapsed_seconds / processed_rows
         db.commit()
@@ -726,8 +754,55 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 f"Merged output file not found: {workspace.final_output_csv}"
             )
 
-        output_bytes = workspace.final_output_csv.read_bytes()
+        # processed_rows reflects actual processing volume, counted from the unfiltered
+        # file — unaffected by whether REMOVE_INVALID_ROWS_FROM_OUTPUT later trims the
+        # deliverable. Read before any cleanup so this metric never changes meaning.
+        unfiltered_bytes = workspace.final_output_csv.read_bytes()
         processed_rows, _ = _count_csv_rows(workspace.final_output_csv)
+
+        # Always upload the unfiltered merged output first, before any row-removal step,
+        # so the full evidence trail survives in cloud storage even when the cleanup below
+        # strips rows from the deliverable. This is what makes automatic removal safe to
+        # default on — a bug in the cap/processor logic can no longer silently destroy the
+        # only record of what actually happened (see commit feeecef, which reverted an
+        # earlier automatic-strip attempt for exactly that risk).
+        unfiltered_file_name = f"output_{execution.id}_unfiltered.csv"
+        unfiltered_file_path = storage_service.build_execution_file_path(
+            user_id=execution.created_by or "system",
+            execution_id=str(execution.id),
+            file_name=unfiltered_file_name,
+        )
+        uploaded_unfiltered_path = _run_async(
+            storage_service.upload_file(
+                file_content=unfiltered_bytes,
+                file_path=unfiltered_file_path,
+                content_type="text/csv",
+            )
+        )
+        unfiltered_output_meta = {
+            "url": uploaded_unfiltered_path,
+            "size": len(unfiltered_bytes),
+            "uploaded_at": datetime.utcnow().isoformat(),
+        }
+
+        if settings.REMOVE_INVALID_ROWS_FROM_OUTPUT:
+            remove_not_validated = _load_remove_not_validated_fn()
+            cleaned_path = workspace.final_output_csv.with_suffix(".cleaned.csv")
+            _, removed_invalid_rows, removed_urls = remove_not_validated(
+                str(workspace.final_output_csv), str(cleaned_path)
+            )
+            if removed_invalid_rows:
+                cleaned_path.replace(workspace.final_output_csv)
+                logger.info(
+                    "removed_invalid_rows_from_output  execution=%s  removed=%d  urls=%s",
+                    execution.id,
+                    removed_invalid_rows,
+                    removed_urls,
+                )
+            else:
+                cleaned_path.unlink(missing_ok=True)
+
+        output_bytes = workspace.final_output_csv.read_bytes()
         output_file_name = f"output_{execution.id}.csv"
         output_file_path = storage_service.build_execution_file_path(
             user_id=execution.created_by or "system",
@@ -751,6 +826,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             processed_rows=processed_rows,
             elapsed_seconds=elapsed_seconds,
             actual_cost=actual_cost,
+            unfiltered_output=unfiltered_output_meta,
         )
 
         if settings.EXECUTION_CLEANUP_ON_SUCCESS and workspace.root_dir.exists():
