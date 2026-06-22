@@ -287,20 +287,6 @@ def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
     )
 
 
-def _cleanup_workspace_root(execution_id: UUID) -> None:
-    root_dir = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution_id)
-    if not root_dir.exists():
-        return
-
-    try:
-        shutil.rmtree(root_dir)
-    except Exception as exc:
-        raise ExecutionProcessingError(
-            message=f"Failed to clean execution workspace before run: {exc}",
-            error_logs=traceback.format_exc(),
-        ) from exc
-
-
 def _clean_preprocessing_dirs(workspace: ExecutionWorkspace) -> None:
     """Clear pre-processor output and processor input before every run, including resumes.
 
@@ -570,13 +556,14 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "Execution is missing input/questions file URLs."
             )
 
-        if settings.PROCESSOR_RESUME_FROM_CHECKPOINT:
-            _resume_root = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution.id)
-            if _resume_root.exists():
-                logger.info("resume_skip_cleanup  execution=%s  workspace=%s", execution.id, _resume_root)
-            # workspace absent on first run — _build_workspace creates it fresh below
-        else:
-            _cleanup_workspace_root(execution.id)
+        # Never wipe the workspace before a run: a prior attempt's checkpoint and partial
+        # output CSV (if any) are exactly what lets this run resume instead of reprocessing
+        # rows from scratch. Workspace is absent on a first run — _build_workspace creates it
+        # fresh below. On success the workspace is removed afterward (EXECUTION_CLEANUP_ON_SUCCESS),
+        # so anything left on disk here only exists because a previous attempt failed mid-run.
+        _resume_root = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution.id)
+        if _resume_root.exists():
+            logger.info("resume_skip_cleanup  execution=%s  workspace=%s", execution.id, _resume_root)
         workspace = _build_workspace(execution.id)
         _clean_preprocessing_dirs(workspace)
 
@@ -613,12 +600,12 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # Per-(user, task) relevant-evidence cap config for this execution. Resolved once
         # here because BOTH subprocesses need it: the pre-processor must keep each
         # (UUID, task) group inside one split file (group-aware splitting), and the
-        # processor enforces the cap. Driven solely by this execution's threshold_config.
+        # processor enforces the cap. Driven solely by this execution's threshold_config —
+        # only present when the user supplied a number at execution create/update; absent
+        # (or not a positive number) means no cap and all rows are processed.
         cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
-        cap_enabled = bool(cap_config.get("enable_relevant_cap"))
-        max_relevant = (
-            cap_config.get("max_relevant_per_user_task") or settings.MAX_RELEVANT_PER_USER_TASK
-        )
+        max_relevant = cap_config.get("max_relevant_per_user_task")
+        cap_enabled = isinstance(max_relevant, int) and max_relevant > 0
 
         preprocessor_env = {
             **base_env,
@@ -694,7 +681,6 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         processor_env = {
             **base_env,
             "PYTHONUNBUFFERED": "1",
-            "RESUME_FROM_CHECKPOINT": str(settings.PROCESSOR_RESUME_FROM_CHECKPOINT),
             "CHECKPOINT_CLEANUP_ON_SUCCESS": "True",
         }
         if question_task_column:
@@ -703,10 +689,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
 
-        # Per-(user, task) relevant-evidence cap (config resolved above). The per-execution
-        # setting is the single source of truth, so set the flag explicitly either way for
-        # determinism. Passed via env, not CLI, so the values never appear in `ps`.
-        processor_env["ENABLE_RELEVANT_CAP"] = "true" if cap_enabled else "false"
+        # Per-(user, task) relevant-evidence cap (config resolved above). Presence of
+        # MAX_RELEVANT_PER_USER_TASK in the env is itself the on/off signal for the
+        # processor — omitted entirely means no cap, all rows processed. Passed via
+        # env, not CLI, so the value never appears in `ps`.
         if cap_enabled:
             processor_env["MAX_RELEVANT_PER_USER_TASK"] = str(max_relevant)
             logger.info(

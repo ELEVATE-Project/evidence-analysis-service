@@ -14,6 +14,13 @@ Usage:
 import argparse
 import csv
 import os
+import sys
+from pathlib import Path
+
+SERVICE_ROOT = Path(__file__).resolve().parents[2]
+if str(SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVICE_ROOT))
+from core.constants import RELEVANCE_TAG_NOT_VALIDATED
 
 
 def _parse_args():
@@ -46,7 +53,7 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int]:
             writer.writeheader()
             for row in reader:
                 total += 1
-                if row.get("Relevance Tag") == "notValidated":
+                if row.get("Relevance Tag") == RELEVANCE_TAG_NOT_VALIDATED:
                     removed += 1
                     continue
                 writer.writerow(row)

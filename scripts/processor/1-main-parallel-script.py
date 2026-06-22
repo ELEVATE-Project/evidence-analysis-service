@@ -24,7 +24,7 @@ load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
 # Allow importing from the service package (services/, core/, etc.)
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
-from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER, OPENROUTER_MODELS_URL
+from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER, OPENROUTER_MODELS_URL, RELEVANCE_TAG_NOT_VALIDATED
 from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
 import time
@@ -84,7 +84,8 @@ API_USAGE_LOG_FILE = (
 )
 
 # === CHECKPOINT CONFIGURATION (from .env) ===
-RESUME_FROM_CHECKPOINT = os.getenv("RESUME_FROM_CHECKPOINT", "True").lower() == "true"
+# Always resumes from an existing checkpoint / partial output when present — there is no
+# from-scratch mode. A fresh run simply finds no checkpoint and starts with empty state.
 CHECKPOINT_SAVE_FREQUENCY = int(os.getenv("CHECKPOINT_SAVE_FREQUENCY", "10"))
 CHECKPOINT_CLEANUP_ON_SUCCESS = os.getenv("CHECKPOINT_CLEANUP_ON_SUCCESS", "True").lower() == "true"
 
@@ -130,9 +131,10 @@ PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "
 # Set per execution by the service via env. Once a (UUID, task) pair accumulates
 # MAX_RELEVANT_PER_USER_TASK "Relevant" tags, remaining rows for that pair are written as
 # "notValidated" with NO API call. Relies on the pre-processor's group-aware splitting so
-# each (UUID, task) group stays inside one worker's file. Default OFF = current behavior.
-ENABLE_RELEVANT_CAP = os.getenv("ENABLE_RELEVANT_CAP", "false").strip().lower() == "true"
-MAX_RELEVANT_PER_USER_TASK = int(os.getenv("MAX_RELEVANT_PER_USER_TASK", "2"))
+# each (UUID, task) group stays inside one worker's file. The env var's presence is the
+# on/off signal itself — unset (None) means no cap, all rows processed.
+_max_relevant_env = os.getenv("MAX_RELEVANT_PER_USER_TASK")
+MAX_RELEVANT_PER_USER_TASK = int(_max_relevant_env) if _max_relevant_env else None
 
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
@@ -319,13 +321,9 @@ def generate_row_hash(row):
 
 def load_checkpoint():
     """
-    Load checkpoint file if it exists and RESUME_FROM_CHECKPOINT is enabled.
+    Load checkpoint file if it exists.
     Returns: dict with file-level checkpoint data
     """
-    if not RESUME_FROM_CHECKPOINT:
-        logger.info("[Checkpoint] Resume from checkpoint is DISABLED")
-        return {}
-    
     if not os.path.exists(CHECKPOINT_FILE):
         logger.info("[Checkpoint] No existing checkpoint found. Starting fresh.")
         return {}
@@ -2079,7 +2077,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         if checkpoint_data is None:
             checkpoint_data = {}
         
-        if input_filename not in checkpoint_data and RESUME_FROM_CHECKPOINT:
+        if input_filename not in checkpoint_data:
             checkpoint_data[input_filename] = {
                 'processed_ids': {},
                 'started_at': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -2119,12 +2117,9 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # School ID (what the old hash-based checkpoint keyed on) so datasets without a UUID
         # column still get basic resume protection instead of silently reprocessing everything.
         resume_identity_col = "UUID" if "UUID" in df_filtered.columns else "School ID"
-        resume_processed_keys = set()
-        resume_relevant_counts = {}
-        if RESUME_FROM_CHECKPOINT:
-            resume_processed_keys, resume_relevant_counts = _read_resume_state(
-                OUTPUT_DIR, input_filename, worker_id, identity_col=resume_identity_col
-            )
+        resume_processed_keys, resume_relevant_counts = _read_resume_state(
+            OUTPUT_DIR, input_filename, worker_id, identity_col=resume_identity_col
+        )
 
         # ===== CHECKPOINT: Filter out already-processed rows BEFORE processing =====
         if resume_processed_keys:
@@ -2144,7 +2139,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # ===== RELEVANT CAP: per-(UUID, task) counters for this worker's file =====
         # Per-worker scope is correct because group-aware splitting keeps each (UUID, task)
         # pair inside a single file. Disabled gracefully when the input lacks a UUID column.
-        cap_enabled = ENABLE_RELEVANT_CAP
+        cap_enabled = MAX_RELEVANT_PER_USER_TASK is not None
         if cap_enabled and "UUID" not in df_filtered.columns:
             logging.warning(f"[Worker {worker_id}] relevant_cap_disabled reason=missing_uuid_column file={input_filename}")
             cap_enabled = False
@@ -2249,11 +2244,11 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 task_types.append("Capped")
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
-                relevance_tags.append("notValidated")
+                relevance_tags.append(RELEVANCE_TAG_NOT_VALIDATED)
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
                 not_validated_count += 1
-                mark_row_processed(input_filename, row_hash, checkpoint_data, "notValidated", cap_key)
+                mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED, cap_key)
                 processed_count += 1
 
                 # Flush batch to CSV if threshold reached (capped path)
@@ -2437,13 +2432,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             last_flushed = processed_count
 
         # ===== CHECKPOINT: Final save for this file =====
-        if RESUME_FROM_CHECKPOINT:
-            save_checkpoint(checkpoint_data)
-            logging.info(
-                f"[Worker {worker_id}] [Checkpoint] Final save — "
-                f"Total: {rows_skipped_from_checkpoint + rows_processed_new} rows "
-                f"({rows_skipped_from_checkpoint} from checkpoint, {rows_processed_new} newly processed)"
-            )
+        save_checkpoint(checkpoint_data)
+        logging.info(
+            f"[Worker {worker_id}] [Checkpoint] Final save — "
+            f"Total: {rows_skipped_from_checkpoint + rows_processed_new} rows "
+            f"({rows_skipped_from_checkpoint} from checkpoint, {rows_processed_new} newly processed)"
+        )
 
         logging.info(f"[Worker {worker_id}] Finished processing {input_file}. Output: {output_filename}")
 
@@ -2476,9 +2470,9 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
                 # API call — exclude them from success/failure so these stay scoped to rows
                 # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', 'notValidated')),
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)),
                 "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', 'notValidated')],
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)],
                 "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
                 "user_owned_count": len(user_owned_df),
                 "standard_count": len(df_to_save) - len(user_owned_df),
@@ -2494,9 +2488,9 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
                 # API call — exclude them from success/failure so these stay scoped to rows
                 # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', 'notValidated')),
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)),
                 "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', 'notValidated')],
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)],
                 "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
                 "user_owned_count": 0,
                 "standard_count": len(df_to_save),
@@ -2509,7 +2503,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
     except Exception as e:
         logging.exception(f"[Worker {worker_id}] Failed to process {input_file}: {e}")
         # ===== CHECKPOINT: Save on error too =====
-        if RESUME_FROM_CHECKPOINT and checkpoint_data:
+        if checkpoint_data:
             save_checkpoint(checkpoint_data)
             logging.info(f"[Worker {worker_id}] [Checkpoint] Saved progress before error exit")
         return None
@@ -2597,10 +2591,9 @@ if __name__ == "__main__":
     
     # Log checkpoint configuration
     logging.info(f"[Main] ===== CHECKPOINT CONFIGURATION =====")
-    logging.info(f"[Main] Resume from checkpoint: {RESUME_FROM_CHECKPOINT}")
     logging.info(f"[Main] Checkpoint save frequency: Every {CHECKPOINT_SAVE_FREQUENCY} rows")
     logging.info(f"[Main] Checkpoint cleanup on success: {CHECKPOINT_CLEANUP_ON_SUCCESS}")
-    if RESUME_FROM_CHECKPOINT and global_checkpoint:
+    if global_checkpoint:
         total_existing = sum(len(v.get('processed_ids', {})) for k, v in global_checkpoint.items() if not k.startswith('_'))
         logging.info(f"[Main] Found existing checkpoint with {total_existing} processed rows")
     logging.info(f"[Main] ===============================================")
@@ -2695,7 +2688,7 @@ if __name__ == "__main__":
             logging.info(f"✅ All files processed and merged into: {FINAL_OUTPUT_FILE}")
             
             # Clean up checkpoint after successful completion
-            if CHECKPOINT_CLEANUP_ON_SUCCESS and RESUME_FROM_CHECKPOINT:
+            if CHECKPOINT_CLEANUP_ON_SUCCESS:
                 cleanup_checkpoint()
                 logging.info(f"[Main] Checkpoint cleaned up successfully")
             
@@ -2732,16 +2725,15 @@ if __name__ == "__main__":
             logging.info(f"  - 🚫 notValidated (relevant cap reached, no API call): {total_not_validated_all}")
         
         # Checkpoint statistics
-        if RESUME_FROM_CHECKPOINT:
-            logging.info("")
-            logging.info(f"===== CHECKPOINT STATISTICS =====")
-            logging.info(f"Rows skipped (from checkpoint): {total_checkpoint_skipped_all}")
-            logging.info(f"New API calls made: {total_checkpoint_new_all}")
-            logging.info(f"API calls saved: {total_checkpoint_skipped_all}")
-            if total_checkpoint_skipped_all > 0:
-                # Rough estimate: $0.01 per API call (adjust based on your API pricing)
-                estimated_savings = total_checkpoint_skipped_all * 0.01
-                logging.info(f"💰 Estimated cost saved: ${estimated_savings:.2f}")
+        logging.info("")
+        logging.info(f"===== CHECKPOINT STATISTICS =====")
+        logging.info(f"Rows skipped (from checkpoint): {total_checkpoint_skipped_all}")
+        logging.info(f"New API calls made: {total_checkpoint_new_all}")
+        logging.info(f"API calls saved: {total_checkpoint_skipped_all}")
+        if total_checkpoint_skipped_all > 0:
+            # Rough estimate: $0.01 per API call (adjust based on your API pricing)
+            estimated_savings = total_checkpoint_skipped_all * 0.01
+            logging.info(f"💰 Estimated cost saved: ${estimated_savings:.2f}")
         
         # API Usage Statistics
         logging.info("")

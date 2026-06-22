@@ -356,15 +356,14 @@ class ExecutionService:
     ) -> dict[str, Any]:
         """Fold the per-(user, task) relevant-evidence cap into threshold_config.
 
-        When evidence_threshold is provided, enable the cap and record the limit
-        alongside the source-type defaults. When None, return the config unchanged
-        (feature off — preserves existing behavior).
+        When evidence_threshold is provided, record the limit alongside the
+        source-type defaults. When None, return the config unchanged — the
+        processor treats a missing limit as "no cap, process all rows".
         """
         if evidence_threshold is None:
             return threshold_config
         return {
             **threshold_config,
-            "enable_relevant_cap": True,
             "max_relevant_per_user_task": evidence_threshold,
         }
 
