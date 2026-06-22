@@ -335,23 +335,37 @@ class ReportService:
         # excluded by the execution's evidence-type filter. It's a distinct bucket: counted in
         # "total" but never folded into Relevant/Partially Relevant/Irrelevant, and excluded from
         # rel_score's numerator and denominator.
+        # "null" = row has no Relevance Tag at all — the processor's no-question-found skip path
+        # (task not in the questions sheet) appends None rather than tagging the row, so it never
+        # reached the AI either. Same treatment as notValidated: counted in "total", never folded
+        # into Relevant/Partially Relevant/Irrelevant, excluded from rel_score.
+        RELEVANCE_NULL_BUCKET = "null"
         RELEVANCE_TYPES = {"Relevant", "Partially Relevant", "Irrelevant", RELEVANCE_TAG_NOT_VALIDATED}
         MAX_TOP = 15
 
         def create_node() -> Dict[str, Any]:
-            return {"total": 0, "Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0, RELEVANCE_TAG_NOT_VALIDATED: 0}
+            return {
+                "total": 0,
+                "Relevant": 0,
+                "Partially Relevant": 0,
+                "Irrelevant": 0,
+                RELEVANCE_TAG_NOT_VALIDATED: 0,
+                RELEVANCE_NULL_BUCKET: 0,
+            }
 
         def update_node(node: Dict[str, Any], tag: str) -> None:
             node["total"] += 1
             if tag in RELEVANCE_TYPES:
                 node[tag] += 1
+            else:
+                node[RELEVANCE_NULL_BUCKET] += 1
 
         def rel_score(node: Dict[str, Any]) -> float:
-            # notValidated rows were never evaluated (relevant-cap reached, or evidence-type
-            # excluded) — excluding them from the denominator keeps the score scoped to evaluated
-            # evidence only. "total" itself is left untouched; it must still include notValidated
-            # rows everywhere else.
-            evaluated = node["total"] - node.get(RELEVANCE_TAG_NOT_VALIDATED, 0)
+            # notValidated and null rows were never evaluated (relevant-cap reached, evidence-type
+            # excluded, or no question found for the task) — excluding them from the denominator
+            # keeps the score scoped to evidence the AI actually evaluated. "total" itself is left
+            # untouched; it must still include these rows everywhere else.
+            evaluated = node["total"] - node.get(RELEVANCE_TAG_NOT_VALIDATED, 0) - node.get(RELEVANCE_NULL_BUCKET, 0)
             return ((node["Relevant"] + node["Partially Relevant"] * 0.5) / evaluated * 100) if evaluated else 0.0
 
         def parse_subject(task: str) -> str:
@@ -409,7 +423,13 @@ class ReportService:
             return "week" if diff_days <= 183 else "month"
 
         # Accumulation structures
-        relevance_counts = {"Relevant": 0, "Partially Relevant": 0, "Irrelevant": 0, RELEVANCE_TAG_NOT_VALIDATED: 0}
+        relevance_counts = {
+            "Relevant": 0,
+            "Partially Relevant": 0,
+            "Irrelevant": 0,
+            RELEVANCE_TAG_NOT_VALIDATED: 0,
+            RELEVANCE_NULL_BUCKET: 0,
+        }
         states_set: set[str] = set()
         users_set: set[str] = set()
         schools_set: set[str] = set()
@@ -449,6 +469,8 @@ class ReportService:
                 states_set.add(state.upper())
             if tag in RELEVANCE_TYPES:
                 relevance_counts[tag] += 1
+            else:
+                relevance_counts[RELEVANCE_NULL_BUCKET] += 1
             if uuid:
                 users_set.add(uuid)
             if school:

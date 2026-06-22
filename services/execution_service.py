@@ -345,29 +345,6 @@ class ExecutionService:
         return None
 
     @staticmethod
-    def _resolve_threshold_config(source_type: CsvSourceType) -> dict[str, Any]:
-        if isinstance(source_type.default_thresholds, dict):
-            return deepcopy(source_type.default_thresholds)
-        return {}
-
-    @staticmethod
-    def _apply_evidence_threshold(
-        threshold_config: dict[str, Any], evidence_threshold: Optional[int]
-    ) -> dict[str, Any]:
-        """Fold the per-(user, task) relevant-evidence cap into threshold_config.
-
-        When evidence_threshold is provided, record the limit alongside the
-        source-type defaults. When None, return the config unchanged — the
-        processor treats a missing limit as "no cap, process all rows".
-        """
-        if evidence_threshold is None:
-            return threshold_config
-        return {
-            **threshold_config,
-            "max_relevant_per_user_task": evidence_threshold,
-        }
-
-    @staticmethod
     def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
         if row_count <= 0:
             return None, None
@@ -976,9 +953,12 @@ class ExecutionService:
             )
         self._validate_scope_metadata(request_data, source_type)
         criterias_mode = self._resolve_criterias_mode(source_type)
-        threshold_config = self._apply_evidence_threshold(
-            self._resolve_threshold_config(source_type),
-            request_data.evidence_threshold,
+        # threshold_config exists solely to carry the per-(user, task) relevant-evidence
+        # cap to the processor; None when no cap was requested (no seeded default).
+        threshold_config = (
+            {"max_relevant_per_user_task": request_data.evidence_threshold}
+            if request_data.evidence_threshold is not None
+            else None
         )
 
         execution = Execution(
@@ -1668,9 +1648,12 @@ class ExecutionService:
             )
         self._validate_scope_metadata(request_data, source_type)
         criterias_mode = self._resolve_criterias_mode(source_type)
-        threshold_config = self._apply_evidence_threshold(
-            self._resolve_threshold_config(source_type),
-            request_data.evidence_threshold,
+        # threshold_config exists solely to carry the per-(user, task) relevant-evidence
+        # cap to the processor; None when no cap was requested (no seeded default).
+        threshold_config = (
+            {"max_relevant_per_user_task": request_data.evidence_threshold}
+            if request_data.evidence_threshold is not None
+            else None
         )
 
         execution = Execution(
