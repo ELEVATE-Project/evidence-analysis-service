@@ -1,7 +1,0 @@
-UUID,Declared State,District,Block,School Name,School ID,Program Name,Program ID,Project ID,Project start date of the user,Project completion date of the user,Tasks,Task Evidence
-user-cleanup-1,Haryana,Ambala,Ambala-I,Greenwood School,SCH001,PBL Program 2025,PGM001,PROJ001,2025-01-15,2025-03-15,Task 1: Collect data,https://raw.githubusercontent.com/github/explore/main/topics/python/python.png
-user-cleanup-1,Haryana,Ambala,Ambala-I,Greenwood School,SCH001,PBL Program 2025,PGM001,PROJ001,2025-01-15,2025-03-15,Task 1: Collect data,https://raw.githubusercontent.com/github/explore/main/topics/javascript/javascript.png
-user-cleanup-1,Haryana,Ambala,Ambala-I,Greenwood School,SCH001,PBL Program 2025,PGM001,PROJ001,2025-01-15,2025-03-15,Task 1: Collect data,https://raw.githubusercontent.com/github/explore/main/topics/java/java.png
-user-cleanup-1,Haryana,Ambala,Ambala-I,Greenwood School,SCH001,PBL Program 2025,PGM001,PROJ001,2025-01-15,2025-03-15,Task 1: Collect data,https://raw.githubusercontent.com/github/explore/main/topics/go/go.png
-user-cleanup-2,Haryana,Ambala,Ambala-I,Greenwood School,SCH002,PBL Program 2025,PGM001,PROJ001,2025-01-15,2025-03-15,Task 1: Collect data,https://raw.githubusercontent.com/github/explore/main/topics/ruby/ruby.png
-user-cleanup-2,Haryana,Ambala,Ambala-I,Greenwood School,SCH002,PBL Program 2025,PGM001,PROJ001,2025-01-15,2025-03-15,Task 1: Collect data,https://raw.githubusercontent.com/github/explore/main/topics/doesnotexist12345/doesnotexist12345.png
