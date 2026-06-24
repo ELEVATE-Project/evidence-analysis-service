@@ -61,10 +61,11 @@ USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by s
 SPLIT_FILES = ARGS.split_files or os.getenv("PREPROCESS_SPLIT_FILES") or os.getenv("SPLIT_FILES", "yes")
 ROWS_PER_FILE = ARGS.rows_per_file or int(os.getenv("PREPROCESS_ROWS_PER_FILE", os.getenv("ROWS_PER_FILE", "15000")))
 
-# Group-aware splitting: set by the service only when the relevant-evidence cap is active.
-# When enabled, every (UUID, task) group is kept inside one split file so the processor's
+# Group-aware splitting: derived from the same MAX_RELEVANT_PER_USER_TASK signal the
+# processor uses for the relevant-evidence cap (presence = cap on), not a separate toggle.
+# When on, every (UUID, task) group is kept inside one split file so the processor's
 # per-worker cap counts stay correct. Off by default → original size-only splitting.
-GROUP_AWARE_SPLIT = os.getenv("PREPROCESS_GROUP_AWARE_SPLIT", "false").strip().lower() == "true"
+GROUP_AWARE_SPLIT = os.getenv("MAX_RELEVANT_PER_USER_TASK") is not None
 
 # Debug: Print loaded configuration
 print(f"🔧 Configuration Loaded:")

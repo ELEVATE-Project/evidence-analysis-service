@@ -77,14 +77,14 @@ def _resolve_script_path(raw_path: str) -> Path:
 
 
 def _load_remove_not_validated_fn():
-    """Load remove_not_validated() from scripts/processor/2-remove-notvalidated.py.
+    """Load remove_not_validated() from scripts/processor/2-remove-nonvalidated-and-empty-evidences.py.
 
     That script's filename starts with a digit and contains a hyphen, so it isn't a
     valid Python module name and can't be reached with a normal `import` statement —
     loaded dynamically by file path instead, to reuse its row-removal logic here
     rather than duplicating it.
     """
-    script_path = SERVICE_ROOT / "scripts" / "processor" / "2-remove-notvalidated.py"
+    script_path = SERVICE_ROOT / "scripts" / "processor" / "2-remove-nonvalidated-and-empty-evidences.py"
     spec = importlib.util.spec_from_file_location("remove_notvalidated_script", script_path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -640,9 +640,11 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "PYTHONUNBUFFERED": "1",
         }
         if cap_enabled:
-            # Group-aware splitting is only needed (and only correct) when the cap is on.
-            # When off, the pre-processor keeps its original fixed-size splitting untouched.
-            preprocessor_env["PREPROCESS_GROUP_AWARE_SPLIT"] = "true"
+            # Same signal the processor uses below (presence = cap on). The pre-processor
+            # only checks for presence, not the value, to switch on group-aware splitting —
+            # required for the processor's per-worker cap counts to stay correct. When off,
+            # the pre-processor keeps its original fixed-size splitting untouched.
+            preprocessor_env["MAX_RELEVANT_PER_USER_TASK"] = str(max_relevant)
         configured_columns = _resolve_processor_columns_from_config(db, execution)
         question_task_column = configured_columns.get("task_column", "")
         question_text_column = configured_columns.get("question_text_column", "")

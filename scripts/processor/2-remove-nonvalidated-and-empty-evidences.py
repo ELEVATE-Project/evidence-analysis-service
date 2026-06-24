@@ -12,7 +12,7 @@ evaluation signal, so removing them for final delivery is a separate, deliberate
 an automatic part of the execution pipeline.
 
 Usage:
-    python scripts/processor/2-remove-notvalidated.py \
+    python scripts/processor/2-remove-nonvalidated-and-empty-evidences.py \
         --input-csv path/to/merged_output.csv \
         --output-csv path/to/cleaned_output.csv
 """
