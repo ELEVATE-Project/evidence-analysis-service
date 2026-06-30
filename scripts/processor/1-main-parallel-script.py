@@ -1456,8 +1456,8 @@ def _ensure_bucket(token: str):
     if token not in _token_buckets:
         with _buckets_init_lock:
             if token not in _token_buckets:          # double-checked under lock
+                _token_locks[token]   = threading.Lock()  # lock first — outer guard checks _token_buckets
                 _token_buckets[token] = deque()
-                _token_locks[token]   = threading.Lock()
 
 def rate_limiter(token: str):
     """Block until this specific token is under MAX_RPM_PER_TOKEN. Lock released during sleep."""
