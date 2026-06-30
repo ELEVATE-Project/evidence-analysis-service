@@ -1475,7 +1475,7 @@ def rate_limiter(token: str):
             sleep_time = 61.0 - (now - dq[0])
         if sleep_time > 0:
             jitter = random.uniform(0, 3)
-            logging.info("[RateLimiter] Token ...%s throttled %.1fs (+%.1fs jitter)", token[-6:], sleep_time, jitter)
+            logging.info("[RateLimiter] token=***** throttled %.1fs (+%.1fs jitter)", sleep_time, jitter)
             time.sleep(sleep_time + jitter)
 
 
@@ -1676,7 +1676,7 @@ CORRECT JSON Response:
                 logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
-                worker_token = get_worker_token(worker_id)
+                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 wait = min(60 * (2 ** retries), 300)
@@ -1863,7 +1863,7 @@ Focus on:
                 logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
-                worker_token = get_worker_token(worker_id)
+                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 wait = min(60 * (2 ** retries), 300)
@@ -1994,7 +1994,7 @@ Focus on:
                 logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
-                worker_token = get_worker_token(worker_id)
+                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 wait = min(60 * (2 ** retries), 300)
