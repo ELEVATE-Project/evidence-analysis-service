@@ -983,6 +983,9 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
 current_llm_token_index = 0
 llm_token_rotation_lock = threading.Lock()
 
+_dead_tokens: set[str] = set()
+_dead_tokens_lock = threading.Lock()
+
 def get_next_llm_token():
     global current_llm_token_index
     with llm_token_rotation_lock:
@@ -1004,8 +1007,18 @@ def switch_to_next_llm_token():
         logging.info("[LLM] Using token: -----")
         return token
 
+def _mark_token_dead(token: str):
+    with _dead_tokens_lock:
+        _dead_tokens.add(token)
+    logging.error("[LLM] token=***** marked_dead  removing from rotation")
+
 def get_worker_token(worker_id: int) -> str:
-    return _LLM_TOKENS[(worker_id - 1) % len(_LLM_TOKENS)]
+    with _dead_tokens_lock:
+        active = [t for t in _LLM_TOKENS if t not in _dead_tokens]
+    if not active:
+        logging.error("[LLM] all_tokens_dead  falling back to last configured token")
+        return _LLM_TOKENS[-1]
+    return active[(worker_id - 1) % len(active)]
 
 
 # === Gemini Model Setup ===
@@ -1658,7 +1671,13 @@ CORRECT JSON Response:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
+            if any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                worker_token = get_worker_token(worker_id)
+                retries += 1
+            elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 wait = min(60 * (2 ** retries), 300)
                 logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
                                 worker_id, retries + 1, wait, str(e)[:120])
@@ -1839,7 +1858,13 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
+            if any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                worker_token = get_worker_token(worker_id)
+                retries += 1
+            elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 wait = min(60 * (2 ** retries), 300)
                 logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
                                 worker_id, retries + 1, wait, str(e)[:120])
@@ -1964,7 +1989,13 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
+            if any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                worker_token = get_worker_token(worker_id)
+                retries += 1
+            elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
                 wait = min(60 * (2 ** retries), 300)
                 logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
                                 worker_id, retries + 1, wait, str(e)[:120])
