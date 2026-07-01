@@ -57,6 +57,7 @@ class ExecutionWorkspace:
     processor_output_dir: Path
     input_csv: Path
     questions_csv: Path
+    school_filter_csv: Path
     preprocessed_csv: Path
     final_output_csv: Path
     checkpoint_file: Path
@@ -297,6 +298,7 @@ def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
         processor_output_dir=processor_output_dir,
         input_csv=input_dir / "input.csv",
         questions_csv=input_dir / "question.csv",
+        school_filter_csv=input_dir / "school_filter.csv",
         preprocessed_csv=preprocessor_output_dir / "preprocessed_data.csv",
         final_output_csv=processor_output_dir / "merged_output.csv",
         checkpoint_file=processor_output_dir / ".processing_checkpoint.json",
@@ -605,6 +607,12 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         workspace.input_csv.write_bytes(input_bytes)
         workspace.questions_csv.write_bytes(questions_bytes)
 
+        if execution.school_filter_file_url:
+            school_filter_bytes = _run_async(storage_service.download_file(execution.school_filter_file_url))
+            if not school_filter_bytes:
+                raise ExecutionProcessingError("School filter file could not be downloaded from storage.")
+            workspace.school_filter_csv.write_bytes(school_filter_bytes)
+
         # === Dynamic Splitting Logic ===
         # Count rows in input file
         logger.info(f"Analyzing input file for splitting strategy: {workspace.input_csv}")
@@ -668,10 +676,13 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if enable_split:
             preprocessor_cmd.extend(["--rows-per-file", str(rows_per_file)])
         
-        preprocessor_cmd.extend([
-            "--use-school-filter",
-            "false",
-        ])
+        if execution.school_filter_file_url:
+            preprocessor_cmd.extend([
+                "--filter-csv", str(workspace.school_filter_csv),
+                "--use-school-filter", "true",
+            ])
+        else:
+            preprocessor_cmd.extend(["--use-school-filter", "false"])
         
         _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
 

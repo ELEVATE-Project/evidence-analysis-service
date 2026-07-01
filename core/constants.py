@@ -18,3 +18,9 @@ OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 # (no AI call made). Used by the processor, report aggregation, and the
 # notValidated cleanup script — change here, not at each call site.
 RELEVANCE_TAG_NOT_VALIDATED = "notValidated"
+
+# Required header in an uploaded school-filter CSV. The pre-processor script
+# (scripts/pre-processor/1-pre-processor.py) reads this exact column name via
+# csv.DictReader; the service validates it up front so a filter that would match
+# nothing is rejected at upload instead of silently dropping every row.
+SCHOOL_FILTER_REQUIRED_COLUMN = "UDISE+ SCHOOL CODE"
