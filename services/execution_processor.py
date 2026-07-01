@@ -607,7 +607,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         workspace.input_csv.write_bytes(input_bytes)
         workspace.questions_csv.write_bytes(questions_bytes)
 
-        if execution.school_filter_file_url:
+        if execution.school_filter_file_url and execution.school_filter_file_size:
             school_filter_bytes = _run_async(storage_service.download_file(execution.school_filter_file_url))
             if not school_filter_bytes:
                 raise ExecutionProcessingError("School filter file could not be downloaded from storage.")
@@ -676,7 +676,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if enable_split:
             preprocessor_cmd.extend(["--rows-per-file", str(rows_per_file)])
         
-        if execution.school_filter_file_url:
+        if execution.school_filter_file_url and execution.school_filter_file_size:
             preprocessor_cmd.extend([
                 "--filter-csv", str(workspace.school_filter_csv),
                 "--use-school-filter", "true",

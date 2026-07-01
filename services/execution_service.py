@@ -1291,6 +1291,9 @@ class ExecutionService:
 
         headers, row_count = self._extract_headers_and_row_count(file_bytes, label)
         if normalized_file_type == "school_filter" and SCHOOL_FILTER_REQUIRED_COLUMN not in headers:
+            execution.school_filter_file_url = None
+            execution.school_filter_file_size = None
+            self.db.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"School filter file must contain a '{SCHOOL_FILTER_REQUIRED_COLUMN}' column.",
