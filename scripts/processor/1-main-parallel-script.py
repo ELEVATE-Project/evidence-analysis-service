@@ -1672,18 +1672,17 @@ CORRECT JSON Response:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["401", "unauthorized", "user not found"]) \
-                    and _LLM_PROVIDER_NAME != PROVIDER_OPENROUTER:
-                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
-                              worker_id, str(e)[:120])
-                _mark_token_dead(worker_token)
-                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
-                retries += 1
-            elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
                 wait = min(60 * (2 ** retries), 300)
                 logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
                                 worker_id, retries + 1, wait, str(e)[:120])
                 time.sleep(wait)
+                retries += 1
+            elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             else:
                 logging.error(f"[Gemini] Error: {e}")
@@ -1860,18 +1859,17 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["401", "unauthorized", "user not found"]) \
-                    and _LLM_PROVIDER_NAME != PROVIDER_OPENROUTER:
-                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
-                              worker_id, str(e)[:120])
-                _mark_token_dead(worker_token)
-                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
-                retries += 1
-            elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
                 wait = min(60 * (2 ** retries), 300)
                 logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
                                 worker_id, retries + 1, wait, str(e)[:120])
                 time.sleep(wait)
+                retries += 1
+            elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             else:
                 logging.error(f"[Gemini] PDF processing error: {e}")
@@ -1992,18 +1990,17 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in ["401", "unauthorized", "user not found"]) \
-                    and _LLM_PROVIDER_NAME != PROVIDER_OPENROUTER:
-                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
-                              worker_id, str(e)[:120])
-                _mark_token_dead(worker_token)
-                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
-                retries += 1
-            elif any(k in error_str for k in _RETRY_ERROR_MARKERS):
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
                 wait = min(60 * (2 ** retries), 300)
                 logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
                                 worker_id, retries + 1, wait, str(e)[:120])
                 time.sleep(wait)
+                retries += 1
+            elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             else:
                 logging.error(f"[Gemini] Excel processing error: {e}")
