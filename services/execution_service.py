@@ -1203,7 +1203,12 @@ class ExecutionService:
         execution = self._get_execution_or_404(execution_id, user_id)
         self._ensure_not_started_for_file_changes(execution)
 
-        label = "Input file" if normalized_file_type == "input" else "Questions file"
+        if normalized_file_type == "input":
+            label = "Input file"
+        elif normalized_file_type == "school_filter":
+            label = "School filter file"
+        else:
+            label = "Questions file"
         safe_file_name, normalized_content_type = self._validate_file_descriptor(
             request_data.file.file_name,
             request_data.file.size_bytes,
@@ -1890,7 +1895,12 @@ class ExecutionService:
                 detail=f"{normalized_file_type} file was not found in storage.",
             )
 
-        label = "Input file" if normalized_file_type == "input" else "Questions file"
+        if normalized_file_type == "input":
+            label = "Input file"
+        elif normalized_file_type == "school_filter":
+            label = "School filter file"
+        else:
+            label = "Questions file"
         headers, row_count, preview_rows, _ = self._parse_csv_preview(
             file_bytes,
             label,
