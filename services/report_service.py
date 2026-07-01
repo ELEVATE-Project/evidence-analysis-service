@@ -13,6 +13,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import settings
+from core.constants import RELEVANCE_TYPES
 from models.execution import Execution
 from models.schemas import ReportDataPageResponse, ReportDownloadResponse, ReportResponse
 from services.storage_service import StorageService
@@ -334,7 +335,6 @@ class ReportService:
         # excluded by the execution's evidence-type filter. It's a distinct bucket: counted in
         # "total" but never folded into Relevant/Partially Relevant/Irrelevant, and excluded from
         # rel_score's numerator and denominator.
-        RELEVANCE_TYPES = {"Relevant", "Partially Relevant", "Irrelevant", "notValidated"}
         MAX_TOP = 15
 
         def create_node() -> Dict[str, Any]:

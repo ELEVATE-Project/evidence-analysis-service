@@ -23,6 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from core.config import settings
+from core.constants import PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from models.schemas import (
@@ -356,7 +357,7 @@ class ExecutionService:
         """Build the processing_config JSONB payload. None (not {}) when nothing was configured,
         so a proper subset of evidence types is distinguishable from "no restriction"."""
         if request_data.evidence_types:
-            return {"evidence_types": request_data.evidence_types}
+            return {PROCESSING_CONFIG_KEY_EVIDENCE_TYPES: request_data.evidence_types}
         return None
 
     @staticmethod
@@ -2152,7 +2153,7 @@ class ExecutionService:
             'states',
             'program_ref_id',
             'program_name',
-            'evidence_types',
+            PROCESSING_CONFIG_KEY_EVIDENCE_TYPES,
         }
 
         for field in allowed_fields:
@@ -2176,16 +2177,16 @@ class ExecutionService:
                         detail="states must be a non-empty array if provided."
                     )
 
-            if field == 'evidence_types':
+            if field == PROCESSING_CONFIG_KEY_EVIDENCE_TYPES:
                 # evidence_types doesn't live on the ORM model directly — it rides inside the
                 # generic processing_config JSONB blob, merged so other future keys survive.
                 current_processing_config = (
                     dict(execution.processing_config) if isinstance(execution.processing_config, dict) else {}
                 )
                 if value:
-                    current_processing_config['evidence_types'] = value
+                    current_processing_config[PROCESSING_CONFIG_KEY_EVIDENCE_TYPES] = value
                 else:
-                    current_processing_config.pop('evidence_types', None)
+                    current_processing_config.pop(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES, None)
                 execution.processing_config = current_processing_config or None
                 continue
 

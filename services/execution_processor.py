@@ -23,6 +23,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import SERVICE_ROOT, settings
+from core.constants import PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
@@ -597,7 +598,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             preprocessor_env["PREPROCESS_QUESTION_TASK_COLUMN"] = question_task_column
 
         processing_config = execution.processing_config if isinstance(execution.processing_config, dict) else {}
-        evidence_types = processing_config.get("evidence_types")
+        evidence_types = processing_config.get(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES)
         evidence_types = evidence_types if isinstance(evidence_types, list) and evidence_types else None
 
         preprocessor_cmd = [

@@ -7,6 +7,7 @@ from datetime import datetime
 from uuid import UUID
 
 from core.config import settings
+from core.constants import ALLOWED_EVIDENCE_TYPES
 
 
 # ============ Authentication Schemas ============
@@ -97,13 +98,12 @@ class ExecutionCreate(BaseModel):
             return None
         if not isinstance(v, list):
             raise ValueError("evidence_types must be an array of strings")
-        allowed = {"image", "pdf", "excel"}
         cleaned = sorted({str(t).strip().lower() for t in v if str(t).strip()})
         if not cleaned:
             return None
-        invalid = [t for t in cleaned if t not in allowed]
+        invalid = [t for t in cleaned if t not in ALLOWED_EVIDENCE_TYPES]
         if invalid:
-            raise ValueError(f"evidence_types must be a subset of {sorted(allowed)}, got invalid: {invalid}")
+            raise ValueError(f"evidence_types must be a subset of {sorted(ALLOWED_EVIDENCE_TYPES)}, got invalid: {invalid}")
         return cleaned
 
 
@@ -232,13 +232,12 @@ class ExecutionUpdate(BaseModel):
             return None
         if not isinstance(v, list):
             raise ValueError("evidence_types must be an array of strings")
-        allowed = {"image", "pdf", "excel"}
         cleaned = sorted({str(t).strip().lower() for t in v if str(t).strip()})
         if not cleaned:
             return None
-        invalid = [t for t in cleaned if t not in allowed]
+        invalid = [t for t in cleaned if t not in ALLOWED_EVIDENCE_TYPES]
         if invalid:
-            raise ValueError(f"evidence_types must be a subset of {sorted(allowed)}, got invalid: {invalid}")
+            raise ValueError(f"evidence_types must be a subset of {sorted(ALLOWED_EVIDENCE_TYPES)}, got invalid: {invalid}")
         return cleaned
 
 
