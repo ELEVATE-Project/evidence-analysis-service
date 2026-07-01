@@ -290,13 +290,6 @@ def _resolve_model_pricing(model_name):
             logger.warning("gemini_pricing_not_found  model=%s", model_name)
         return pricing
 
-# Retriable-error markers for the token-rotation retry handlers below.
-_RETRY_ERROR_MARKERS = ["rate limit", "quota", "429", "resource_exhausted"]
-if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-    _RETRY_ERROR_MARKERS = _RETRY_ERROR_MARKERS + ["401", "unauthorized", "user not found"]
-elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
-    pass  # Gemini uses the base markers above
-
 
 
 # ===== CHECKPOINT MANAGEMENT FUNCTIONS =====
@@ -1445,8 +1438,7 @@ def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=N
     logging.debug(f"[Relevance-{mode.upper()}] Final score: {combined_score:.2f} → Tag: {tag}")
     return tag
 
-MAX_REQUESTS_PER_MINUTE = 2000
-MAX_RPM_PER_TOKEN = int(os.getenv("MAX_RPM_PER_TOKEN", "4000"))
+MAX_RPM_PER_TOKEN = max(1, int(os.getenv("MAX_RPM_PER_TOKEN", "4000")))
 
 _token_buckets: dict[str, deque] = {}
 _token_locks: dict[str, threading.Lock] = {}
@@ -1682,6 +1674,11 @@ CORRECT JSON Response:
                 logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
+                with _dead_tokens_lock:
+                    all_dead = len(_dead_tokens) >= len(_LLM_TOKENS)
+                if all_dead:
+                    logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
+                    break
                 worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             else:
@@ -1869,6 +1866,11 @@ Focus on:
                 logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
+                with _dead_tokens_lock:
+                    all_dead = len(_dead_tokens) >= len(_LLM_TOKENS)
+                if all_dead:
+                    logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
+                    break
                 worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             else:
@@ -2000,6 +2002,11 @@ Focus on:
                 logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
+                with _dead_tokens_lock:
+                    all_dead = len(_dead_tokens) >= len(_LLM_TOKENS)
+                if all_dead:
+                    logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
+                    break
                 worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
                 retries += 1
             else:
