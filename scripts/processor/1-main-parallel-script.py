@@ -24,7 +24,16 @@ load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
 # Allow importing from the service package (services/, core/, etc.)
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
-from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER, OPENROUTER_MODELS_URL, RELEVANCE_TAG_NOT_VALIDATED
+from core.constants import (
+    PROVIDER_GEMINI,
+    PROVIDER_OPENROUTER,
+    OPENROUTER_MODELS_URL,
+    RELEVANCE_TAG_RELEVANT,
+    RELEVANCE_TAG_PARTIAL,
+    RELEVANCE_TAG_IRRELEVANT,
+    RELEVANCE_TAG_NOT_VALIDATED,
+    EVIDENCE_TYPE_EXTENSIONS,
+)
 from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
 import time
@@ -32,9 +41,9 @@ from collections import deque
 import hashlib
 
 # === Constants ===
-IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-PDF_FORMATS = {".pdf"}
-EXCEL_FORMATS = {".xlsx", ".xls"}
+IMAGE_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["image"])
+PDF_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["pdf"])
+EXCEL_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["excel"])
 ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 
 # Defense-in-depth re-check of the execution's evidence-type filter (primary enforcement is in
@@ -455,7 +464,7 @@ def _read_resume_state(output_dir, input_filename, worker_id, identity_col="UUID
                 if url and url.lower() not in ("nan", "null", "none", ""):
                     processed_keys.add((ident, task, url))
         if {"UUID", INPUT_TASK_COLUMN, "Relevance Tag"}.issubset(df.columns):
-            rel_rows = df[df["Relevance Tag"] == "Relevant"]
+            rel_rows = df[df["Relevance Tag"] == RELEVANCE_TAG_RELEVANT]
             for _, r in rel_rows.iterrows():
                 key = (str(r["UUID"]).strip(), str(r[INPUT_TASK_COLUMN]).strip())
                 relevant_count_dict[key] = relevant_count_dict.get(key, 0) + 1
@@ -1277,11 +1286,11 @@ def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=N
         str: 'Relevant', 'Partially Relevant', or 'Irrelevant'
     """
     if not answers or not isinstance(answers, list):
-        return 'Irrelevant'
+        return RELEVANCE_TAG_IRRELEVANT
 
     total_answers = len(answers)
     if total_answers == 0:
-        return 'Irrelevant'
+        return RELEVANCE_TAG_IRRELEVANT
 
     # Use global mode if not specified
     if mode is None:
@@ -1426,11 +1435,11 @@ def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=N
 
     # Determine relevance tag based on combined score and configurable thresholds
     if combined_score >= RELEVANT_THRESHOLD:
-        tag = 'Relevant'
+        tag = RELEVANCE_TAG_RELEVANT
     elif combined_score >= PARTIALLY_RELEVANT_THRESHOLD:
-        tag = 'Partially Relevant'
+        tag = RELEVANCE_TAG_PARTIAL
     else:
-        tag = 'Irrelevant'
+        tag = RELEVANCE_TAG_IRRELEVANT
     
     logging.debug(f"[Relevance-{mode.upper()}] Final score: {combined_score:.2f} → Tag: {tag}")
     return tag
@@ -2289,7 +2298,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # notValidated (not 'Irrelevant') — no AI call was made, so this must not be
                 # counted as an AI-judged-irrelevant row in report_service.py's relevance breakdown
                 # or in the api_successes/api_failures stats below.
-                relevance_tags.append('notValidated')
+                relevance_tags.append(RELEVANCE_TAG_NOT_VALIDATED)
                 task_types[-1] = "Excluded"  # overwrite the User-Owned/Standard type appended above
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
@@ -2331,7 +2340,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
                     # Count this Relevant hit toward the per-(UUID, task) cap so later rows
                     # of the same pair are capped once the limit is reached.
-                    if cap_key and relevance_tag == "Relevant":
+                    if cap_key and relevance_tag == RELEVANCE_TAG_RELEVANT:
                         relevant_count_per_key[cap_key] = relevant_count_per_key.get(cap_key, 0) + 1
 
                     # ===== CHECKPOINT: Mark row as processed =====
@@ -2399,7 +2408,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                     logging.warning(f"[Worker {worker_id}] Invalid response at row {idx+1}")
                     task_evidence_qa.append(None)
                     task_evidence_qa_reason.append(None)
-                    relevance_tags.append('Irrelevant')
+                    relevance_tags.append(RELEVANCE_TAG_IRRELEVANT)
                     task_types[-1] = "Failed"  # Update the last task type
                     for key in EXTRA_KEYS.keys():
                         extra_keys_data[key].append(None)
@@ -2407,7 +2416,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 logging.info(f"[Worker {worker_id}] Skipping unsupported evidence type at row {idx+1}")
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
-                relevance_tags.append('Irrelevant')
+                relevance_tags.append(RELEVANCE_TAG_IRRELEVANT)
                 task_types.append("Unsupported")
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
@@ -2488,10 +2497,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
                 # API call — exclude them from success/failure so these stay scoped to rows
                 # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)),
-                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)),
+                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == RELEVANCE_TAG_IRRELEVANT),
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)],
+                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == RELEVANCE_TAG_IRRELEVANT],
                 "user_owned_count": len(user_owned_df),
                 "standard_count": len(df_to_save) - len(user_owned_df),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,
@@ -2506,10 +2515,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
                 # API call — exclude them from success/failure so these stay scoped to rows
                 # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)),
-                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
+                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)),
+                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == RELEVANCE_TAG_IRRELEVANT),
+                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)],
+                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == RELEVANCE_TAG_IRRELEVANT],
                 "user_owned_count": 0,
                 "standard_count": len(df_to_save),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,

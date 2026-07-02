@@ -7,7 +7,12 @@ from datetime import datetime
 from uuid import UUID
 
 from core.config import settings
-from core.constants import ALLOWED_EVIDENCE_TYPES
+from core.constants import (
+    ALLOWED_EVIDENCE_TYPES,
+    RELEVANCE_TAG_RELEVANT,
+    RELEVANCE_TAG_PARTIAL,
+    RELEVANCE_TAG_IRRELEVANT,
+)
 
 
 # ============ Authentication Schemas ============
@@ -369,7 +374,7 @@ class CriteriaValidationResponse(BaseModel):
     """Response schema for criteria validation."""
     source: Literal["gemini", "openrouter"]
     model: str
-    relevance_tag: Literal["Relevant", "Partially Relevant", "Irrelevant"]
+    relevance_tag: Literal[RELEVANCE_TAG_RELEVANT, RELEVANCE_TAG_PARTIAL, RELEVANCE_TAG_IRRELEVANT]
     criteria_results: list[CriteriaValidationItem]
     answers: list[str]
     reasonings: list[str]

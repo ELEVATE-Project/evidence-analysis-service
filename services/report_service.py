@@ -13,8 +13,13 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.constants import RELEVANCE_TYPES
-from core.constants import RELEVANCE_TAG_NOT_VALIDATED
+from core.constants import (
+    RELEVANCE_TYPES,
+    RELEVANCE_TAG_RELEVANT,
+    RELEVANCE_TAG_PARTIAL,
+    RELEVANCE_TAG_IRRELEVANT,
+    RELEVANCE_TAG_NOT_VALIDATED,
+)
 from models.execution import Execution
 from models.schemas import ReportDataPageResponse, ReportDownloadResponse, ReportResponse
 from services.storage_service import StorageService
@@ -346,9 +351,9 @@ class ReportService:
         def create_node() -> Dict[str, Any]:
             return {
                 "total": 0,
-                "Relevant": 0,
-                "Partially Relevant": 0,
-                "Irrelevant": 0,
+                RELEVANCE_TAG_RELEVANT: 0,
+                RELEVANCE_TAG_PARTIAL: 0,
+                RELEVANCE_TAG_IRRELEVANT: 0,
                 RELEVANCE_TAG_NOT_VALIDATED: 0,
                 RELEVANCE_NULL_BUCKET: 0,
             }
@@ -366,7 +371,7 @@ class ReportService:
             # keeps the score scoped to evidence the AI actually evaluated. "total" itself is left
             # untouched; it must still include these rows everywhere else.
             evaluated = node["total"] - node.get(RELEVANCE_TAG_NOT_VALIDATED, 0) - node.get(RELEVANCE_NULL_BUCKET, 0)
-            return ((node["Relevant"] + node["Partially Relevant"] * 0.5) / evaluated * 100) if evaluated else 0.0
+            return ((node[RELEVANCE_TAG_RELEVANT] + node[RELEVANCE_TAG_PARTIAL] * 0.5) / evaluated * 100) if evaluated else 0.0
 
         def parse_subject(task: str) -> str:
             if "विज्ञान" in task:
@@ -424,9 +429,9 @@ class ReportService:
 
         # Accumulation structures
         relevance_counts = {
-            "Relevant": 0,
-            "Partially Relevant": 0,
-            "Irrelevant": 0,
+            RELEVANCE_TAG_RELEVANT: 0,
+            RELEVANCE_TAG_PARTIAL: 0,
+            RELEVANCE_TAG_IRRELEVANT: 0,
             RELEVANCE_TAG_NOT_VALIDATED: 0,
             RELEVANCE_NULL_BUCKET: 0,
         }
@@ -514,7 +519,7 @@ class ReportService:
                 if ck:
                     t["completions"][ck] = t["completions"].get(ck, 0) + 1
                     t["submissions"][ck] = t["submissions"].get(ck, 0) + 1
-                    if tag == "Relevant":
+                    if tag == RELEVANCE_TAG_RELEVANT:
                         t["relevant"][ck] = t["relevant"].get(ck, 0) + 1
 
             if district not in district_hierarchy:

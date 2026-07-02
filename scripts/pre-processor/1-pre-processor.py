@@ -1,4 +1,5 @@
 import os
+import sys
 import csv
 import json
 import math
@@ -12,6 +13,12 @@ from pathlib import Path
 # Load environment variables from .env file (look in parent directory)
 env_path = Path(__file__).parent.parent / '.env'
 load_dotenv(dotenv_path=env_path)
+
+# Allow importing from the service package (core/, etc.) — mirrors 1-main-parallel-script.py
+SERVICE_ROOT = Path(__file__).resolve().parents[2]
+if str(SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVICE_ROOT))
+from core.constants import EVIDENCE_TYPE_EXTENSIONS
 
 def str2bool(val):
     return str(val).lower() in ("1", "true", "yes")
@@ -91,9 +98,9 @@ print(f"   INPUT_TASK_COLUMN_FALLBACK: {DEFAULT_INPUT_TASK_COLUMN}")
 print()
 
 # === EVIDENCE FORMATS ===
-IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-PDF_FORMATS = {".pdf"}
-EXCEL_FORMATS = {".xlsx", ".xls"}
+IMAGE_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["image"])
+PDF_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["pdf"])
+EXCEL_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["excel"])
 ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 
 # Create output directory

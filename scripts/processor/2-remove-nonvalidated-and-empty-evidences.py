@@ -19,11 +19,18 @@ import argparse
 import csv
 import os
 import re
+import sys
+from pathlib import Path
+
+# Allow importing from the service package (core/, etc.) — mirrors 1-main-parallel-script.py
+SERVICE_ROOT = Path(__file__).resolve().parents[2]
+if str(SERVICE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SERVICE_ROOT))
+from core.constants import RELEVANCE_TAG_NOT_VALIDATED
 
 CHECK_COLUMNS = ("Task evidence Q and A", "Task evidence Q and A Reason")
 URL_COLUMN = "Task Evidence"
 RELEVANCE_TAG_COLUMN = "Relevance Tag"
-NOT_VALIDATED_TAG = "notValidated"
 URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 
 
@@ -68,7 +75,7 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int
             writer.writeheader()
             for row in reader:
                 total += 1
-                is_not_validated = (row.get(RELEVANCE_TAG_COLUMN) or "").strip() == NOT_VALIDATED_TAG
+                is_not_validated = (row.get(RELEVANCE_TAG_COLUMN) or "").strip() == RELEVANCE_TAG_NOT_VALIDATED
                 is_blank_qa = any(not (row.get(col) or "").strip() for col in CHECK_COLUMNS)
                 is_invalid = is_not_validated or is_blank_qa
                 if is_invalid:
