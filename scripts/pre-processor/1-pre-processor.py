@@ -30,6 +30,7 @@ def _parse_args():
     parser.add_argument("--split-files", default=None, choices=["yes", "no"], help="Split output files or not")
     parser.add_argument("--rows-per-file", default=None, type=int, help="Rows per split file")
     parser.add_argument("--use-school-filter", default=None, help="Enable school filtering (true/false)")
+    parser.add_argument("--max-relevant-per-user-task", default=None, type=int, help="Per-(UUID, task) relevant-evidence cap; enables group-aware splitting when set")
     return parser.parse_args()
 
 ARGS = _parse_args()
@@ -61,11 +62,11 @@ USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by s
 SPLIT_FILES = ARGS.split_files or os.getenv("PREPROCESS_SPLIT_FILES") or os.getenv("SPLIT_FILES", "yes")
 ROWS_PER_FILE = ARGS.rows_per_file or int(os.getenv("PREPROCESS_ROWS_PER_FILE", os.getenv("ROWS_PER_FILE", "15000")))
 
-# Group-aware splitting: derived from the same MAX_RELEVANT_PER_USER_TASK signal the
-# processor uses for the relevant-evidence cap (presence = cap on), not a separate toggle.
-# When on, every (UUID, task) group is kept inside one split file so the processor's
-# per-worker cap counts stay correct. Off by default → original size-only splitting.
-GROUP_AWARE_SPLIT = os.getenv("MAX_RELEVANT_PER_USER_TASK") is not None
+# Group-aware splitting: enabled when the relevant-evidence cap is active (cap value
+# passed via --max-relevant-per-user-task). When on, every (UUID, task) group is kept
+# inside one split file so the processor's per-worker cap counts stay correct.
+# Off by default → original size-only splitting.
+GROUP_AWARE_SPLIT = ARGS.max_relevant_per_user_task is not None
 
 # Debug: Print loaded configuration
 print(f"🔧 Configuration Loaded:")
