@@ -347,6 +347,14 @@ class ExecutionService:
         return None
 
     @staticmethod
+    def _resolve_processing_config(request_data: ExecutionCreate) -> Optional[dict[str, Any]]:
+        """Build the processing_config JSONB payload. None (not {}) when nothing was configured,
+        so a proper subset of evidence types is distinguishable from "no restriction"."""
+        if request_data.evidence_types:
+            return {PROCESSING_CONFIG_KEY_EVIDENCE_TYPES: request_data.evidence_types}
+        return None
+
+    @staticmethod
     def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
         if row_count <= 0:
             return None, None
