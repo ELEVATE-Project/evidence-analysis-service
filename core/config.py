@@ -117,6 +117,7 @@ class Settings(BaseSettings):
     EXECUTION_CLEANUP_ON_SUCCESS: bool = True
     PREPROCESS_SCRIPT_PATH: str = "scripts/pre-processor/1-pre-processor.py"
     PROCESSOR_SCRIPT_PATH: str = "scripts/processor/1-main-parallel-script.py"
+    CLEANUP_SCRIPT_PATH: str = "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py"
     PROCESSOR_MAX_ROWS: int = 0
     # Strip rows with no AI-evaluation result (notValidated/Failed/Unsupported/blank-tag) from
     # the delivered output CSV before upload. The unfiltered merged output is always uploaded

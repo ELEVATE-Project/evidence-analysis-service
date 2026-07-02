@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import asyncio
 import csv
-import importlib.util
 import logging
 import os
 import shutil
@@ -115,20 +114,6 @@ def _resolve_script_path(raw_path: str) -> Path:
         raise ExecutionProcessingError(f"Script not found: {candidate}")
     return candidate
 
-
-def _load_remove_not_validated_fn():
-    """Load remove_not_validated() from scripts/processor/2-remove-nonvalidated-and-empty-evidences.py.
-
-    That script's filename starts with a digit and contains a hyphen, so it isn't a
-    valid Python module name and can't be reached with a normal `import` statement —
-    loaded dynamically by file path instead, to reuse its row-removal logic here
-    rather than duplicating it.
-    """
-    script_path = SERVICE_ROOT / "scripts" / "processor" / "2-remove-nonvalidated-and-empty-evidences.py"
-    spec = importlib.util.spec_from_file_location("remove_notvalidated_script", script_path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module.remove_not_validated
 
 
 def _count_csv_rows(file_path: Path, sample_size: int = 10000) -> tuple[int, bool]:
@@ -684,6 +669,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # processor enforces the cap. Driven solely by this execution's threshold_config —
         # only present when the user supplied a number at execution create/update; absent
         # (or not a positive number) means no cap and all rows are processed.
+        # threshold_config shape: {"max_relevant_per_user_task": 5}, or None when no cap was requested.
         cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
         max_relevant = cap_config.get("max_relevant_per_user_task")
         cap_enabled = isinstance(max_relevant, int) and max_relevant > 0
@@ -692,12 +678,6 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             **base_env,
             "PYTHONUNBUFFERED": "1",
         }
-        if cap_enabled:
-            # Same signal the processor uses below (presence = cap on). The pre-processor
-            # only checks for presence, not the value, to switch on group-aware splitting —
-            # required for the processor's per-worker cap counts to stay correct. When off,
-            # the pre-processor keeps its original fixed-size splitting untouched.
-            preprocessor_env["MAX_RELEVANT_PER_USER_TASK"] = str(max_relevant)
         configured_columns = _resolve_processor_columns_from_config(db, execution)
         question_task_column = configured_columns.get("task_column", "")
         question_text_column = configured_columns.get("question_text_column", "")
@@ -749,6 +729,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--max-main-batches",
                 str(settings.MAX_MAIN_BATCHES),
             ]
+            if cap_enabled:
+                # Keep (UUID, task) groups within a single main batch so per-batch
+                # cap counts stay correct (mirrors group-aware fine-splitting below).
+                batch_cut_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
             batch_cut_env = {**preprocessor_env, "MAIN_FILE_SPLIT": "true"}
             _run_command(batch_cut_cmd, batch_cut_env, "Pre-processor batch-cut")
 
@@ -810,6 +794,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 if batch_enable_split:
                     batch_preprocessor_cmd.extend(["--rows-per-file", str(batch_rows_per_file)])
                 batch_preprocessor_cmd.extend(["--use-school-filter", "false", "--skip-batch-cut"])
+                if cap_enabled:
+                    batch_preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
                 _run_command(batch_preprocessor_cmd, preprocessor_env, f"Pre-processor script ({label})")
 
                 if batch_enable_split:
@@ -896,6 +882,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--use-school-filter",
                 "false",
             ])
+            if cap_enabled:
+                preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
 
             _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
 
@@ -991,21 +979,16 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         }
 
         if settings.REMOVE_INVALID_ROWS_FROM_OUTPUT:
-            remove_not_validated = _load_remove_not_validated_fn()
+            cleanup_script = _resolve_script_path(settings.CLEANUP_SCRIPT_PATH)
             cleaned_path = workspace.final_output_csv.with_suffix(".cleaned.csv")
-            _, removed_invalid_rows, removed_urls = remove_not_validated(
-                str(workspace.final_output_csv), str(cleaned_path)
-            )
-            if removed_invalid_rows:
-                cleaned_path.replace(workspace.final_output_csv)
-                logger.info(
-                    "removed_invalid_rows_from_output  execution=%s  removed=%d  urls=%s",
-                    execution.id,
-                    removed_invalid_rows,
-                    removed_urls,
-                )
-            else:
-                cleaned_path.unlink(missing_ok=True)
+            cleanup_cmd = [
+                sys.executable,
+                str(cleanup_script),
+                "--input-csv", str(workspace.final_output_csv),
+                "--output-csv", str(cleaned_path),
+            ]
+            _run_command(cleanup_cmd, base_env, "Cleanup script")
+            cleaned_path.replace(workspace.final_output_csv)
 
         output_bytes = workspace.final_output_csv.read_bytes()
         output_file_name = f"output_{execution.id}.csv"
