@@ -234,9 +234,8 @@ process_execution("<execution_id>")
 
 If `checkpoint.json` exists with partial progress:
 1. Confirm checkpoint exists: `cat $EXECUTION_WORKSPACE_ROOT/<id>/checkpoint.json`
-2. Set env: `PROCESSOR_RESUME_FROM_CHECKPOINT=true`
-3. Re-run the execution — processor skips already-completed rows
-4. Saves Gemini API costs on large CSVs
+2. Re-run the execution — resume is unconditional now (no flag needed), processor skips already-completed rows
+3. Saves Gemini API costs on large CSVs
 
 ## Log Patterns to Search
 

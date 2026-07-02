@@ -117,11 +117,16 @@ class Settings(BaseSettings):
     EXECUTION_CLEANUP_ON_SUCCESS: bool = True
     PREPROCESS_SCRIPT_PATH: str = "scripts/pre-processor/1-pre-processor.py"
     PROCESSOR_SCRIPT_PATH: str = "scripts/processor/1-main-parallel-script.py"
+    CLEANUP_SCRIPT_PATH: str = "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py"
     PROCESSOR_MAX_ROWS: int = 0
-    PROCESSOR_RESUME_FROM_CHECKPOINT: bool = False
+    # Strip rows with no AI-evaluation result (notValidated/Failed/Unsupported/blank-tag) from
+    # the delivered output CSV before upload. The unfiltered merged output is always uploaded
+    # to cloud storage first regardless of this setting, so disabling it only changes what the
+    # deliverable looks like — the full audit trail is never lost.
+    REMOVE_INVALID_ROWS_FROM_OUTPUT: bool = True
     ESTIMATED_COST_PER_INPUT_ROW: float = 0.001
     ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
-    
+
     # File Splitting Configuration
     # Manual mode: Set SPLIT_FILES and ROWS_PER_FILE to specific values
     # Dynamic mode: Leave unset or empty, system will calculate optimal splits

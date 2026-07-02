@@ -59,7 +59,7 @@ subprocess.run(["python", script_path, ...], env=env, ...)
 Controlled by `ExecutionWorkspace` dataclass — any new paths must be added there.
 
 ### Checkpoint / Resume
-`PROCESSOR_RESUME_FROM_CHECKPOINT=true` causes the processor to skip rows already in `checkpoint.json`. The checkpoint is keyed by row index. After a partial failure, re-running with this flag avoids re-processing and re-billing for completed rows.
+The processor always skips rows already in `checkpoint.json` — there is no flag to disable this. The checkpoint is keyed by row index. After a partial failure, the workspace (including the checkpoint and partial output) is never wiped before the next run, so simply re-running avoids re-processing and re-billing for completed rows. The workspace is only cleaned up after a successful run (`EXECUTION_CLEANUP_ON_SUCCESS`).
 
 ### Row Count Estimation
 `_count_csv_rows()` uses exact count for < 5MB files, statistical estimation for larger files. Cost and time estimates are derived from this count before processing starts.

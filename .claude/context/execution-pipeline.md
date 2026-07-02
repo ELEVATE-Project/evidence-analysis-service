@@ -112,7 +112,7 @@ Actual cost tracked per row in `api_usage.csv` via `actual_cost` column.
 }
 ```
 
-Set `PROCESSOR_RESUME_FROM_CHECKPOINT=true` and re-run to resume from `processed_rows`.
+Resume is unconditional — the processor always picks up from `processed_rows` if a checkpoint exists; there is no flag to disable it. Just re-run the execution. The workspace is never wiped before a run starts (only after a successful one), so a failed run's checkpoint and partial output survive for the next attempt.
 
 ## Status Transitions
 
