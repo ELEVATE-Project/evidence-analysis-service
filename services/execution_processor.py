@@ -701,18 +701,6 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
 
-        # Per-(user, task) relevant-evidence cap (config resolved above). Presence of
-        # MAX_RELEVANT_PER_USER_TASK in the env is itself the on/off signal for the
-        # processor — omitted entirely means no cap, all rows processed. Passed via
-        # env, not CLI, so the value never appears in `ps`.
-        if cap_enabled:
-            processor_env["MAX_RELEVANT_PER_USER_TASK"] = str(max_relevant)
-            logger.info(
-                "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
-                execution.id,
-                max_relevant,
-            )
-
         processor_cmd = [
             sys.executable,
             str(processor_script),
@@ -731,6 +719,19 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "--max-processed-rows",
             str(settings.PROCESSOR_MAX_ROWS),
         ]
+
+        # Per-(user, task) relevant-evidence cap (config resolved above), not a secret —
+        # passed as a CLI arg like every other per-execution setting (task columns,
+        # --max-processed-rows), consistent with how the pre-processor already receives
+        # this same value. Omitted entirely means no cap, all rows processed.
+        if cap_enabled:
+            processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
+            logger.info(
+                "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
+                execution.id,
+                max_relevant,
+            )
+
         _run_command(processor_cmd, processor_env, "Processor script")
 
         if not workspace.final_output_csv.exists():
@@ -742,7 +743,16 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # file — unaffected by whether REMOVE_INVALID_ROWS_FROM_OUTPUT later trims the
         # deliverable. Read before any cleanup so this metric never changes meaning.
         unfiltered_bytes = workspace.final_output_csv.read_bytes()
-        processed_rows, _ = _count_csv_rows(workspace.final_output_csv)
+        processed_rows, processed_rows_is_estimate = _count_csv_rows(workspace.final_output_csv)
+        if processed_rows_is_estimate:
+            # _count_csv_rows() estimates from a sample on large files. processed_rows,
+            # total_rows, and average_processing_time below are derived from this value,
+            # so flag it — those persisted metrics are an approximation, not exact.
+            logger.warning(
+                "completion_metrics_estimated  execution=%s  processed_rows=%d",
+                execution.id,
+                processed_rows,
+            )
 
         # Always upload the unfiltered merged output first, before any row-removal step,
         # so the full evidence trail survives in cloud storage even when the cleanup below

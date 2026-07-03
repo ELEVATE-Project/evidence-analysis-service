@@ -1,4 +1,5 @@
 import os
+import sys
 import csv
 import json
 import math
@@ -454,7 +455,12 @@ _uuid_idx = final_header.index("UUID") if "UUID" in final_header else None
 _task_idx = final_header.index(input_task_column) if input_task_column in final_header else None
 _group_aware_active = GROUP_AWARE_SPLIT and _uuid_idx is not None and _task_idx is not None
 if GROUP_AWARE_SPLIT and not _group_aware_active:
-    print("⚠️  group-aware splitting requested but UUID/task column missing — falling back to size-only splitting.")
+    # Falling back to size-only splitting here would let a (UUID, task) pair straddle two
+    # split files; each processor worker enforces the cap independently, so the per-pair
+    # cap silently stops being a real cap. Abort instead of producing output that looks
+    # fine but breaks the guarantee the caller (execution_processor.py) is relying on.
+    print("❌ group-aware splitting requested (--max-relevant-per-user-task) but UUID/task column missing — aborting.")
+    sys.exit(1)
 if _group_aware_active:
     filtered_rows.sort(key=lambda r: (str(r[_uuid_idx]), str(r[_task_idx])))
     print(f"✅ Sorted {len(filtered_rows)} rows by (UUID, {input_task_column}) for group-aware splitting.")
