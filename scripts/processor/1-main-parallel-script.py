@@ -71,6 +71,12 @@ def _parse_args():
         help="Input CSV column that holds mapped question text",
     )
     parser.add_argument("--max-processed-rows", type=int, default=None, help="Row cap; <=0 means no cap")
+    parser.add_argument(
+        "--max-relevant-per-user-task",
+        type=int,
+        default=None,
+        help="Per-(UUID, task) relevant-evidence cap; unset means no cap",
+    )
     return parser.parse_args()
 
 
@@ -144,13 +150,17 @@ RELEVANT_THRESHOLD = float(os.getenv("RELEVANT_THRESHOLD", "0.7"))  # Score >= 0
 PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "0.4"))  # Score >= 0.4 = Partially Relevant
 
 # === RELEVANT-EVIDENCE CAP (per UUID+task; distinct from the scoring thresholds above) ===
-# Set per execution by the service via env. Once a (UUID, task) pair accumulates
+# Set per execution by the service, same as every other per-execution setting in this file
+# (--max-processed-rows, --input-task-column, etc.): CLI arg first, env var only as a
+# standalone/manual-run fallback. Once a (UUID, task) pair accumulates
 # MAX_RELEVANT_PER_USER_TASK "Relevant" tags, remaining rows for that pair are written as
 # "notValidated" with NO API call. Relies on the pre-processor's group-aware splitting so
-# each (UUID, task) group stays inside one worker's file. The env var's presence is the
-# on/off signal itself — unset (None) means no cap, all rows processed.
-_max_relevant_env = os.getenv("MAX_RELEVANT_PER_USER_TASK")
-MAX_RELEVANT_PER_USER_TASK = int(_max_relevant_env) if _max_relevant_env else None
+# each (UUID, task) group stays inside one worker's file. None means no cap, all rows processed.
+if ARGS.max_relevant_per_user_task is not None:
+    MAX_RELEVANT_PER_USER_TASK = ARGS.max_relevant_per_user_task
+else:
+    _max_relevant_env = os.getenv("MAX_RELEVANT_PER_USER_TASK")
+    MAX_RELEVANT_PER_USER_TASK = int(_max_relevant_env) if _max_relevant_env else None
 
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
@@ -2300,6 +2310,8 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # or in the api_successes/api_failures stats below.
                 relevance_tags.append(RELEVANCE_TAG_NOT_VALIDATED)
                 task_types[-1] = "Excluded"  # overwrite the User-Owned/Standard type appended above
+                not_validated_count += 1
+                mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED, cap_key)
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
             elif evidence_type:
@@ -2485,6 +2497,13 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
         # Separate user-owned tasks for reporting
         user_owned_df = df_to_save[df_to_save["Task Type"] == "User-Owned"]
+        # Whitelist explicit success tags rather than blacklisting failure/excluded ones —
+        # the "no question found" skip path appends None to Relevance Tag, and None is
+        # neither Irrelevant nor notValidated, so a blacklist would wrongly count it as a
+        # success.
+        ai_success_tags = {RELEVANCE_TAG_RELEVANT, RELEVANCE_TAG_PARTIAL}
+        success_mask = df_to_save["Relevance Tag"].isin(ai_success_tags)
+        failure_mask = df_to_save["Relevance Tag"].eq(RELEVANCE_TAG_IRRELEVANT)
         if not user_owned_df.empty:
             user_owned_filename = os.path.join(OUTPUT_DIR, f"user_owned_tasks_{os.path.basename(input_file).split('.')[0]}.csv")
             user_owned_df.to_csv(user_owned_filename, index=False)
@@ -2497,10 +2516,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
                 # API call — exclude them from success/failure so these stay scoped to rows
                 # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)),
-                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == RELEVANCE_TAG_IRRELEVANT),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == RELEVANCE_TAG_IRRELEVANT],
+                "api_successes": int(success_mask.sum()),
+                "api_failures": int(failure_mask.sum()),
+                "success_list": df_to_save.loc[success_mask, "Task Evidence"].tolist(),
+                "failed_list": df_to_save.loc[failure_mask, "Task Evidence"].tolist(),
                 "user_owned_count": len(user_owned_df),
                 "standard_count": len(df_to_save) - len(user_owned_df),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,
@@ -2515,10 +2534,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
                 # API call — exclude them from success/failure so these stay scoped to rows
                 # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)),
-                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == RELEVANCE_TAG_IRRELEVANT),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in (RELEVANCE_TAG_IRRELEVANT, RELEVANCE_TAG_NOT_VALIDATED)],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == RELEVANCE_TAG_IRRELEVANT],
+                "api_successes": int(success_mask.sum()),
+                "api_failures": int(failure_mask.sum()),
+                "success_list": df_to_save.loc[success_mask, "Task Evidence"].tolist(),
+                "failed_list": df_to_save.loc[failure_mask, "Task Evidence"].tolist(),
                 "user_owned_count": 0,
                 "standard_count": len(df_to_save),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,
@@ -2753,7 +2772,7 @@ if __name__ == "__main__":
         
         # Checkpoint statistics
         logging.info("")
-        logging.info(f"===== CHECKPOINT STATISTICS =====")
+        logging.info("===== CHECKPOINT STATISTICS =====")
         logging.info(f"Rows skipped (from checkpoint): {total_checkpoint_skipped_all}")
         logging.info(f"New API calls made: {total_checkpoint_new_all}")
         logging.info(f"API calls saved: {total_checkpoint_skipped_all}")

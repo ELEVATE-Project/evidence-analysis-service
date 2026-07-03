@@ -86,7 +86,7 @@ ROWS_PER_FILE = ARGS.rows_per_file or int(os.getenv("PREPROCESS_ROWS_PER_FILE", 
 GROUP_AWARE_SPLIT = ARGS.max_relevant_per_user_task is not None
 
 # Debug: Print loaded configuration
-print(f"🔧 Configuration Loaded:")
+print("🔧 Configuration Loaded:")
 print(f"   SPLIT_FILES: {SPLIT_FILES}")
 print(f"   ROWS_PER_FILE: {ROWS_PER_FILE}")
 print(f"   GROUP_AWARE_SPLIT: {GROUP_AWARE_SPLIT}")
@@ -555,7 +555,7 @@ else:
         actual_rows_written += len(chunk)
         print(f"✅ Created: {output_file} (rows {rows_before+1}-{rows_before+len(chunk)}, {len(chunk)} rows)")
         if _group_aware_active and len(chunk) > 2 * ROWS_PER_FILE:
-            print(f"⚠️  {os.path.basename(output_file)} has {len(chunk)} rows (>2× target {ROWS_PER_FILE}) — one (UUID, task) group is oversized.")
+            print(f"⚠️  {os.path.basename(output_file)} has {len(chunk)} rows (>2x target {ROWS_PER_FILE}) — one (UUID, task) group is oversized.")
         rows_before += len(chunk)
 
     # Create split manifest

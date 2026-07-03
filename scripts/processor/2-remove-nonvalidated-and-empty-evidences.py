@@ -43,16 +43,18 @@ def _parse_args():
     return parser.parse_args()
 
 
-def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int, list[str]]:
+def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int, int]:
     """Write input_csv to output_csv with invalid rows removed.
 
     A row is invalid if its Relevance Tag is 'notValidated' (relevant-evidence cap reached)
     or if either Q&A column is blank (Failed/Unsupported/User-Owned skip paths).
 
-    Returns (total_rows, removed_rows, not_validated_count, extracted_urls):
+    Returns (total_rows, removed_rows, not_validated_count, extracted_url_count):
       - not_validated_count: rows explicitly tagged notValidated
       - removed_rows: all removed rows (notValidated + blank-Q&A)
-      - extracted_urls: Task Evidence values from removed rows
+      - extracted_url_count: count of Task Evidence values from removed rows — the values
+        themselves are never logged (may carry cloud-storage signed-URL tokens); the
+        uploaded unfiltered CSV is the audit trail for what was actually removed.
     """
     output_dir = os.path.dirname(output_csv)
     if output_dir:
@@ -61,7 +63,7 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int
     total = 0
     removed = 0
     not_validated_count = 0
-    extracted_urls: list[str] = []
+    extracted_url_count = 0
     with open(input_csv, newline="", encoding="utf-8") as infile:
         reader = csv.DictReader(infile)
         if not reader.fieldnames:
@@ -85,18 +87,18 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int
                     evidence_value = (row.get(URL_COLUMN) or "").strip()
                     if evidence_value:
                         found = URL_PATTERN.findall(evidence_value)
-                        extracted_urls.extend(found or [evidence_value])
+                        extracted_url_count += len(found) if found else 1
                     continue
                 writer.writerow(row)
 
-    return total, removed, not_validated_count, extracted_urls
+    return total, removed, not_validated_count, extracted_url_count
 
 
 if __name__ == "__main__":
     args = _parse_args()
 
     print(f"📖 Reading: {args.input_csv}")
-    total, removed, not_validated_count, extracted_urls = remove_not_validated(args.input_csv, args.output_csv)
+    total, removed, not_validated_count, extracted_url_count = remove_not_validated(args.input_csv, args.output_csv)
     kept = total - removed
     blank_qa_count = removed - not_validated_count
 
@@ -111,7 +113,5 @@ if __name__ == "__main__":
     print(f"Output written to:             {args.output_csv}")
     print(f"{'=' * 60}")
 
-    if extracted_urls:
-        print(f"\nEvidence URLs from removed rows ({len(extracted_urls)}):")
-        for i, url in enumerate(extracted_urls, 1):
-            print(f"{i}. {url}")
+    if extracted_url_count:
+        print(f"\nEvidence values from removed rows: {extracted_url_count} (values omitted from logs)")

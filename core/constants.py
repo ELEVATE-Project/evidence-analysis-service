@@ -28,10 +28,12 @@ EVIDENCE_TYPES = [
 ALLOWED_EVIDENCE_TYPES = {item["key"] for item in EVIDENCE_TYPES}
 
 # File extensions per evidence type — used by the pre-processor to classify evidence URLs.
+# "excel" is .xlsx only: requirements.txt pins openpyxl (xlsx reader) but not xlrd, which
+# legacy .xls files need — routing a .xls URL to pandas.read_excel() would fail at runtime.
 EVIDENCE_TYPE_EXTENSIONS = {
     "image": [".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"],
     "pdf": [".pdf"],
-    "excel": [".xlsx", ".xls"],
+    "excel": [".xlsx"],
 }
 
 # Relevance tag values — written by the processor, read by report_service and cleanup script.
