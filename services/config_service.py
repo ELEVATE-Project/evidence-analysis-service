@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.config import settings
+from core.constants import EVIDENCE_TYPES
 from models.csv_source_type import CsvSourceType
 from models.schemas import ReportDownloadResponse, UserResponse
 from services.storage_service import StorageService
@@ -79,13 +80,19 @@ class ConfigService:
         """
         List config entries for the requested type.
         Supported contract:
-        - type=project -> project CSV source types (type_key=project_report).
+        - type=project        -> project CSV source types (type_key=project_report).
+        - type=evidence_type  -> allowed evidence types for the evidence-type filter.
         """
         normalized_type = (config_type or "").strip().lower()
+        if normalized_type == "evidence_type":
+            # Static, tenant-independent config sourced from core.constants — the same
+            # source of truth used to validate execution evidence_types.
+            return [dict(item) for item in EVIDENCE_TYPES]
+
         if normalized_type != "project":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported config type. Use type=project.",
+                detail="Unsupported config type. Use type=project or type=evidence_type.",
             )
 
         tenant_code, organization_code = self._resolve_scope(current_user)

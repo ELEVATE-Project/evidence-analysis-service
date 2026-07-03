@@ -14,8 +14,18 @@ OPENROUTER_API_KEY_PREFIX = "OPENROUTER_API_KEY"
 # OpenRouter API endpoints.
 OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
-# Evidence type identifiers — canonical set accepted by the evidence-type filter.
-ALLOWED_EVIDENCE_TYPES = {"image", "pdf", "excel"}
+# Evidence types — the single source of truth for the evidence-type filter.
+# Ordered list of {key, label}. Served to the frontend via
+# GET /config/list?type=evidence_type and used to validate the
+# evidence_types field on execution create/update requests.
+EVIDENCE_TYPES = [
+    {"key": "image", "label": "Image"},
+    {"key": "pdf", "label": "PDF"},
+    {"key": "excel", "label": "Excel"},
+]
+
+# Canonical set of accepted evidence-type keys (derived from EVIDENCE_TYPES).
+ALLOWED_EVIDENCE_TYPES = {item["key"] for item in EVIDENCE_TYPES}
 
 # File extensions per evidence type — used by the pre-processor to classify evidence URLs.
 EVIDENCE_TYPE_EXTENSIONS = {
