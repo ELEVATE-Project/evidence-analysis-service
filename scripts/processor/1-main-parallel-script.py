@@ -55,6 +55,12 @@ def _parse_args():
         help="Input CSV column that holds mapped question text",
     )
     parser.add_argument("--max-processed-rows", type=int, default=None, help="Row cap; <=0 means no cap")
+    parser.add_argument(
+        "--max-relevant-per-user-task",
+        type=int,
+        default=None,
+        help="Per-(UUID, task) relevant-evidence cap; unset means no cap",
+    )
     return parser.parse_args()
 
 
@@ -128,13 +134,17 @@ RELEVANT_THRESHOLD = float(os.getenv("RELEVANT_THRESHOLD", "0.7"))  # Score >= 0
 PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "0.4"))  # Score >= 0.4 = Partially Relevant
 
 # === RELEVANT-EVIDENCE CAP (per UUID+task; distinct from the scoring thresholds above) ===
-# Set per execution by the service via env. Once a (UUID, task) pair accumulates
+# Set per execution by the service, same as every other per-execution setting in this file
+# (--max-processed-rows, --input-task-column, etc.): CLI arg first, env var only as a
+# standalone/manual-run fallback. Once a (UUID, task) pair accumulates
 # MAX_RELEVANT_PER_USER_TASK "Relevant" tags, remaining rows for that pair are written as
 # "notValidated" with NO API call. Relies on the pre-processor's group-aware splitting so
-# each (UUID, task) group stays inside one worker's file. The env var's presence is the
-# on/off signal itself — unset (None) means no cap, all rows processed.
-_max_relevant_env = os.getenv("MAX_RELEVANT_PER_USER_TASK")
-MAX_RELEVANT_PER_USER_TASK = int(_max_relevant_env) if _max_relevant_env else None
+# each (UUID, task) group stays inside one worker's file. None means no cap, all rows processed.
+if ARGS.max_relevant_per_user_task is not None:
+    MAX_RELEVANT_PER_USER_TASK = ARGS.max_relevant_per_user_task
+else:
+    _max_relevant_env = os.getenv("MAX_RELEVANT_PER_USER_TASK")
+    MAX_RELEVANT_PER_USER_TASK = int(_max_relevant_env) if _max_relevant_env else None
 
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
@@ -2173,7 +2183,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         )
         # On resume an existing partial file is already present; new rows must be
         # appended (no header).  On a fresh run we write the header first.
-        csv_header_written = os.path.exists(output_filename) and rows_skipped_from_checkpoint > 0
+        # Based on the output file's own existence/content, not on whether this run's
+        # resume-key matching happened to find rows to skip — those can diverge (e.g. a
+        # rerun whose current row set doesn't overlap the previous partial output), and
+        # treating "0 rows skipped" as "no prior output" would make the first flush open
+        # the file in write mode and truncate real prior results.
+        csv_header_written = os.path.exists(output_filename) and os.path.getsize(output_filename) > 0
         if csv_header_written:
             # Trim any incomplete trailing line left by a previous crash
             _trim_incomplete_last_line(output_filename, worker_id)
