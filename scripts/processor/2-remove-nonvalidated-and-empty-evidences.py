@@ -4,11 +4,10 @@ Standalone cleanup script: removes rows with no AI-evaluation result from a proc
 A row ends up with an empty 'Task evidence Q and A' / 'Task evidence Q and A Reason' when the
 processor never got a usable AI answer for it — see 1-main-parallel-script.py's skip paths: no
 question found for the task ("User-Owned"), the relevant-evidence cap was reached ("Capped",
-tag=notValidated), the AI response was invalid ("Failed"), or the evidence type was unsupported
-("Unsupported"). notValidated rows are identified explicitly by the Relevance Tag column; blank
-Q&A catches the remaining skip paths (Failed/Unsupported/User-Owned) that carry no tag. Both
-conditions are checked and counted separately so the summary shows how many rows were capped
-vs how many had other missing data.
+tag=notValidated), or the AI response was invalid ("Failed"). notValidated rows are identified
+explicitly by the Relevance Tag column; blank Q&A catches the remaining skip paths
+(Failed/User-Owned) that carry no tag. Both conditions are checked and counted separately so
+the summary shows how many rows were capped vs how many had other missing data.
 
 Usage:
     python scripts/processor/2-remove-nonvalidated-and-empty-evidences.py \
@@ -47,7 +46,7 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int
     """Write input_csv to output_csv with invalid rows removed.
 
     A row is invalid if its Relevance Tag is 'notValidated' (relevant-evidence cap reached)
-    or if either Q&A column is blank (Failed/Unsupported/User-Owned skip paths).
+    or if either Q&A column is blank (Failed/User-Owned skip paths).
 
     Returns (total_rows, removed_rows, not_validated_count, extracted_url_count):
       - not_validated_count: rows explicitly tagged notValidated

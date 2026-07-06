@@ -2442,14 +2442,9 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                     task_types[-1] = "Failed"  # Update the last task type
                     for key in EXTRA_KEYS.keys():
                         extra_keys_data[key].append(None)
-            else:
-                logging.info(f"[Worker {worker_id}] Skipping unsupported evidence type at row {idx+1}")
-                task_evidence_qa.append(None)
-                task_evidence_qa_reason.append(None)
-                relevance_tags.append(RELEVANCE_TAG_IRRELEVANT)
-                task_types.append("Unsupported")
-                for key in EXTRA_KEYS.keys():
-                    extra_keys_data[key].append(None)
+            # No final else: the pre-processor's Rule 3 already drops any row whose evidence
+            # type can't be resolved at all, so evidence_type is never falsy here for rows
+            # reaching this point through the normal pre-processor -> processor pipeline.
 
             processed_count += 1
 
@@ -2512,6 +2507,16 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             lambda x: str(x) if str(x).lower().endswith(tuple(IMAGE_FORMATS)) else ""
         )
         df_to_save = df_filtered  # already written to CSV; used only for stats below
+
+        # ===== SAFETY NET: ensure the output file exists even when nothing was ever flushed =====
+        # _flush_to_csv is only called from inside the per-row loop above, so if every row was
+        # excluded before reaching it (e.g. an evidence-type filter leaves 0 rows for this split),
+        # output_filename is never created and the Main merge step's pd.read_csv(f) crashes with
+        # FileNotFoundError. df_to_save always has the right columns even with 0 rows, so writing
+        # it here (header-only in that case) keeps the merge step working unconditionally.
+        if not os.path.exists(output_filename):
+            df_to_save.to_csv(output_filename, index=False)
+            logging.info(f"[Worker {worker_id}] No rows reached the flush step — wrote header-only output: {output_filename}")
 
         # Separate user-owned tasks for reporting
         user_owned_df = df_to_save[df_to_save["Task Type"] == "User-Owned"]
