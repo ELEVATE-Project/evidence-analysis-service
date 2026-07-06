@@ -18,7 +18,7 @@ load_dotenv(dotenv_path=env_path)
 SERVICE_ROOT = Path(__file__).resolve().parents[2]
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
-from core.constants import EVIDENCE_TYPE_EXTENSIONS
+from core.constants import EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS
 
 def str2bool(val):
     return str(val).lower() in ("1", "true", "yes")
@@ -41,6 +41,12 @@ def _parse_args():
         "--evidence-types",
         default=None,
         help="Comma list of allowed evidence types (image,pdf,excel); absent or empty = all",
+    )
+    parser.add_argument(
+        "--evidence-type-extensions",
+        default=None,
+        help="JSON object mapping evidence type key -> list of file extensions "
+        "(per-tenant, from CsvSourceType.evidence_types_config); absent = core.constants default",
     )
     parser.add_argument("--max-relevant-per-user-task", default=None, type=int, help="Per-(UUID, task) relevant-evidence cap; enables group-aware splitting when set")
     return parser.parse_args()
@@ -98,10 +104,16 @@ print(f"   INPUT_TASK_COLUMN_FALLBACK: {DEFAULT_INPUT_TASK_COLUMN}")
 print()
 
 # === EVIDENCE FORMATS ===
-IMAGE_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["image"])
-PDF_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["pdf"])
-EXCEL_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["excel"])
-ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
+# Per-tenant type->extension map, passed in by execution_processor.py from
+# CsvSourceType.evidence_types_config; falls back to the core.constants default when this
+# script is run standalone (no execution context to resolve tenant config from).
+if ARGS.evidence_type_extensions:
+    EVIDENCE_TYPE_EXTENSIONS = {
+        str(key): [str(ext).lower() for ext in exts]
+        for key, exts in json.loads(ARGS.evidence_type_extensions).items()
+    }
+else:
+    EVIDENCE_TYPE_EXTENSIONS = DEFAULT_EVIDENCE_TYPE_EXTENSIONS
 
 # Create output directory
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -296,23 +308,19 @@ def normalize_task_name(name):
 
 # === Helper function to determine evidence type ===
 def get_evidence_type(url):
-    """Determine the evidence type from URL. Returns: 'image', 'pdf', 'excel', or None"""
+    """Determine the evidence type from URL by matching its extension against the
+    configured EVIDENCE_TYPE_EXTENSIONS map. Returns the type key (e.g. 'image', 'pdf',
+    'excel', or any tenant-configured key), or None if no extension matched."""
     url = clean_cell(url) # Clean the URL string first for *checking*
     if not url or url.lower() == "null":
         return None
     try:
         parsed = urlparse(url)
         path = parsed.path.lower()
-        for ext in IMAGE_FORMATS:
-            if path.endswith(ext):
-                return "image"
-        for ext in PDF_FORMATS:
-            if path.endswith(ext):
-                return "pdf"
-        for ext in EXCEL_FORMATS:
-            if path.endswith(ext):
-                return "excel"
-    except:
+        for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
+            if any(path.endswith(ext) for ext in extensions):
+                return type_key
+    except Exception:
         pass
     return None
 

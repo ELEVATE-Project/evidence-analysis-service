@@ -23,7 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.constants import PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
+from core.constants import ALLOWED_EVIDENCE_TYPES, PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from models.schemas import (
@@ -347,12 +347,29 @@ class ExecutionService:
         return None
 
     @staticmethod
-    def _resolve_processing_config(request_data: ExecutionCreate) -> Optional[dict[str, Any]]:
+    def _allowed_evidence_type_keys(source_type: CsvSourceType) -> list[str]:
+        evidence_types_config = source_type.evidence_types_config
+        if not isinstance(evidence_types_config, list) or not evidence_types_config:
+            return sorted(ALLOWED_EVIDENCE_TYPES)
+        return sorted({str(item.get("key", "")).strip() for item in evidence_types_config if item.get("key")})
+
+    @staticmethod
+    def _resolve_processing_config(
+        request_data: ExecutionCreate, source_type: CsvSourceType
+    ) -> Optional[dict[str, Any]]:
         """Build the processing_config JSONB payload. None (not {}) when nothing was configured,
         so a proper subset of evidence types is distinguishable from "no restriction"."""
-        if request_data.evidence_types:
-            return {PROCESSING_CONFIG_KEY_EVIDENCE_TYPES: request_data.evidence_types}
-        return None
+        if not request_data.evidence_types:
+            return None
+
+        allowed = ExecutionService._allowed_evidence_type_keys(source_type)
+        invalid = [t for t in request_data.evidence_types if t not in allowed]
+        if invalid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"evidence_types must be a subset of {allowed}, got invalid: {invalid}",
+            )
+        return {PROCESSING_CONFIG_KEY_EVIDENCE_TYPES: request_data.evidence_types}
 
     @staticmethod
     def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
@@ -970,7 +987,7 @@ class ExecutionService:
             if request_data.evidence_threshold is not None
             else None
         )
-        processing_config = self._resolve_processing_config(request_data)
+        processing_config = self._resolve_processing_config(request_data, source_type)
 
         execution = Execution(
             tenant_code=tenant_code,
@@ -1667,7 +1684,7 @@ class ExecutionService:
             if request_data.evidence_threshold is not None
             else None
         )
-        processing_config = self._resolve_processing_config(request_data)
+        processing_config = self._resolve_processing_config(request_data, source_type)
 
         execution = Execution(
             tenant_code=tenant_code,
@@ -2190,6 +2207,22 @@ class ExecutionService:
                     dict(execution.processing_config) if isinstance(execution.processing_config, dict) else {}
                 )
                 if value:
+                    source_type = self._get_csv_source_type(
+                        tenant_code=execution.tenant_code,
+                        organization_code=execution.organization_code,
+                        type_key=execution.csv_type_id or "",
+                    )
+                    allowed = (
+                        self._allowed_evidence_type_keys(source_type)
+                        if source_type
+                        else sorted(ALLOWED_EVIDENCE_TYPES)
+                    )
+                    invalid = [t for t in value if t not in allowed]
+                    if invalid:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=f"evidence_types must be a subset of {allowed}, got invalid: {invalid}",
+                        )
                     current_processing_config[PROCESSING_CONFIG_KEY_EVIDENCE_TYPES] = value
                 else:
                     current_processing_config.pop(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES, None)

@@ -32,19 +32,13 @@ from core.constants import (
     RELEVANCE_TAG_PARTIAL,
     RELEVANCE_TAG_IRRELEVANT,
     RELEVANCE_TAG_NOT_VALIDATED,
-    EVIDENCE_TYPE_EXTENSIONS,
+    EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS,
 )
 from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
 import time
 from collections import deque
 import hashlib
-
-# === Constants ===
-IMAGE_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["image"])
-PDF_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["pdf"])
-EXCEL_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS["excel"])
-ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 
 # Defense-in-depth re-check of the execution's evidence-type filter (primary enforcement is in
 # the pre-processor; this guards against a pre-split file from an earlier config being reused).
@@ -77,10 +71,33 @@ def _parse_args():
         default=None,
         help="Per-(UUID, task) relevant-evidence cap; unset means no cap",
     )
+    parser.add_argument(
+        "--evidence-type-extensions",
+        default=None,
+        help="JSON object mapping evidence type key -> list of file extensions "
+        "(per-tenant, from CsvSourceType.evidence_types_config); absent = core.constants default",
+    )
     return parser.parse_args()
 
 
 ARGS = _parse_args()
+
+# === Constants ===
+# Per-tenant type->extension map, passed in by execution_processor.py from
+# CsvSourceType.evidence_types_config; falls back to the core.constants default when this
+# script is run standalone (no execution context to resolve tenant config from).
+if ARGS.evidence_type_extensions:
+    EVIDENCE_TYPE_EXTENSIONS = {
+        str(key): [str(ext).lower() for ext in exts]
+        for key, exts in json.loads(ARGS.evidence_type_extensions).items()
+    }
+else:
+    EVIDENCE_TYPE_EXTENSIONS = DEFAULT_EVIDENCE_TYPE_EXTENSIONS
+
+IMAGE_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS.get("image", []))
+PDF_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS.get("pdf", []))
+EXCEL_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS.get("excel", []))
+ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 
 MAX_PROCESSED_ROWS = (
     ARGS.max_processed_rows

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import os
 import shutil
@@ -24,7 +25,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import SERVICE_ROOT, settings
-from core.constants import PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
+from core.constants import EVIDENCE_TYPE_EXTENSIONS, PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
@@ -352,6 +353,35 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
     return columns
 
 
+def _resolve_evidence_type_extensions_from_config(db: Session, execution: Execution) -> dict[str, list[str]]:
+    """Per-tenant evidence-type -> file-extension map, sourced from
+    CsvSourceType.evidence_types_config so a new type/extension is addable without a deploy.
+    Falls back to core.constants.EVIDENCE_TYPE_EXTENSIONS when no active config row exists.
+    """
+    csv_type_id = (execution.csv_type_id or "").strip()
+    source_type = (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == execution.tenant_code,
+            CsvSourceType.organization_code == execution.organization_code,
+            CsvSourceType.type_key == csv_type_id,
+            CsvSourceType.is_active.is_(True),
+        )
+        .first()
+        if csv_type_id
+        else None
+    )
+    evidence_types_config = source_type.evidence_types_config if source_type else None
+    if not isinstance(evidence_types_config, list) or not evidence_types_config:
+        return EVIDENCE_TYPE_EXTENSIONS
+
+    return {
+        str(item["key"]): [str(ext) for ext in item.get("extensions", [])]
+        for item in evidence_types_config
+        if item.get("key")
+    }
+
+
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     result = subprocess.run(
         command,
@@ -639,6 +669,9 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         processing_config = execution.processing_config if isinstance(execution.processing_config, dict) else {}
         evidence_types = processing_config.get(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES)
         evidence_types = evidence_types if isinstance(evidence_types, list) and evidence_types else None
+        # Per-tenant type->extension map (DB-driven; see CsvSourceType.evidence_types_config)
+        # passed to both scripts so a new type/extension is addable without a code change.
+        evidence_type_extensions_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
 
         preprocessor_cmd = [
             sys.executable,
@@ -664,6 +697,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
 
         if evidence_types:
             preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
+        preprocessor_cmd.extend(["--evidence-type-extensions", evidence_type_extensions_json])
         if cap_enabled:
             preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
 
@@ -734,6 +768,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             str(workspace.questions_csv),
             "--max-processed-rows",
             str(settings.PROCESSOR_MAX_ROWS),
+            "--evidence-type-extensions",
+            evidence_type_extensions_json,
         ]
 
         # Per-(user, task) relevant-evidence cap (config resolved above), not a secret —

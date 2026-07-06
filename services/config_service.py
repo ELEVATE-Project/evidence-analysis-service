@@ -8,7 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.constants import EVIDENCE_TYPES
+from core.constants import DEFAULT_EVIDENCE_TYPES_CONFIG
 from models.csv_source_type import CsvSourceType
 from models.schemas import ReportDownloadResponse, UserResponse
 from services.storage_service import StorageService
@@ -85,9 +85,25 @@ class ConfigService:
         """
         normalized_type = (config_type or "").strip().lower()
         if normalized_type == "evidence_type":
-            # Static, tenant-independent config sourced from core.constants — the same
-            # source of truth used to validate execution evidence_types.
-            return [dict(item) for item in EVIDENCE_TYPES]
+            tenant_code, organization_code = self._resolve_scope(current_user)
+            source_type = (
+                self.db.query(CsvSourceType)
+                .filter(
+                    CsvSourceType.tenant_code == tenant_code,
+                    CsvSourceType.organization_code == organization_code,
+                    CsvSourceType.is_active.is_(True),
+                    CsvSourceType.type_key == "project_report",
+                )
+                .first()
+            )
+            evidence_types_config = (
+                source_type.evidence_types_config
+                if source_type and isinstance(source_type.evidence_types_config, list) and source_type.evidence_types_config
+                else DEFAULT_EVIDENCE_TYPES_CONFIG
+            )
+            # extensions are an internal detail for the pre-processor/processor scripts —
+            # the public config contract only ever exposed {key, label}.
+            return [{"key": item["key"], "label": item["label"]} for item in evidence_types_config]
 
         if normalized_type != "project":
             raise HTTPException(

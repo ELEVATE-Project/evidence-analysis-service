@@ -8,7 +8,6 @@ from uuid import UUID
 
 from core.config import settings
 from core.constants import (
-    ALLOWED_EVIDENCE_TYPES,
     RELEVANCE_TAG_RELEVANT,
     RELEVANCE_TAG_PARTIAL,
     RELEVANCE_TAG_IRRELEVANT,
@@ -103,17 +102,15 @@ class ExecutionCreate(BaseModel):
     @field_validator("evidence_types", mode="before")
     @classmethod
     def validate_evidence_types(cls, v: Any) -> Optional[List[str]]:
+        # Normalization only. The allowed set is tenant-specific (CsvSourceType.evidence_types_config)
+        # and DB access isn't available at the Pydantic layer, so the subset check happens in
+        # ExecutionService._resolve_processing_config instead.
         if v is None:
             return None
         if not isinstance(v, list):
             raise ValueError("evidence_types must be an array of strings")
         cleaned = sorted({str(t).strip().lower() for t in v if str(t).strip()})
-        if not cleaned:
-            return None
-        invalid = [t for t in cleaned if t not in ALLOWED_EVIDENCE_TYPES]
-        if invalid:
-            raise ValueError(f"evidence_types must be a subset of {sorted(ALLOWED_EVIDENCE_TYPES)}, got invalid: {invalid}")
-        return cleaned
+        return cleaned or None
 
 
 class FileUploadDescriptor(BaseModel):
@@ -237,17 +234,15 @@ class ExecutionUpdate(BaseModel):
     @field_validator("evidence_types", mode="before")
     @classmethod
     def validate_evidence_types(cls, v: Any) -> Optional[List[str]]:
+        # Normalization only. The allowed set is tenant-specific (CsvSourceType.evidence_types_config)
+        # and DB access isn't available at the Pydantic layer, so the subset check happens in
+        # ExecutionService._resolve_processing_config instead.
         if v is None:
             return None
         if not isinstance(v, list):
             raise ValueError("evidence_types must be an array of strings")
         cleaned = sorted({str(t).strip().lower() for t in v if str(t).strip()})
-        if not cleaned:
-            return None
-        invalid = [t for t in cleaned if t not in ALLOWED_EVIDENCE_TYPES]
-        if invalid:
-            raise ValueError(f"evidence_types must be a subset of {sorted(ALLOWED_EVIDENCE_TYPES)}, got invalid: {invalid}")
-        return cleaned
+        return cleaned or None
 
 
 class ExecutionResponse(BaseModel):
