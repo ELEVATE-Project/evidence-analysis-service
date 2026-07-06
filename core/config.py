@@ -7,7 +7,7 @@ from pathlib import Path
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
-from typing import List
+from typing import Dict, List
 from core.constants import PROVIDER_GEMINI
 from env_variables import validate_environment
 
@@ -118,13 +118,23 @@ class Settings(BaseSettings):
     PREPROCESS_SCRIPT_PATH: str = "scripts/pre-processor/1-pre-processor.py"
     PROCESSOR_SCRIPT_PATH: str = "scripts/processor/1-main-parallel-script.py"
     CLEANUP_SCRIPT_PATH: str = "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py"
+    MERGE_SCRIPT_PATH: str = "scripts/processor/3-merge-batch-outputs.py"
     PROCESSOR_MAX_ROWS: int = 0
     # Strip rows with no AI-evaluation result (notValidated/Failed/Unsupported/blank-tag) from
     # the delivered output CSV before upload. The unfiltered merged output is always uploaded
     # to cloud storage first regardless of this setting, so disabling it only changes what the
     # deliverable looks like — the full audit trail is never lost.
     REMOVE_INVALID_ROWS_FROM_OUTPUT: bool = True
+    # Fallback cost-per-row used for any ai_model_id not present in MODEL_COST_PER_INPUT_ROW
+    # below (and while that map is empty, for every model — same estimate regardless of
+    # model, today's behavior, unchanged).
     ESTIMATED_COST_PER_INPUT_ROW: float = 0.001
+    # Per-model override, keyed by ai_model_id (e.g. "gemini-2.5-flash",
+    # "google/gemini-2.5-flash-lite"). Empty by default — real per-model pricing needs to be
+    # populated by whoever owns billing numbers; until then every model uses the flat
+    # ESTIMATED_COST_PER_INPUT_ROW above. JSON object via env, e.g.
+    # MODEL_COST_PER_INPUT_ROW={"gemini-2.5-flash": 0.001, "google/gemini-2.5-flash-lite": 0.0005}
+    MODEL_COST_PER_INPUT_ROW: Dict[str, float] = {}
     ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
 
     # File Splitting Configuration
@@ -143,9 +153,13 @@ class Settings(BaseSettings):
 
     # Main-batch sequential processing (one level above the file splitting above): cuts a
     # large upload into sequential main batches, each processed fully (including its own
-    # fine-grained split + parallel processing above) before the next one starts. Off by
-    # default — a single main batch (today's behavior) is byte-identical either way.
-    MAIN_FILE_SPLIT: bool = False  # "true" -> cut into main batches; "false" -> one main file
+    # fine-grained split + parallel processing above) before the next one starts.
+    # Manual mode: Set MAIN_FILE_SPLIT to "yes"/"no" to force batching on/off.
+    # Dynamic mode (default): Leave unset/empty — batching kicks in automatically once the
+    # upload exceeds MIN_ROWS_FOR_MAIN_BATCHING, the same manual/dynamic split the fine-grained
+    # SPLIT_FILES setting above already uses, instead of a fixed all-or-nothing toggle.
+    MAIN_FILE_SPLIT: str = ""  # "yes", "no", or "" for dynamic
+    MIN_ROWS_FOR_MAIN_BATCHING: int = 50000  # Below this, single main file even in dynamic mode
     MAIN_BATCH_ROWS_PER_BATCH: int = 10000  # Target rows per main batch (count is derived)
     MAX_MAIN_BATCHES: int = 200  # Hard cap on number of main batches
     
@@ -205,7 +219,22 @@ class Settings(BaseSettings):
             return [item.strip() for item in raw.split(",") if item.strip()]
 
         return value
-    
+
+    @field_validator("MODEL_COST_PER_INPUT_ROW", mode="before")
+    @classmethod
+    def parse_model_cost_settings(cls, value):
+        """Accept a JSON object mapping ai_model_id -> cost-per-row from env."""
+        if isinstance(value, dict):
+            return value
+
+        if isinstance(value, str):
+            raw = value.strip()
+            if not raw:
+                return {}
+            return json.loads(raw)
+
+        return value
+
     class Config:
         env_file = str(ENV_FILE_PATH)
         case_sensitive = True

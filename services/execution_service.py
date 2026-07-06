@@ -345,13 +345,17 @@ class ExecutionService:
         return None
 
     @staticmethod
-    def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
+    def _build_estimates(
+        row_count: int, ai_model_id: Optional[str] = None
+    ) -> tuple[Optional[Decimal], Optional[int]]:
         if row_count <= 0:
             return None, None
 
-        cost_per_row = Decimal(
-            str(getattr(settings, "ESTIMATED_COST_PER_INPUT_ROW", _DEFAULT_ESTIMATED_COST_PER_ROW))
-        )
+        model_costs = getattr(settings, "MODEL_COST_PER_INPUT_ROW", {}) or {}
+        default_cost = getattr(settings, "ESTIMATED_COST_PER_INPUT_ROW", _DEFAULT_ESTIMATED_COST_PER_ROW)
+        # Falls back to the flat default for any model without a specific entry — including
+        # every model, today, since the map is empty until real pricing is populated.
+        cost_per_row = Decimal(str(model_costs.get(ai_model_id, default_cost)))
         time_per_row_seconds = float(
             getattr(settings, "ESTIMATED_TIME_SECONDS_PER_INPUT_ROW", _DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS)
         )
@@ -959,7 +963,7 @@ class ExecutionService:
             execution.estimated_time_seconds = None
             return
 
-        estimated_cost, estimated_time_seconds = self._build_estimates(input_rows)
+        estimated_cost, estimated_time_seconds = self._build_estimates(input_rows, execution.ai_model_id)
         execution.total_rows = input_rows
         execution.estimated_cost = estimated_cost
         execution.estimated_time_seconds = estimated_time_seconds

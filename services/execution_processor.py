@@ -302,6 +302,55 @@ def _calculate_optimal_split_count(
     return True, num_splits, rows_per_file, "large_split"
 
 
+def _calculate_optimal_batch_count(row_count: int) -> tuple[bool, int, int, str]:
+    """
+    Calculate whether to cut a large upload into sequential main batches, and how many.
+
+    Mirrors _calculate_optimal_split_count()'s manual/dynamic split, one level up: main-batch
+    processing exists to bound how much of a very large upload is in flight at once, so in
+    dynamic mode it only kicks in well above the row counts the fine-grained split above
+    already handles well on its own — no manual toggle needed for the common case.
+
+    Returns:
+        Tuple of (enable_batching, num_batches, rows_per_batch, strategy_name)
+    """
+    import math
+
+    manual_main_split = (settings.MAIN_FILE_SPLIT or "").strip().lower()
+
+    if manual_main_split in ("yes", "true", "1", "enable", "enabled"):
+        num_batches = max(1, math.ceil(row_count / settings.MAIN_BATCH_ROWS_PER_BATCH))
+        num_batches = min(num_batches, settings.MAX_MAIN_BATCHES)
+        rows_per_batch = math.ceil(row_count / num_batches)
+        logger.info(
+            "Manual main-batching enabled: %d batches of ~%d rows (total: %s rows)",
+            num_batches, rows_per_batch, f"{row_count:,}",
+        )
+        return True, num_batches, rows_per_batch, "manual_main_batch"
+
+    if manual_main_split in ("no", "false", "0", "disable", "disabled"):
+        logger.info("Main-batching manually disabled: single main file (total: %s rows)", f"{row_count:,}")
+        return False, 1, row_count, "no_main_batch_manual"
+
+    # Dynamic mode: only batch when the upload is large enough that fine-grained splitting
+    # alone would put too much of it in flight simultaneously.
+    if row_count < settings.MIN_ROWS_FOR_MAIN_BATCHING:
+        logger.info(
+            "Row count %s below main-batching threshold (%s) → single main file",
+            f"{row_count:,}", f"{settings.MIN_ROWS_FOR_MAIN_BATCHING:,}",
+        )
+        return False, 1, row_count, "no_main_batch"
+
+    num_batches = max(1, math.ceil(row_count / settings.MAIN_BATCH_ROWS_PER_BATCH))
+    num_batches = min(num_batches, settings.MAX_MAIN_BATCHES)
+    rows_per_batch = math.ceil(row_count / num_batches)
+    logger.info(
+        "Large upload detected: %s rows → %d main batches of ~%d rows each (strategy: dynamic_main_batch)",
+        f"{row_count:,}", num_batches, rows_per_batch,
+    )
+    return True, num_batches, rows_per_batch, "dynamic_main_batch"
+
+
 def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
     root_dir = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution_id)
     input_dir = root_dir / "input"
@@ -338,11 +387,15 @@ def _clean_preprocessing_dirs(workspace: ExecutionWorkspace) -> None:
     These directories are fully regenerated each run (split files or a single preprocessed
     CSV, then copied into processor_input_dir). If a prior attempt used a different splitting
     strategy (e.g. single-file vs. split, or a different split count), stale files left behind
-    get picked up alongside the new ones and reprocessed as duplicates. processor_output_dir is
-    intentionally left untouched — it holds the partial merged output _read_resume_state() needs
-    to skip already-processed rows on resume.
+    get picked up alongside the new ones and reprocessed as duplicates. main_batches_dir gets
+    the same treatment: the batch-cut step re-runs unconditionally on every attempt, so a
+    leftover filtered_batch_*.csv from a run that produced a different batch count would
+    otherwise be picked up by the glob alongside the freshly-cut files and double-counted in
+    the final merge. processor_output_dir (and each batch's own subdirectory under it) is
+    intentionally left untouched — it holds the partial/completed merged output
+    _read_resume_state() and the per-batch skip-if-completed check rely on to resume correctly.
     """
-    for stale_dir in (workspace.preprocessor_output_dir, workspace.processor_input_dir):
+    for stale_dir in (workspace.preprocessor_output_dir, workspace.processor_input_dir, workspace.main_batches_dir):
         if stale_dir.exists():
             shutil.rmtree(stale_dir)
         stale_dir.mkdir(parents=True, exist_ok=True)
@@ -392,31 +445,6 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
         columns["question_text_column"] = question_text_column
 
     return columns
-
-
-def _concat_csv_files(source_files: list[Path], dest_file: Path) -> None:
-    """Concatenate multiple CSVs sharing the same header into one file (header written once).
-
-    Used to merge each main batch's already-complete output into the execution's single
-    final output, once every batch has finished. Assumes all source files share the same
-    header — true here since every batch's processor run writes the same merged-output
-    column set.
-    """
-    header_written = False
-    with open(dest_file, "w", newline="", encoding="utf-8") as out_f:
-        writer = None
-        for source_file in source_files:
-            with open(source_file, newline="", encoding="utf-8") as in_f:
-                reader = csv.reader(in_f)
-                header = next(reader, None)
-                if header is None:
-                    continue
-                if not header_written:
-                    writer = csv.writer(out_f)
-                    writer.writerow(header)
-                    header_written = True
-                for row in reader:
-                    writer.writerow(row)
 
 
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
@@ -515,6 +543,7 @@ def _mark_execution_completed(
     elapsed_seconds: float,
     actual_cost: Decimal | None = None,
     unfiltered_output: dict[str, Any] | None = None,
+    processing_log: dict[str, Any] | None = None,
 ) -> None:
     db = SessionLocal()
     try:
@@ -547,6 +576,14 @@ def _mark_execution_completed(
             if not isinstance(files, dict):
                 files = {}
             files["unfiltered_output"] = unfiltered_output
+            checkpoint["files"] = files
+            execution.checkpoint_data = checkpoint
+        if processing_log is not None:
+            checkpoint = deepcopy(execution.checkpoint_data) if isinstance(execution.checkpoint_data, dict) else {}
+            files = checkpoint.get("files")
+            if not isinstance(files, dict):
+                files = {}
+            files["processing_log"] = processing_log
             checkpoint["files"] = files
             execution.checkpoint_data = checkpoint
         if processed_rows > 0:
@@ -712,7 +749,24 @@ def process_execution(execution_id: str) -> dict[str, Any]:
 
         batch_api_usage_logs: list[Path] = []
 
-        if settings.MAIN_FILE_SPLIT:
+        # Decided once, dynamically, from the actual uploaded file — not a fixed toggle — so
+        # small/medium uploads never pay the main-batch overhead and only genuinely large ones
+        # get cut into sequential batches. See _calculate_optimal_batch_count for thresholds.
+        input_row_count, input_row_count_is_estimate = _count_csv_rows(workspace.input_csv)
+        main_batch_enabled, num_main_batches, rows_per_main_batch, main_batch_strategy = (
+            _calculate_optimal_batch_count(input_row_count)
+        )
+        logger.info(
+            "main_batch_strategy  execution=%s  strategy=%s  rows=%d%s  num_batches=%d  rows_per_batch=~%d",
+            execution.id,
+            main_batch_strategy,
+            input_row_count,
+            " (estimated)" if input_row_count_is_estimate else "",
+            num_main_batches if main_batch_enabled else 1,
+            rows_per_main_batch,
+        )
+
+        if main_batch_enabled:
             # === Main-batch sequential processing ===
             # Cut the whole input into main batches once, then run each one fully
             # (fine-split + parallel processing, both unchanged) before starting the next.
@@ -726,7 +780,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--output-dir",
                 str(workspace.main_batches_dir),
                 "--main-batch-rows",
-                str(settings.MAIN_BATCH_ROWS_PER_BATCH),
+                str(rows_per_main_batch),
                 "--max-main-batches",
                 str(settings.MAX_MAIN_BATCHES),
             ]
@@ -849,11 +903,18 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 logger.info("main_batch_completed  execution=%s  %s", execution.id, label)
                 merged_batch_outputs.append(bw.merged_output_csv)
 
-            _concat_csv_files(merged_batch_outputs, workspace.final_output_csv)
+            # Merging batch outputs is CSV-processing logic, so it lives in its own script
+            # (subprocess), same as every other transformation step in this pipeline —
+            # not hand-rolled here in the service layer.
+            merge_script = _resolve_script_path(settings.MERGE_SCRIPT_PATH)
+            merge_cmd = [sys.executable, str(merge_script)]
+            for batch_output in merged_batch_outputs:
+                merge_cmd.extend(["--input-csv", str(batch_output)])
+            merge_cmd.extend(["--output-csv", str(workspace.final_output_csv)])
+            _run_command(merge_cmd, base_env, "Merge batch outputs script")
         else:
             # === Single main file — today's exact existing behavior, unchanged ===
-            logger.info(f"Analyzing input file for splitting strategy: {workspace.input_csv}")
-            row_count, is_estimate = _count_csv_rows(workspace.input_csv)
+            row_count, is_estimate = input_row_count, input_row_count_is_estimate
 
             enable_split, num_splits, rows_per_file, strategy_name = _calculate_optimal_split_count(row_count)
 
@@ -1030,6 +1091,44 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             if (cost := _read_actual_cost_from_log(log_path)) is not None
         ]
         actual_cost = sum(batch_costs) if batch_costs else None
+
+        # Each processor invocation writes its own processing.log next to its
+        # api_usage_log_file (one per batch when MAIN_FILE_SPLIT is on, one overall
+        # otherwise). Merge them into a single per-execution log and upload it — previously
+        # this log only ever existed inside the temp workspace and was destroyed by
+        # EXECUTION_CLEANUP_ON_SUCCESS on every successful run, so it was never actually
+        # retrievable after the fact.
+        processing_log_parts: list[str] = []
+        for batch_number, log_path in enumerate(batch_api_usage_logs, start=1):
+            candidate = log_path.parent / "processing.log"
+            if not candidate.exists():
+                continue
+            if len(batch_api_usage_logs) > 1:
+                processing_log_parts.append(f"===== Batch {batch_number}/{len(batch_api_usage_logs)} =====")
+            processing_log_parts.append(candidate.read_text(encoding="utf-8", errors="replace"))
+
+        processing_log_meta: dict[str, Any] | None = None
+        if processing_log_parts:
+            processing_log_bytes = "\n".join(processing_log_parts).encode("utf-8")
+            processing_log_file_name = f"processing_log_{execution.id}.txt"
+            processing_log_file_path = storage_service.build_execution_file_path(
+                user_id=execution.created_by or "system",
+                execution_id=str(execution.id),
+                file_name=processing_log_file_name,
+            )
+            uploaded_processing_log_path = _run_async(
+                storage_service.upload_file(
+                    file_content=processing_log_bytes,
+                    file_path=processing_log_file_path,
+                    content_type="text/plain",
+                )
+            )
+            processing_log_meta = {
+                "url": uploaded_processing_log_path,
+                "size": len(processing_log_bytes),
+                "uploaded_at": datetime.utcnow().isoformat(),
+            }
+
         _mark_execution_completed(
             execution.id,
             output_file_url=uploaded_output_path,
@@ -1038,6 +1137,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             elapsed_seconds=elapsed_seconds,
             actual_cost=actual_cost,
             unfiltered_output=unfiltered_output_meta,
+            processing_log=processing_log_meta,
         )
 
         if settings.EXECUTION_CLEANUP_ON_SUCCESS and workspace.root_dir.exists():
