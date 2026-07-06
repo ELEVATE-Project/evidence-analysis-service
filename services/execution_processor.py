@@ -396,8 +396,19 @@ def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
     combined_logs = f"{label} failed.\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}".strip()
+
+    # Scripts that abort on a known, actionable condition print "FATAL: <reason>" to stderr
+    # before exiting non-zero. Surface that reason as the failure message shown to the user
+    # (ExecutionResponse.failure_reason / failure email); otherwise fall back to the generic
+    # exit-code message. Full stdout/stderr is always kept in error_logs for debugging.
+    fatal_reason = next(
+        (line[len("FATAL: "):].strip() for line in reversed(stderr.splitlines()) if line.startswith("FATAL: ")),
+        None,
+    )
+    message = f"{label} failed: {fatal_reason}" if fatal_reason else f"{label} failed with exit code {result.returncode}"
+
     raise ExecutionProcessingError(
-        message=f"{label} failed with exit code {result.returncode}",
+        message=message,
         error_logs=combined_logs,
     )
 
@@ -652,7 +663,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         max_relevant = cap_config.get("max_relevant_per_user_task")
         # bool is an int subclass in Python — isinstance(True, int) is True — so a malformed
         # evidence_threshold: true from the client would otherwise silently enable a cap of 1.
-        cap_enabled = (
+        is_relevant_limit_enabled = (
             isinstance(max_relevant, int) and not isinstance(max_relevant, bool) and max_relevant > 0
         )
 
@@ -698,7 +709,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if evidence_types:
             preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
         preprocessor_cmd.extend(["--evidence-type-extensions", evidence_type_extensions_json])
-        if cap_enabled:
+        if is_relevant_limit_enabled:
             preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
 
         _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
@@ -776,7 +787,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # passed as a CLI arg like every other per-execution setting (task columns,
         # --max-processed-rows), consistent with how the pre-processor already receives
         # this same value. Omitted entirely means no cap, all rows processed.
-        if cap_enabled:
+        if is_relevant_limit_enabled:
             processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
             logger.info(
                 "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
@@ -795,7 +806,16 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # file — unaffected by whether REMOVE_INVALID_ROWS_FROM_OUTPUT later trims the
         # deliverable. Read before any cleanup so this metric never changes meaning.
         unfiltered_bytes = workspace.final_output_csv.read_bytes()
-        processed_rows, _ = _count_csv_rows(workspace.final_output_csv)
+        processed_rows, processed_rows_is_estimate = _count_csv_rows(workspace.final_output_csv)
+        if processed_rows_is_estimate:
+            # _count_csv_rows() estimates from a sample on large files. processed_rows,
+            # total_rows, and average_processing_time below are derived from this value,
+            # so flag it — those persisted metrics are an approximation, not exact.
+            logger.warning(
+                "completion_metrics_estimated  execution=%s  processed_rows=%d",
+                execution.id,
+                processed_rows,
+            )
 
         # Always upload the unfiltered merged output first, before any row-removal step,
         # so the full evidence trail survives in cloud storage even when the cleanup below
