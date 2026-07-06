@@ -134,17 +134,15 @@ RELEVANT_THRESHOLD = float(os.getenv("RELEVANT_THRESHOLD", "0.7"))  # Score >= 0
 PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "0.4"))  # Score >= 0.4 = Partially Relevant
 
 # === RELEVANT-EVIDENCE CAP (per UUID+task; distinct from the scoring thresholds above) ===
-# Set per execution by the service, same as every other per-execution setting in this file
-# (--max-processed-rows, --input-task-column, etc.): CLI arg first, env var only as a
-# standalone/manual-run fallback. Once a (UUID, task) pair accumulates
-# MAX_RELEVANT_PER_USER_TASK "Relevant" tags, remaining rows for that pair are written as
-# "notValidated" with NO API call. Relies on the pre-processor's group-aware splitting so
-# each (UUID, task) group stays inside one worker's file. None means no cap, all rows processed.
-if ARGS.max_relevant_per_user_task is not None:
-    MAX_RELEVANT_PER_USER_TASK = ARGS.max_relevant_per_user_task
-else:
-    _max_relevant_env = os.getenv("MAX_RELEVANT_PER_USER_TASK")
-    MAX_RELEVANT_PER_USER_TASK = int(_max_relevant_env) if _max_relevant_env else None
+# Set per execution by the service via CLI arg only. No env var fallback: the subprocess
+# environment is a copy of the service process's own env (see _inject_llm_env(os.environ.copy())
+# in execution_processor.py), so a globally-set env var would silently leak a cap into
+# executions whose threshold_config explicitly requested none. Once a (UUID, task) pair
+# accumulates MAX_RELEVANT_PER_USER_TASK "Relevant" tags, remaining rows for that pair are
+# written as "notValidated" with NO API call. Relies on the pre-processor's group-aware
+# splitting so each (UUID, task) group stays inside one worker's file. None means no cap,
+# all rows processed.
+MAX_RELEVANT_PER_USER_TASK = ARGS.max_relevant_per_user_task
 
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
@@ -387,14 +385,13 @@ def save_checkpoint(checkpoint_data):
     except Exception as e:
         logger.error(f"[Checkpoint] Error saving checkpoint: {e}")
 
-def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None, cap_key=None):
+def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None):
     """
     Mark a row as processed in the checkpoint data.
 
-    cap_key: optional (UUID, task) tuple. When given it is stored alongside the row so the
-    per-(UUID, task) "Relevant" cap counters can be rebuilt on resume directly from the
-    checkpoint (no output-CSV re-parsing). Omitting it keeps the original entry shape, so
-    all existing callers are unaffected.
+    Note: the per-(UUID, task) relevant-evidence cap counters are rebuilt on resume by
+    re-parsing the partial output CSV directly (see _read_resume_state), not from this
+    checkpoint — this function only tracks row-level completion.
     """
     if not row_hash:
         return
@@ -411,8 +408,6 @@ def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None, ca
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
         'result_summary': row_result if row_result else 'processed'
     }
-    if cap_key:
-        entry['cap_key'] = list(cap_key)  # tuple -> list so it is JSON-serializable
     checkpoint_data[file_name]['processed_ids'][row_hash] = entry
 
     checkpoint_data[file_name]['total_processed'] = len(checkpoint_data[file_name]['processed_ids'])
@@ -2249,12 +2244,13 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             # Computed once per row and reused by the success-path increment below. Mirrors
             # the "no question" skip path above to keep the parallel output lists aligned
             # (one append per list + processed_count += 1), but makes no API call.
-            # A blank/NaN UUID must not become a shared cap_key — str(nan) == "nan", which is
-            # truthy, so rows with missing UUIDs would otherwise all be grouped under the same
-            # ("nan", task) key and capped together even though they belong to different users.
+            # A blank/NaN UUID must not become a shared relevant_evidence_cap_key —
+            # str(nan) == "nan", which is truthy, so rows with missing UUIDs would otherwise
+            # all be grouped under the same ("nan", task) key and capped together even though
+            # they belong to different users.
             _row_uuid = str(row.get("UUID", "")).strip()
-            cap_key = (_row_uuid, task_name_raw) if cap_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
-            if cap_key and relevant_count_per_key.get(cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
+            relevant_evidence_cap_key = (_row_uuid, task_name_raw) if cap_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
+            if relevant_evidence_cap_key and relevant_count_per_key.get(relevant_evidence_cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
                 logging.info(f"[Worker {worker_id}] Row {idx+1} — Relevant cap reached for (UUID, task); marking notValidated")
                 task_types.append("Capped")
                 task_evidence_qa.append(None)
@@ -2263,7 +2259,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
                 not_validated_count += 1
-                mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED, cap_key)
+                mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED)
                 processed_count += 1
 
                 # Flush batch to CSV if threshold reached (capped path)
@@ -2328,12 +2324,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
                     # Count this Relevant hit toward the per-(UUID, task) cap so later rows
                     # of the same pair are capped once the limit is reached.
-                    if cap_key and relevance_tag == "Relevant":
-                        relevant_count_per_key[cap_key] = relevant_count_per_key.get(cap_key, 0) + 1
+                    if relevant_evidence_cap_key and relevance_tag == "Relevant":
+                        relevant_count_per_key[relevant_evidence_cap_key] = relevant_count_per_key.get(relevant_evidence_cap_key, 0) + 1
 
                     # ===== CHECKPOINT: Mark row as processed =====
                     rows_processed_new += 1
-                    mark_row_processed(input_filename, row_hash, checkpoint_data, relevance_tag, cap_key)
+                    mark_row_processed(input_filename, row_hash, checkpoint_data, relevance_tag)
 
                     # 🆕 Extract enrollment data from JSON response or use regex fallback
                     if ENABLE_EXTRA_KEYS:
@@ -2596,7 +2592,41 @@ if __name__ == "__main__":
         )
     else:
         logging.info(f"[Main] Spawning {max_workers} workers for {len(input_files)} split files")
-    
+
+    # ===== RESUME VISIBILITY: report split-level progress up front =====
+    # Each worker figures out its own row-level resume state by comparing its split file
+    # against its own partial output CSV (see _read_resume_state). That answers "what rows
+    # are left" per split, but nothing previously reported the same signal in aggregate, so a
+    # resumed run gave no visibility into how many of the N splits were already done until
+    # every worker finished one by one. This block reads that same signal up front, purely
+    # for logging — it does not change which rows get processed.
+    def _count_csv_data_rows(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                return max(sum(1 for _ in fh) - 1, 0)  # minus header row
+        except OSError:
+            return 0
+
+    _not_started = _in_progress = _complete = 0
+    for _split_file in input_files:
+        _stem = os.path.basename(_split_file).split(".")[0]
+        _partial_output = os.path.join(OUTPUT_DIR, f"processed_{_stem}.csv")
+        if not os.path.isfile(_partial_output):
+            _not_started += 1
+            continue
+        _split_rows = _count_csv_data_rows(_split_file)
+        _partial_rows = _count_csv_data_rows(_partial_output)
+        if _split_rows and _partial_rows >= _split_rows:
+            _complete += 1
+        else:
+            _in_progress += 1
+
+    logging.info(
+        f"[Main] Resume status (from existing partial output): "
+        f"{_complete}/{len(input_files)} splits already complete, "
+        f"{_in_progress} in progress, {_not_started} not started"
+    )
+
     # ===== CHECKPOINT: Load existing checkpoint =====
     global_checkpoint = load_checkpoint()
     

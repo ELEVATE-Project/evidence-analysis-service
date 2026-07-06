@@ -365,8 +365,19 @@ def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
     combined_logs = f"{label} failed.\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}".strip()
+
+    # Scripts that abort on a known, actionable condition print "FATAL: <reason>" to stderr
+    # before exiting non-zero. Surface that reason as the failure message shown to the user
+    # (ExecutionResponse.failure_reason / failure email); otherwise fall back to the generic
+    # exit-code message. Full stdout/stderr is always kept in error_logs for debugging.
+    fatal_reason = next(
+        (line[len("FATAL: "):].strip() for line in reversed(stderr.splitlines()) if line.startswith("FATAL: ")),
+        None,
+    )
+    message = f"{label} failed: {fatal_reason}" if fatal_reason else f"{label} failed with exit code {result.returncode}"
+
     raise ExecutionProcessingError(
-        message=f"{label} failed with exit code {result.returncode}",
+        message=message,
         error_logs=combined_logs,
     )
 
