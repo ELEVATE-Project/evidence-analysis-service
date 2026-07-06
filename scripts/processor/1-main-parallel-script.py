@@ -2144,15 +2144,15 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # ===== RELEVANT CAP: per-(UUID, task) counters for this worker's file =====
         # Per-worker scope is correct because group-aware splitting keeps each (UUID, task)
         # pair inside a single file. Disabled gracefully when the input lacks a UUID column.
-        cap_enabled = MAX_RELEVANT_PER_USER_TASK is not None
-        if cap_enabled and "UUID" not in df_filtered.columns:
+        is_relevant_limit_enabled = MAX_RELEVANT_PER_USER_TASK is not None
+        if is_relevant_limit_enabled and "UUID" not in df_filtered.columns:
             logging.warning(f"[Worker {worker_id}] relevant_cap_disabled reason=missing_uuid_column file={input_filename}")
-            cap_enabled = False
-        relevant_count_per_key = dict(resume_relevant_counts) if cap_enabled else {}
+            is_relevant_limit_enabled = False
+        relevant_count_per_key = dict(resume_relevant_counts) if is_relevant_limit_enabled else {}
         not_validated_count = 0
-        if cap_enabled and relevant_count_per_key:
+        if is_relevant_limit_enabled and relevant_count_per_key:
             logging.info(f"[Worker {worker_id}] [Resume] Restored Relevant counts for {len(relevant_count_per_key)} (UUID, task) groups from output CSV")
-        if cap_enabled:
+        if is_relevant_limit_enabled:
             logging.info(f"[Worker {worker_id}] Relevant cap ENABLED: max {MAX_RELEVANT_PER_USER_TASK} Relevant per (UUID, task)")
 
         # 🆕 Add extra key columns if enabled
@@ -2249,7 +2249,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             # all be grouped under the same ("nan", task) key and capped together even though
             # they belong to different users.
             _row_uuid = str(row.get("UUID", "")).strip()
-            relevant_evidence_cap_key = (_row_uuid, task_name_raw) if cap_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
+            relevant_evidence_cap_key = (_row_uuid, task_name_raw) if is_relevant_limit_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
             if relevant_evidence_cap_key and relevant_count_per_key.get(relevant_evidence_cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
                 logging.info(f"[Worker {worker_id}] Row {idx+1} — Relevant cap reached for (UUID, task); marking notValidated")
                 task_types.append("Capped")

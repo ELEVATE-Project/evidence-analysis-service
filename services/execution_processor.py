@@ -630,7 +630,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # threshold_config shape: {"max_relevant_per_user_task": 5}, or None when no cap was requested.
         cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
         max_relevant = cap_config.get("max_relevant_per_user_task")
-        cap_enabled = isinstance(max_relevant, int) and max_relevant > 0
+        is_relevant_limit_enabled = isinstance(max_relevant, int) and max_relevant > 0
 
         preprocessor_env = {
             **base_env,
@@ -663,7 +663,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "--use-school-filter",
             "false",
         ])
-        if cap_enabled:
+        if is_relevant_limit_enabled:
             preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
 
         _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
@@ -735,7 +735,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # passed as a CLI arg like every other per-execution setting (task columns,
         # --max-processed-rows), consistent with how the pre-processor already receives
         # this same value. Omitted entirely means no cap, all rows processed.
-        if cap_enabled:
+        if is_relevant_limit_enabled:
             processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
             logger.info(
                 "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
