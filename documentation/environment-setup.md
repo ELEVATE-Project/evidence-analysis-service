@@ -264,7 +264,6 @@ EXECUTION_CLEANUP_ON_SUCCESS=true
 PREPROCESS_SCRIPT_PATH=scripts/pre-processor/1-pre-processor.py
 PROCESSOR_SCRIPT_PATH=scripts/processor/1-main-parallel-script.py
 PROCESSOR_MAX_ROWS=0  # 0 = unlimited
-PROCESSOR_RESUME_FROM_CHECKPOINT=false
 
 # Execution Cost & Time Estimates
 ESTIMATED_COST_PER_INPUT_ROW=0.001

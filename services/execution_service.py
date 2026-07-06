@@ -345,12 +345,6 @@ class ExecutionService:
         return None
 
     @staticmethod
-    def _resolve_threshold_config(source_type: CsvSourceType) -> dict[str, Any]:
-        if isinstance(source_type.default_thresholds, dict):
-            return deepcopy(source_type.default_thresholds)
-        return {}
-
-    @staticmethod
     def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
         if row_count <= 0:
             return None, None
@@ -959,7 +953,13 @@ class ExecutionService:
             )
         self._validate_scope_metadata(request_data, source_type)
         criterias_mode = self._resolve_criterias_mode(source_type)
-        threshold_config = self._resolve_threshold_config(source_type)
+        # threshold_config exists solely to carry the per-(user, task) relevant-evidence
+        # cap to the processor; None when no cap was requested (no seeded default).
+        threshold_config = (
+            {"max_relevant_per_user_task": request_data.evidence_threshold}
+            if request_data.evidence_threshold is not None
+            else None
+        )
 
         execution = Execution(
             tenant_code=tenant_code,
@@ -1648,7 +1648,13 @@ class ExecutionService:
             )
         self._validate_scope_metadata(request_data, source_type)
         criterias_mode = self._resolve_criterias_mode(source_type)
-        threshold_config = self._resolve_threshold_config(source_type)
+        # threshold_config exists solely to carry the per-(user, task) relevant-evidence
+        # cap to the processor; None when no cap was requested (no seeded default).
+        threshold_config = (
+            {"max_relevant_per_user_task": request_data.evidence_threshold}
+            if request_data.evidence_threshold is not None
+            else None
+        )
 
         execution = Execution(
             tenant_code=tenant_code,

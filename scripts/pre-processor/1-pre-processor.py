@@ -1,4 +1,5 @@
 import os
+import sys
 import csv
 import json
 import math
@@ -30,6 +31,7 @@ def _parse_args():
     parser.add_argument("--split-files", default=None, choices=["yes", "no"], help="Split output files or not")
     parser.add_argument("--rows-per-file", default=None, type=int, help="Rows per split file")
     parser.add_argument("--use-school-filter", default=None, help="Enable school filtering (true/false)")
+    parser.add_argument("--max-relevant-per-user-task", default=None, type=int, help="Per-(UUID, task) relevant-evidence cap; enables group-aware splitting when set")
     return parser.parse_args()
 
 ARGS = _parse_args()
@@ -61,10 +63,17 @@ USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by s
 SPLIT_FILES = ARGS.split_files or os.getenv("PREPROCESS_SPLIT_FILES") or os.getenv("SPLIT_FILES", "yes")
 ROWS_PER_FILE = ARGS.rows_per_file or int(os.getenv("PREPROCESS_ROWS_PER_FILE", os.getenv("ROWS_PER_FILE", "15000")))
 
+# Group-aware splitting: enabled when the relevant-evidence cap is active (cap value
+# passed via --max-relevant-per-user-task). When on, every (UUID, task) group is kept
+# inside one split file so the processor's per-worker cap counts stay correct.
+# Off by default → original size-only splitting.
+GROUP_AWARE_SPLIT = ARGS.max_relevant_per_user_task is not None
+
 # Debug: Print loaded configuration
 print(f"🔧 Configuration Loaded:")
 print(f"   SPLIT_FILES: {SPLIT_FILES}")
 print(f"   ROWS_PER_FILE: {ROWS_PER_FILE}")
+print(f"   GROUP_AWARE_SPLIT: {GROUP_AWARE_SPLIT}")
 print(f"   USE_SCHOOL_FILTER: {USE_SCHOOL_FILTER}")
 print(f"   TASK_MATCH_COLUMN_CONFIG: {TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
 print(f"   QUESTION_TASK_COLUMN_FALLBACK: {DEFAULT_QUESTION_TASK_COLUMN}")
@@ -437,6 +446,30 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
     # Row passes all checks
     filtered_rows.append([row.get(h, "") for h in final_header])
 
+# === Step 4b: Group-aware ordering for the relevant-evidence cap ===
+# Sort rows so every (UUID, <task>) pair is contiguous. This lets Step 5 split files only
+# at group boundaries, keeping each pair inside one file (required for the processor's
+# per-worker cap to count correctly). Skipped unless group-aware splitting is enabled, so
+# default runs keep their original row order untouched.
+_uuid_idx = final_header.index("UUID") if "UUID" in final_header else None
+_task_idx = final_header.index(input_task_column) if input_task_column in final_header else None
+_group_aware_active = GROUP_AWARE_SPLIT and _uuid_idx is not None and _task_idx is not None
+if GROUP_AWARE_SPLIT and not _group_aware_active:
+    # Falling back to size-only splitting here would let a (UUID, task) pair straddle two
+    # split files; each processor worker enforces the cap independently, so the per-pair
+    # cap silently stops being a real cap. Abort instead of producing output that looks
+    # fine but breaks the guarantee the caller (execution_processor.py) is relying on.
+    # FATAL: prefix on stderr is picked up by execution_processor._run_command() and
+    # surfaced verbatim as the execution's failure_reason instead of a generic exit-code message.
+    print(
+        "FATAL: group-aware splitting requested (--max-relevant-per-user-task) but UUID/task column missing — aborting.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+if _group_aware_active:
+    filtered_rows.sort(key=lambda r: (str(r[_uuid_idx]), str(r[_task_idx])))
+    print(f"✅ Sorted {len(filtered_rows)} rows by (UUID, {input_task_column}) for group-aware splitting.")
+
 # === Step 5: Output - Single file or Multiple files based on configuration ===
 if SPLIT_FILES.lower() == "no":
     # Single file output
@@ -462,47 +495,75 @@ if SPLIT_FILES.lower() == "no":
     print(f"✅ Created manifest: {manifest_file}")
     
 else:
-    # Split into multiple files
-    total_files = math.ceil(len(filtered_rows) / ROWS_PER_FILE)
-    
-    # Calculate padding width for filenames (e.g., 3 digits for up to 999 files)
-    padding_width = len(str(total_files))
-    
-    actual_rows_written = 0
-    
-    for i in range(total_files):
-        start_index = i * ROWS_PER_FILE
-        end_index = start_index + ROWS_PER_FILE
-        chunk = filtered_rows[start_index:end_index]
+    # Split into multiple files.
+    # Compute chunks first: group-aware when the cap is active (never cut a (UUID, task)
+    # group across files), otherwise the original fixed-size slicing (behavior unchanged).
+    if _group_aware_active:
+        chunks = []
+        current = []
+        for j, r in enumerate(filtered_rows):
+            current.append(r)
+            at_target = len(current) >= ROWS_PER_FILE
+            is_last = j == len(filtered_rows) - 1
+            this_key = (str(r[_uuid_idx]), str(r[_task_idx]))
+            next_key = None if is_last else (
+                str(filtered_rows[j + 1][_uuid_idx]), str(filtered_rows[j + 1][_task_idx])
+            )
+            # Only close the current file at a group boundary, so a (UUID, task) pair
+            # never straddles two files.
+            at_boundary = is_last or next_key != this_key
+            if at_target and at_boundary:
+                chunks.append(current)
+                current = []
+        if current:
+            chunks.append(current)
+    else:
+        chunks = [
+            filtered_rows[i * ROWS_PER_FILE:(i + 1) * ROWS_PER_FILE]
+            for i in range(math.ceil(len(filtered_rows) / ROWS_PER_FILE))
+        ]
 
+    total_files = len(chunks)
+
+    # Calculate padding width for filenames (e.g., 3 digits for up to 999 files)
+    padding_width = max(1, len(str(total_files)))
+
+    actual_rows_written = 0
+    rows_before = 0
+
+    for i, chunk in enumerate(chunks):
         # Zero-padded filename (e.g., split_001.csv, split_002.csv)
         output_file = os.path.join(OUTPUT_DIR, f"split_{str(i+1).zfill(padding_width)}.csv")
         with open(output_file, "w", newline='', encoding="utf-8") as outfile:
             writer = csv.writer(outfile)
             writer.writerow(final_header)
             writer.writerows(chunk)
-        
+
         actual_rows_written += len(chunk)
-        print(f"✅ Created: {output_file} (rows {start_index+1}-{start_index+len(chunk)}, {len(chunk)} rows)")
-    
+        print(f"✅ Created: {output_file} (rows {rows_before+1}-{rows_before+len(chunk)}, {len(chunk)} rows)")
+        if _group_aware_active and len(chunk) > 2 * ROWS_PER_FILE:
+            print(f"⚠️  {os.path.basename(output_file)} has {len(chunk)} rows (>2× target {ROWS_PER_FILE}) — one (UUID, task) group is oversized.")
+        rows_before += len(chunk)
+
     # Create split manifest
     manifest = {
         "total_splits": total_files,
         "rows_per_file": ROWS_PER_FILE,
         "total_rows": len(filtered_rows),
         "split_enabled": True,
-        "actual_rows_written": actual_rows_written
+        "actual_rows_written": actual_rows_written,
+        "group_aware": _group_aware_active
     }
     manifest_file = os.path.join(OUTPUT_DIR, "split_manifest.json")
     with open(manifest_file, "w", encoding="utf-8") as mf:
         json.dump(manifest, mf, indent=2)
-    
+
     # Validate no data loss
     if actual_rows_written != len(filtered_rows):
         print(f"⚠️  WARNING: Row count mismatch! Expected {len(filtered_rows)}, wrote {actual_rows_written}")
     else:
         print(f"✅ Validated: All {actual_rows_written} rows written across {total_files} splits")
-    
+
     print(f"✅ Created manifest: {manifest_file}")
     print(f"Mode: Split into {total_files} files (~{ROWS_PER_FILE} rows per file)")
 

@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import traceback
+from copy import deepcopy
 from decimal import Decimal
 from dataclasses import dataclass
 from datetime import datetime
@@ -72,6 +73,7 @@ def _resolve_script_path(raw_path: str) -> Path:
     if not candidate.exists():
         raise ExecutionProcessingError(f"Script not found: {candidate}")
     return candidate
+
 
 
 def _count_csv_rows(file_path: Path, sample_size: int = 10000) -> tuple[int, bool]:
@@ -287,18 +289,20 @@ def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
     )
 
 
-def _cleanup_workspace_root(execution_id: UUID) -> None:
-    root_dir = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution_id)
-    if not root_dir.exists():
-        return
+def _clean_preprocessing_dirs(workspace: ExecutionWorkspace) -> None:
+    """Clear pre-processor output and processor input before every run, including resumes.
 
-    try:
-        shutil.rmtree(root_dir)
-    except Exception as exc:
-        raise ExecutionProcessingError(
-            message=f"Failed to clean execution workspace before run: {exc}",
-            error_logs=traceback.format_exc(),
-        ) from exc
+    These directories are fully regenerated each run (split files or a single preprocessed
+    CSV, then copied into processor_input_dir). If a prior attempt used a different splitting
+    strategy (e.g. single-file vs. split, or a different split count), stale files left behind
+    get picked up alongside the new ones and reprocessed as duplicates. processor_output_dir is
+    intentionally left untouched — it holds the partial merged output _read_resume_state() needs
+    to skip already-processed rows on resume.
+    """
+    for stale_dir in (workspace.preprocessor_output_dir, workspace.processor_input_dir):
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir)
+        stale_dir.mkdir(parents=True, exist_ok=True)
 
 
 def _resolve_processor_columns_from_config(db: Session, execution: Execution) -> dict[str, str]:
@@ -361,8 +365,19 @@ def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
     combined_logs = f"{label} failed.\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}".strip()
+
+    # Scripts that abort on a known, actionable condition print "FATAL: <reason>" to stderr
+    # before exiting non-zero. Surface that reason as the failure message shown to the user
+    # (ExecutionResponse.failure_reason / failure email); otherwise fall back to the generic
+    # exit-code message. Full stdout/stderr is always kept in error_logs for debugging.
+    fatal_reason = next(
+        (line[len("FATAL: "):].strip() for line in reversed(stderr.splitlines()) if line.startswith("FATAL: ")),
+        None,
+    )
+    message = f"{label} failed: {fatal_reason}" if fatal_reason else f"{label} failed with exit code {result.returncode}"
+
     raise ExecutionProcessingError(
-        message=f"{label} failed with exit code {result.returncode}",
+        message=message,
         error_logs=combined_logs,
     )
 
@@ -442,6 +457,7 @@ def _mark_execution_completed(
     processed_rows: int,
     elapsed_seconds: float,
     actual_cost: Decimal | None = None,
+    unfiltered_output: dict[str, Any] | None = None,
 ) -> None:
     db = SessionLocal()
     try:
@@ -466,6 +482,16 @@ def _mark_execution_completed(
         execution.error_logs = None
         if actual_cost is not None:
             execution.actual_cost = actual_cost
+        if unfiltered_output is not None:
+            # Reuses the existing checkpoint_data["files"] shape (already tracks input/
+            # questions file state) rather than adding a new column for this audit trail.
+            checkpoint = deepcopy(execution.checkpoint_data) if isinstance(execution.checkpoint_data, dict) else {}
+            files = checkpoint.get("files")
+            if not isinstance(files, dict):
+                files = {}
+            files["unfiltered_output"] = unfiltered_output
+            checkpoint["files"] = files
+            execution.checkpoint_data = checkpoint
         if processed_rows > 0:
             execution.average_processing_time = elapsed_seconds / processed_rows
         db.commit()
@@ -554,8 +580,16 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "Execution is missing input/questions file URLs."
             )
 
-        _cleanup_workspace_root(execution.id)
+        # Never wipe the workspace before a run: a prior attempt's checkpoint and partial
+        # output CSV (if any) are exactly what lets this run resume instead of reprocessing
+        # rows from scratch. Workspace is absent on a first run — _build_workspace creates it
+        # fresh below. On success the workspace is removed afterward (EXECUTION_CLEANUP_ON_SUCCESS),
+        # so anything left on disk here only exists because a previous attempt failed mid-run.
+        _resume_root = Path(settings.EXECUTION_WORKSPACE_ROOT).resolve() / str(execution.id)
+        if _resume_root.exists():
+            logger.info("resume_skip_cleanup  execution=%s  workspace=%s", execution.id, _resume_root)
         workspace = _build_workspace(execution.id)
+        _clean_preprocessing_dirs(workspace)
 
         input_bytes = _run_async(storage_service.download_file(execution.input_file_url))
         questions_bytes = _run_async(storage_service.download_file(execution.criterias_file_url))
@@ -586,6 +620,18 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         processor_script = _resolve_script_path(settings.PROCESSOR_SCRIPT_PATH)
 
         base_env = _inject_llm_env(os.environ.copy())
+
+        # Per-(user, task) relevant-evidence cap config for this execution. Resolved once
+        # here because BOTH subprocesses need it: the pre-processor must keep each
+        # (UUID, task) group inside one split file (group-aware splitting), and the
+        # processor enforces the cap. Driven solely by this execution's threshold_config —
+        # only present when the user supplied a number at execution create/update; absent
+        # (or not a positive number) means no cap and all rows are processed.
+        # threshold_config shape: {"max_relevant_per_user_task": 5}, or None when no cap was requested.
+        cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
+        max_relevant = cap_config.get("max_relevant_per_user_task")
+        is_relevant_limit_enabled = isinstance(max_relevant, int) and max_relevant > 0
+
         preprocessor_env = {
             **base_env,
             "PYTHONUNBUFFERED": "1",
@@ -617,7 +663,9 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "--use-school-filter",
             "false",
         ])
-        
+        if is_relevant_limit_enabled:
+            preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
+
         _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
 
         # Handle split files or single file based on strategy
@@ -656,7 +704,6 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         processor_env = {
             **base_env,
             "PYTHONUNBUFFERED": "1",
-            "RESUME_FROM_CHECKPOINT": str(settings.PROCESSOR_RESUME_FROM_CHECKPOINT),
             "CHECKPOINT_CLEANUP_ON_SUCCESS": "True",
         }
         if question_task_column:
@@ -683,6 +730,19 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "--max-processed-rows",
             str(settings.PROCESSOR_MAX_ROWS),
         ]
+
+        # Per-(user, task) relevant-evidence cap (config resolved above), not a secret —
+        # passed as a CLI arg like every other per-execution setting (task columns,
+        # --max-processed-rows), consistent with how the pre-processor already receives
+        # this same value. Omitted entirely means no cap, all rows processed.
+        if is_relevant_limit_enabled:
+            processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
+            logger.info(
+                "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
+                execution.id,
+                max_relevant,
+            )
+
         _run_command(processor_cmd, processor_env, "Processor script")
 
         if not workspace.final_output_csv.exists():
@@ -690,8 +750,59 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 f"Merged output file not found: {workspace.final_output_csv}"
             )
 
+        # processed_rows reflects actual processing volume, counted from the unfiltered
+        # file — unaffected by whether REMOVE_INVALID_ROWS_FROM_OUTPUT later trims the
+        # deliverable. Read before any cleanup so this metric never changes meaning.
+        unfiltered_bytes = workspace.final_output_csv.read_bytes()
+        processed_rows, processed_rows_is_estimate = _count_csv_rows(workspace.final_output_csv)
+        if processed_rows_is_estimate:
+            # _count_csv_rows() estimates from a sample on large files. processed_rows,
+            # total_rows, and average_processing_time below are derived from this value,
+            # so flag it — those persisted metrics are an approximation, not exact.
+            logger.warning(
+                "completion_metrics_estimated  execution=%s  processed_rows=%d",
+                execution.id,
+                processed_rows,
+            )
+
+        # Always upload the unfiltered merged output first, before any row-removal step,
+        # so the full evidence trail survives in cloud storage even when the cleanup below
+        # strips rows from the deliverable. This is what makes automatic removal safe to
+        # default on — a bug in the cap/processor logic can no longer silently destroy the
+        # only record of what actually happened (see commit feeecef, which reverted an
+        # earlier automatic-strip attempt for exactly that risk).
+        unfiltered_file_name = f"output_{execution.id}_unfiltered.csv"
+        unfiltered_file_path = storage_service.build_execution_file_path(
+            user_id=execution.created_by or "system",
+            execution_id=str(execution.id),
+            file_name=unfiltered_file_name,
+        )
+        uploaded_unfiltered_path = _run_async(
+            storage_service.upload_file(
+                file_content=unfiltered_bytes,
+                file_path=unfiltered_file_path,
+                content_type="text/csv",
+            )
+        )
+        unfiltered_output_meta = {
+            "url": uploaded_unfiltered_path,
+            "size": len(unfiltered_bytes),
+            "uploaded_at": datetime.utcnow().isoformat(),
+        }
+
+        if settings.REMOVE_INVALID_ROWS_FROM_OUTPUT:
+            cleanup_script = _resolve_script_path(settings.CLEANUP_SCRIPT_PATH)
+            cleaned_path = workspace.final_output_csv.with_suffix(".cleaned.csv")
+            cleanup_cmd = [
+                sys.executable,
+                str(cleanup_script),
+                "--input-csv", str(workspace.final_output_csv),
+                "--output-csv", str(cleaned_path),
+            ]
+            _run_command(cleanup_cmd, base_env, "Cleanup script")
+            cleaned_path.replace(workspace.final_output_csv)
+
         output_bytes = workspace.final_output_csv.read_bytes()
-        processed_rows, _ = _count_csv_rows(workspace.final_output_csv)
         output_file_name = f"output_{execution.id}.csv"
         output_file_path = storage_service.build_execution_file_path(
             user_id=execution.created_by or "system",
@@ -715,6 +826,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             processed_rows=processed_rows,
             elapsed_seconds=elapsed_seconds,
             actual_cost=actual_cost,
+            unfiltered_output=unfiltered_output_meta,
         )
 
         if settings.EXECUTION_CLEANUP_ON_SUCCESS and workspace.root_dir.exists():
