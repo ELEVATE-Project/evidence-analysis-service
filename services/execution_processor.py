@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import os
 import shutil
@@ -24,6 +25,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import SERVICE_ROOT, settings
+from core.constants import EVIDENCE_TYPE_EXTENSIONS, PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
@@ -447,6 +449,35 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
     return columns
 
 
+def _resolve_evidence_type_extensions_from_config(db: Session, execution: Execution) -> dict[str, list[str]]:
+    """Per-tenant evidence-type -> file-extension map, sourced from
+    CsvSourceType.evidence_types_config so a new type/extension is addable without a deploy.
+    Falls back to core.constants.EVIDENCE_TYPE_EXTENSIONS when no active config row exists.
+    """
+    csv_type_id = (execution.csv_type_id or "").strip()
+    source_type = (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == execution.tenant_code,
+            CsvSourceType.organization_code == execution.organization_code,
+            CsvSourceType.type_key == csv_type_id,
+            CsvSourceType.is_active.is_(True),
+        )
+        .first()
+        if csv_type_id
+        else None
+    )
+    evidence_types_config = source_type.evidence_types_config if source_type else None
+    if not isinstance(evidence_types_config, list) or not evidence_types_config:
+        return EVIDENCE_TYPE_EXTENSIONS
+
+    return {
+        str(item["key"]): [str(ext) for ext in item.get("extensions", [])]
+        for item in evidence_types_config
+        if item.get("key")
+    }
+
+
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     result = subprocess.run(
         command,
@@ -720,7 +751,11 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # threshold_config shape: {"max_relevant_per_user_task": 5}, or None when no cap was requested.
         cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
         max_relevant = cap_config.get("max_relevant_per_user_task")
-        is_relevant_limit_enabled = isinstance(max_relevant, int) and max_relevant > 0
+        # bool is an int subclass in Python — isinstance(True, int) is True — so a malformed
+        # evidence_threshold: true from the client would otherwise silently enable a cap of 1.
+        is_relevant_limit_enabled = (
+            isinstance(max_relevant, int) and not isinstance(max_relevant, bool) and max_relevant > 0
+        )
 
         preprocessor_env = {
             **base_env,
@@ -734,6 +769,16 @@ def process_execution(execution_id: str) -> dict[str, Any]:
 
         # processor_env is built here (not inside either branch below) because both the
         # off-path and every per-batch run in the on-path need an identical copy of it.
+        processing_config = execution.processing_config if isinstance(execution.processing_config, dict) else {}
+        evidence_types = processing_config.get(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES)
+        if not isinstance(evidence_types, list) or not evidence_types:
+            raise ExecutionProcessingError(
+                f"Execution {execution.id} is missing required evidence_types in processing_config"
+            )
+        # Per-tenant type->extension map (DB-driven; see CsvSourceType.evidence_types_config)
+        # passed to both scripts so a new type/extension is addable without a code change.
+        evidence_types_to_validate_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
+
         processor_env = {
             **base_env,
             "PYTHONUNBUFFERED": "1",
@@ -794,6 +839,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 str(rows_per_main_batch),
                 "--max-main-batches",
                 str(settings.MAX_MAIN_BATCHES),
+                "--evidence-types",
+                ",".join(evidence_types),
+                "--evidence-types-to-validate",
+                evidence_types_to_validate_json,
             ]
             if is_relevant_limit_enabled:
                 # Keep (UUID, task) groups within a single main batch so per-batch
@@ -860,6 +909,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 if batch_enable_split:
                     batch_preprocessor_cmd.extend(["--rows-per-file", str(batch_rows_per_file)])
                 batch_preprocessor_cmd.extend(["--use-school-filter", "false", "--skip-batch-cut"])
+                batch_preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
+                batch_preprocessor_cmd.extend(["--evidence-types-to-validate", evidence_types_to_validate_json])
                 if is_relevant_limit_enabled:
                     batch_preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
                 _run_command(batch_preprocessor_cmd, preprocessor_env, f"Pre-processor script ({label})")
@@ -901,6 +952,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                     str(workspace.questions_csv),
                     "--max-processed-rows",
                     str(settings.PROCESSOR_MAX_ROWS),
+                    "--evidence-types-to-validate",
+                    evidence_types_to_validate_json,
                 ]
                 if is_relevant_limit_enabled:
                     batch_processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
@@ -957,6 +1010,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--use-school-filter",
                 "false",
             ])
+            preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
+            preprocessor_cmd.extend(["--evidence-types-to-validate", evidence_types_to_validate_json])
             if is_relevant_limit_enabled:
                 preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
 
@@ -1012,6 +1067,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 str(workspace.questions_csv),
                 "--max-processed-rows",
                 str(settings.PROCESSOR_MAX_ROWS),
+                "--evidence-types-to-validate",
+                evidence_types_to_validate_json,
             ]
             if is_relevant_limit_enabled:
                 processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
