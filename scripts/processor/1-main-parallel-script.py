@@ -65,7 +65,7 @@ def _parse_args():
         help="Per-(UUID, task) relevant-evidence cap; unset means no cap",
     )
     parser.add_argument(
-        "--evidence-type-extensions",
+        "--evidence-types-to-validate",
         default=None,
         help="JSON object mapping evidence type key -> list of file extensions "
         "(per-tenant, from CsvSourceType.evidence_types_config); absent = core.constants default",
@@ -79,10 +79,10 @@ ARGS = _parse_args()
 # Per-tenant type->extension map, passed in by execution_processor.py from
 # CsvSourceType.evidence_types_config; falls back to the core.constants default when this
 # script is run standalone (no execution context to resolve tenant config from).
-if ARGS.evidence_type_extensions:
+if ARGS.evidence_types_to_validate:
     EVIDENCE_TYPE_EXTENSIONS = {
         str(key): [str(ext).lower() for ext in exts]
-        for key, exts in json.loads(ARGS.evidence_type_extensions).items()
+        for key, exts in json.loads(ARGS.evidence_types_to_validate).items()
     }
 else:
     EVIDENCE_TYPE_EXTENSIONS = DEFAULT_EVIDENCE_TYPE_EXTENSIONS

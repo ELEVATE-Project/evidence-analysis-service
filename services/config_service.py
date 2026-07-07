@@ -8,7 +8,6 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.constants import DEFAULT_EVIDENCE_TYPES_CONFIG
 from models.csv_source_type import CsvSourceType
 from models.schemas import ReportDownloadResponse, UserResponse
 from services.storage_service import StorageService
@@ -96,11 +95,17 @@ class ConfigService:
                 )
                 .first()
             )
-            evidence_types_config = (
-                source_type.evidence_types_config
-                if source_type and isinstance(source_type.evidence_types_config, list) and source_type.evidence_types_config
-                else DEFAULT_EVIDENCE_TYPES_CONFIG
-            )
+            if not source_type:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No active project_report CSV source type configured for this tenant/organization.",
+                )
+            if not isinstance(source_type.evidence_types_config, list) or not source_type.evidence_types_config:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="evidence_types_config is not configured for this tenant's CSV source type.",
+                )
+            evidence_types_config = source_type.evidence_types_config
             # extensions are an internal detail for the pre-processor/processor scripts —
             # the public config contract only ever exposed {key, label}. evidence_types_config
             # is tenant-controlled JSONB; malformed entries (manual DB edits, bad defaults)

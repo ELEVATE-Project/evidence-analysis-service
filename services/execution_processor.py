@@ -685,7 +685,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             )
         # Per-tenant type->extension map (DB-driven; see CsvSourceType.evidence_types_config)
         # passed to both scripts so a new type/extension is addable without a code change.
-        evidence_type_extensions_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
+        evidence_types_to_validate_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
 
         preprocessor_cmd = [
             sys.executable,
@@ -710,7 +710,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         ])
 
         preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
-        preprocessor_cmd.extend(["--evidence-type-extensions", evidence_type_extensions_json])
+        preprocessor_cmd.extend(["--evidence-types-to-validate", evidence_types_to_validate_json])
         if is_relevant_limit_enabled:
             preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
 
@@ -777,8 +777,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             str(workspace.questions_csv),
             "--max-processed-rows",
             str(settings.PROCESSOR_MAX_ROWS),
-            "--evidence-type-extensions",
-            evidence_type_extensions_json,
+            "--evidence-types-to-validate",
+            evidence_types_to_validate_json,
         ]
 
         # Per-(user, task) relevant-evidence cap (config resolved above), not a secret —
