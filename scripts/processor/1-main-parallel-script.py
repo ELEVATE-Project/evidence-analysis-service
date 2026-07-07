@@ -40,13 +40,6 @@ import time
 from collections import deque
 import hashlib
 
-# Defense-in-depth re-check of the execution's evidence-type filter (primary enforcement is in
-# the pre-processor; this guards against a pre-split file from an earlier config being reused).
-# Absent/empty env = no restriction, all types allowed.
-ALLOWED_EVIDENCE_TYPES = {
-    t.strip().lower() for t in os.getenv("ALLOWED_EVIDENCE_TYPES", "").split(",") if t.strip()
-} or None
-
 
 def _parse_args():
     parser = argparse.ArgumentParser(description="Run evidence processor pipeline.")
@@ -2317,22 +2310,11 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
             task_types.append("User-Owned" if is_user_owned else "Standard")
 
-            # Determine evidence type and route to appropriate processor
+            # Determine evidence type and route to appropriate processor.
+            # Evidence-type filtering is enforced upstream by the pre-processor — rows with
+            # a disallowed evidence_type are dropped there and never reach this script.
             evidence_type = get_evidence_type(task_evidence)
-            if evidence_type and ALLOWED_EVIDENCE_TYPES is not None and evidence_type not in ALLOWED_EVIDENCE_TYPES:
-                logging.info(f"[Worker {worker_id}] Excluding {evidence_type} evidence at row {idx+1} (not in ALLOWED_EVIDENCE_TYPES)")
-                task_evidence_qa.append(None)
-                task_evidence_qa_reason.append(None)
-                # notValidated (not 'Irrelevant') — no AI call was made, so this must not be
-                # counted as an AI-judged-irrelevant row in report_service.py's relevance breakdown
-                # or in the api_successes/api_failures stats below.
-                relevance_tags.append(RELEVANCE_TAG_NOT_VALIDATED)
-                task_types[-1] = "Excluded"  # overwrite the User-Owned/Standard type appended above
-                not_validated_count += 1
-                mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED)
-                for key in EXTRA_KEYS.keys():
-                    extra_keys_data[key].append(None)
-            elif evidence_type:
+            if evidence_type:
                 logging.info(f"[Worker {worker_id}] Processing {evidence_type} {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
                 
                 # Route to appropriate processor based on evidence type
@@ -2536,9 +2518,8 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "user_owned_file": user_owned_filename,
                 "rows_attempted": processed_count,
                 "api_calls": rows_processed_new,  # Only count new API calls
-                # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
-                # API call — exclude them from success/failure so these stay scoped to rows
-                # actually sent to the AI.
+                # notValidated rows (relevant-cap reached) made no API call — exclude them
+                # from success/failure so these stay scoped to rows actually sent to the AI.
                 "api_successes": int(success_mask.sum()),
                 "api_failures": int(failure_mask.sum()),
                 "success_list": df_to_save.loc[success_mask, "Task Evidence"].tolist(),
@@ -2554,9 +2535,8 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "output_file": output_filename,
                 "rows_attempted": processed_count,
                 "api_calls": rows_processed_new,  # Only count new API calls
-                # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
-                # API call — exclude them from success/failure so these stay scoped to rows
-                # actually sent to the AI.
+                # notValidated rows (relevant-cap reached) made no API call — exclude them
+                # from success/failure so these stay scoped to rows actually sent to the AI.
                 "api_successes": int(success_mask.sum()),
                 "api_failures": int(failure_mask.sum()),
                 "success_list": df_to_save.loc[success_mask, "Task Evidence"].tolist(),

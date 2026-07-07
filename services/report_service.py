@@ -336,11 +336,11 @@ class ReportService:
         Python equivalent of StandardReportRenderer.jsx::computeReportData().
         Returns the same aggregated structure the frontend expects.
         """
-        # notValidated = row never sent to the AI for an execution-config reason: the relevant-
-        # evidence cap was reached for this (UUID, Tasks) pair, or the row's evidence type was
-        # excluded by the execution's evidence-type filter. It's a distinct bucket: counted in
-        # "total" but never folded into Relevant/Partially Relevant/Irrelevant, and excluded from
-        # rel_score's numerator and denominator.
+        # notValidated = row never sent to the AI because the relevant-evidence cap was reached
+        # for this (UUID, Tasks) pair. (Evidence-type-excluded rows are dropped entirely by the
+        # pre-processor and never reach this output, so they don't appear here at all.) It's a
+        # distinct bucket: counted in "total" but never folded into Relevant/Partially
+        # Relevant/Irrelevant, and excluded from rel_score's numerator and denominator.
         # "null" = row has no Relevance Tag at all — the processor's no-question-found skip path
         # (task not in the questions sheet) appends None rather than tagging the row, so it never
         # reached the AI either. Same treatment as notValidated: counted in "total", never folded
@@ -366,9 +366,9 @@ class ReportService:
                 node[RELEVANCE_NULL_BUCKET] += 1
 
         def rel_score(node: Dict[str, Any]) -> float:
-            # notValidated and null rows were never evaluated (relevant-cap reached, evidence-type
-            # excluded, or no question found for the task) — excluding them from the denominator
-            # keeps the score scoped to evidence the AI actually evaluated. "total" itself is left
+            # notValidated and null rows were never evaluated (relevant-cap reached, or no
+            # question found for the task) — excluding them from the denominator keeps the
+            # score scoped to evidence the AI actually evaluated. "total" itself is left
             # untouched; it must still include these rows everywhere else.
             evaluated = node["total"] - node.get(RELEVANCE_TAG_NOT_VALIDATED, 0) - node.get(RELEVANCE_NULL_BUCKET, 0)
             return ((node[RELEVANCE_TAG_RELEVANT] + node[RELEVANCE_TAG_PARTIAL] * 0.5) / evaluated * 100) if evaluated else 0.0

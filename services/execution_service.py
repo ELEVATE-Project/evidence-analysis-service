@@ -356,12 +356,9 @@ class ExecutionService:
     @staticmethod
     def _resolve_processing_config(
         request_data: ExecutionCreate, source_type: CsvSourceType
-    ) -> Optional[dict[str, Any]]:
-        """Build the processing_config JSONB payload. None (not {}) when nothing was configured,
-        so a proper subset of evidence types is distinguishable from "no restriction"."""
-        if not request_data.evidence_types:
-            return None
-
+    ) -> dict[str, Any]:
+        """Build the processing_config JSONB payload. evidence_types is required and already
+        guaranteed to be a non-empty list by ExecutionCreate's Pydantic validator."""
         allowed = ExecutionService._allowed_evidence_type_keys(source_type)
         invalid = [t for t in request_data.evidence_types if t not in allowed]
         if invalid:
@@ -2203,30 +2200,34 @@ class ExecutionService:
             if field == PROCESSING_CONFIG_KEY_EVIDENCE_TYPES:
                 # evidence_types doesn't live on the ORM model directly — it rides inside the
                 # generic processing_config JSONB blob, merged so other future keys survive.
+                # Required field: clearing it to empty/null would silently put the execution
+                # back into "no restriction", so that's rejected rather than allowed.
+                if not value:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="evidence_types cannot be cleared; provide a non-empty list of allowed types.",
+                    )
                 current_processing_config = (
                     dict(execution.processing_config) if isinstance(execution.processing_config, dict) else {}
                 )
-                if value:
-                    source_type = self._get_csv_source_type(
-                        tenant_code=execution.tenant_code,
-                        organization_code=execution.organization_code,
-                        type_key=execution.csv_type_id or "",
+                source_type = self._get_csv_source_type(
+                    tenant_code=execution.tenant_code,
+                    organization_code=execution.organization_code,
+                    type_key=execution.csv_type_id or "",
+                )
+                allowed = (
+                    self._allowed_evidence_type_keys(source_type)
+                    if source_type
+                    else sorted(ALLOWED_EVIDENCE_TYPES)
+                )
+                invalid = [t for t in value if t not in allowed]
+                if invalid:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"evidence_types must be a subset of {allowed}, got invalid: {invalid}",
                     )
-                    allowed = (
-                        self._allowed_evidence_type_keys(source_type)
-                        if source_type
-                        else sorted(ALLOWED_EVIDENCE_TYPES)
-                    )
-                    invalid = [t for t in value if t not in allowed]
-                    if invalid:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=f"evidence_types must be a subset of {allowed}, got invalid: {invalid}",
-                        )
-                    current_processing_config[PROCESSING_CONFIG_KEY_EVIDENCE_TYPES] = value
-                else:
-                    current_processing_config.pop(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES, None)
-                execution.processing_config = current_processing_config or None
+                current_processing_config[PROCESSING_CONFIG_KEY_EVIDENCE_TYPES] = value
+                execution.processing_config = current_processing_config
                 continue
 
             # Optional fields support explicit clears via null.

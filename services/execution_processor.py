@@ -679,7 +679,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
 
         processing_config = execution.processing_config if isinstance(execution.processing_config, dict) else {}
         evidence_types = processing_config.get(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES)
-        evidence_types = evidence_types if isinstance(evidence_types, list) and evidence_types else None
+        if not isinstance(evidence_types, list) or not evidence_types:
+            raise ExecutionProcessingError(
+                f"Execution {execution.id} is missing required evidence_types in processing_config"
+            )
         # Per-tenant type->extension map (DB-driven; see CsvSourceType.evidence_types_config)
         # passed to both scripts so a new type/extension is addable without a code change.
         evidence_type_extensions_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
@@ -706,8 +709,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "false",
         ])
 
-        if evidence_types:
-            preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
+        preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
         preprocessor_cmd.extend(["--evidence-type-extensions", evidence_type_extensions_json])
         if is_relevant_limit_enabled:
             preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
@@ -757,10 +759,6 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = question_task_column
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
-        if evidence_types:
-            # Defense-in-depth: re-checked by the processor in case a pre-split file
-            # from an earlier config gets reused on a re-run.
-            processor_env["ALLOWED_EVIDENCE_TYPES"] = ",".join(evidence_types)
 
         processor_cmd = [
             sys.executable,

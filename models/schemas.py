@@ -81,7 +81,10 @@ class ExecutionCreate(BaseModel):
     program_ref_id: Optional[str] = None
     program_name: Optional[str] = None
     states: Optional[List[str]] = None
-    evidence_types: Optional[List[str]] = None
+    # Required: an execution must always declare which evidence types to process, so a
+    # lost/omitted filter fails loud at request time instead of silently processing every
+    # evidence type through the paid AI unnoticed.
+    evidence_types: List[str] = Field(..., min_length=1)
     # Per-(user, task) relevant-evidence cap. When set, the AI stops validating a
     # user's task once this many evidences are tagged "Relevant"; the rest are written
     # as "notValidated" with no API call. Omitted/None = feature off (current behavior).
@@ -101,16 +104,16 @@ class ExecutionCreate(BaseModel):
 
     @field_validator("evidence_types", mode="before")
     @classmethod
-    def validate_evidence_types(cls, v: Any) -> Optional[List[str]]:
+    def validate_evidence_types(cls, v: Any) -> List[str]:
         # Normalization only. The allowed set is tenant-specific (CsvSourceType.evidence_types_config)
         # and DB access isn't available at the Pydantic layer, so the subset check happens in
         # ExecutionService._resolve_processing_config instead.
-        if v is None:
-            return None
-        if not isinstance(v, list):
-            raise ValueError("evidence_types must be an array of strings")
+        if not isinstance(v, list) or not v:
+            raise ValueError("evidence_types is required and must be a non-empty array of strings")
         cleaned = sorted({str(t).strip().lower() for t in v if str(t).strip()})
-        return cleaned or None
+        if not cleaned:
+            raise ValueError("evidence_types is required and must be a non-empty array of strings")
+        return cleaned
 
 
 class FileUploadDescriptor(BaseModel):

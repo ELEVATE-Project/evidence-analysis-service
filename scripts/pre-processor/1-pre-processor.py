@@ -79,7 +79,10 @@ USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by s
 evidence_types_value = ARGS.evidence_types or os.getenv("PREPROCESS_EVIDENCE_TYPES", "")
 ALLOWED_EVIDENCE_TYPES = {
     t.strip().lower() for t in evidence_types_value.split(",") if t.strip()
-} or None  # None = no restriction, all types allowed
+}
+if not ALLOWED_EVIDENCE_TYPES:
+    print("ERROR: evidence_types is required (--evidence-types or PREPROCESS_EVIDENCE_TYPES) but was empty.")
+    sys.exit(1)
 
 # === SPLIT CONFIGURATION ===
 SPLIT_FILES = ARGS.split_files or os.getenv("PREPROCESS_SPLIT_FILES") or os.getenv("SPLIT_FILES", "yes")
@@ -97,7 +100,7 @@ print(f"   SPLIT_FILES: {SPLIT_FILES}")
 print(f"   ROWS_PER_FILE: {ROWS_PER_FILE}")
 print(f"   GROUP_AWARE_SPLIT: {GROUP_AWARE_SPLIT}")
 print(f"   USE_SCHOOL_FILTER: {USE_SCHOOL_FILTER}")
-print(f"   ALLOWED_EVIDENCE_TYPES: {sorted(ALLOWED_EVIDENCE_TYPES) if ALLOWED_EVIDENCE_TYPES else 'all'}")
+print(f"   ALLOWED_EVIDENCE_TYPES: {sorted(ALLOWED_EVIDENCE_TYPES)}")
 print(f"   TASK_MATCH_COLUMN_CONFIG: {TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
 print(f"   QUESTION_TASK_COLUMN_FALLBACK: {DEFAULT_QUESTION_TASK_COLUMN}")
 print(f"   INPUT_TASK_COLUMN_FALLBACK: {DEFAULT_INPUT_TASK_COLUMN}")
@@ -457,7 +460,7 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
         continue
 
     # Rule 3b: Skip if evidence type is valid but excluded by the execution's evidence-type filter
-    if ALLOWED_EVIDENCE_TYPES is not None and evidence_type not in ALLOWED_EVIDENCE_TYPES:
+    if evidence_type not in ALLOWED_EVIDENCE_TYPES:
         skip_evidence_type_excluded += 1
         continue
 
@@ -623,10 +626,7 @@ remaining_after_invalid = remaining_after_evidence - skip_invalid_evidence
 print(f"{'Task Evidence is not valid (not image/pdf/excel)':<50} {skip_invalid_evidence:<10} {remaining_after_invalid}")
 
 remaining_after_type_excluded = remaining_after_invalid - skip_evidence_type_excluded
-if ALLOWED_EVIDENCE_TYPES is not None:
-    print(f"{'Evidence type excluded by execution filter':<50} {skip_evidence_type_excluded:<10} {remaining_after_type_excluded}")
-else:
-    print(f"{'Evidence type filtering':<50} {'SKIPPED':<10} {remaining_after_type_excluded}")
+print(f"{'Evidence type excluded by execution filter':<50} {skip_evidence_type_excluded:<10} {remaining_after_type_excluded}")
 
 print(f"\n{'='*70}")
 print(f"Final output CSV rows: {len(filtered_rows)}")

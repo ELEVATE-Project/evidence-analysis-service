@@ -102,8 +102,14 @@ class ConfigService:
                 else DEFAULT_EVIDENCE_TYPES_CONFIG
             )
             # extensions are an internal detail for the pre-processor/processor scripts —
-            # the public config contract only ever exposed {key, label}.
-            return [{"key": item["key"], "label": item["label"]} for item in evidence_types_config]
+            # the public config contract only ever exposed {key, label}. evidence_types_config
+            # is tenant-controlled JSONB; malformed entries (manual DB edits, bad defaults)
+            # are skipped rather than raising a 500 on missing key/label.
+            return [
+                {"key": item["key"], "label": item["label"]}
+                for item in evidence_types_config
+                if isinstance(item, dict) and item.get("key") and item.get("label")
+            ]
 
         if normalized_type != "project":
             raise HTTPException(
