@@ -87,10 +87,9 @@ if ARGS.evidence_type_extensions:
 else:
     EVIDENCE_TYPE_EXTENSIONS = DEFAULT_EVIDENCE_TYPE_EXTENSIONS
 
+# Only IMAGE_FORMATS remains: used for Image Preview rendering. get_evidence_type()
+# resolves types dynamically from EVIDENCE_TYPE_EXTENSIONS directly (see below).
 IMAGE_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS.get("image", []))
-PDF_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS.get("pdf", []))
-EXCEL_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS.get("excel", []))
-ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 
 MAX_PROCESSED_ROWS = (
     ARGS.max_processed_rows
@@ -1693,17 +1692,16 @@ CORRECT JSON Response:
 
 # === Helper function to determine evidence type ===
 def get_evidence_type(url):
-    """Determine evidence type from URL. Returns: 'image', 'pdf', 'excel', or None"""
+    """Determine the evidence type from URL by matching its extension against the
+    configured EVIDENCE_TYPE_EXTENSIONS map — mirrors the pre-processor's resolver so a
+    tenant-custom type (any key beyond image/pdf/excel) is recognized consistently instead
+    of silently resolving to None here while the pre-processor already let the row through.
+    Returns the type key (e.g. 'image', 'pdf', 'excel', or any tenant-configured key), or
+    None if no extension matched."""
     url = str(url).strip().lower()
-    for ext in IMAGE_FORMATS:
-        if url.endswith(ext):
-            return "image"
-    for ext in PDF_FORMATS:
-        if url.endswith(ext):
-            return "pdf"
-    for ext in EXCEL_FORMATS:
-        if url.endswith(ext):
-            return "excel"
+    for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
+        if any(url.endswith(ext) for ext in extensions):
+            return type_key
     return None
 
 
