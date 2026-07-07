@@ -2174,6 +2174,14 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             is_relevant_limit_enabled = False
         relevant_count_per_key = dict(resume_relevant_counts) if is_relevant_limit_enabled else {}
         not_validated_count = 0
+        # AI success = the AI returned a usable response (Relevant/Partial/Irrelevant all
+        # count — a real verdict, not a failure). AI failure = no usable response at all
+        # (see the "Invalid response" branch below). Counted directly at the point each
+        # outcome is known, same as the other per-row counters here.
+        ai_success_count = 0
+        ai_failure_count = 0
+        success_list = []
+        failed_list = []
         if is_relevant_limit_enabled and relevant_count_per_key:
             logging.info(f"[Worker {worker_id}] [Resume] Restored Relevant counts for {len(relevant_count_per_key)} (UUID, task) groups from output CSV")
         if is_relevant_limit_enabled:
@@ -2347,6 +2355,8 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                         reasonings=reasonings,
                     )
                     relevance_tags.append(relevance_tag)
+                    ai_success_count += 1
+                    success_list.append(task_evidence)
 
                     # Count this Relevant hit toward the per-(UUID, task) cap so later rows
                     # of the same pair are capped once the limit is reached.
@@ -2420,6 +2430,8 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                     task_evidence_qa_reason.append(None)
                     relevance_tags.append(RELEVANCE_TAG_IRRELEVANT)
                     task_types[-1] = "Failed"  # Update the last task type
+                    ai_failure_count += 1
+                    failed_list.append(task_evidence)
                     for key in EXTRA_KEYS.keys():
                         extra_keys_data[key].append(None)
             # No final else: the pre-processor's Rule 3 already drops any row whose evidence
@@ -2500,13 +2512,6 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
         # Separate user-owned tasks for reporting
         user_owned_df = df_to_save[df_to_save["Task Type"] == "User-Owned"]
-        # Whitelist explicit success tags rather than blacklisting failure/excluded ones —
-        # the "no question found" skip path appends None to Relevance Tag, and None is
-        # neither Irrelevant nor notValidated, so a blacklist would wrongly count it as a
-        # success.
-        ai_success_tags = {RELEVANCE_TAG_RELEVANT, RELEVANCE_TAG_PARTIAL}
-        success_mask = df_to_save["Relevance Tag"].isin(ai_success_tags)
-        failure_mask = df_to_save["Relevance Tag"].eq(RELEVANCE_TAG_IRRELEVANT)
         if not user_owned_df.empty:
             user_owned_filename = os.path.join(OUTPUT_DIR, f"user_owned_tasks_{os.path.basename(input_file).split('.')[0]}.csv")
             user_owned_df.to_csv(user_owned_filename, index=False)
@@ -2518,10 +2523,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "api_calls": rows_processed_new,  # Only count new API calls
                 # notValidated rows (relevant-cap reached) made no API call — exclude them
                 # from success/failure so these stay scoped to rows actually sent to the AI.
-                "api_successes": int(success_mask.sum()),
-                "api_failures": int(failure_mask.sum()),
-                "success_list": df_to_save.loc[success_mask, "Task Evidence"].tolist(),
-                "failed_list": df_to_save.loc[failure_mask, "Task Evidence"].tolist(),
+                "api_successes": ai_success_count,
+                "api_failures": ai_failure_count,
+                "success_list": success_list,
+                "failed_list": failed_list,
                 "user_owned_count": len(user_owned_df),
                 "standard_count": len(df_to_save) - len(user_owned_df),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,
@@ -2535,10 +2540,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "api_calls": rows_processed_new,  # Only count new API calls
                 # notValidated rows (relevant-cap reached) made no API call — exclude them
                 # from success/failure so these stay scoped to rows actually sent to the AI.
-                "api_successes": int(success_mask.sum()),
-                "api_failures": int(failure_mask.sum()),
-                "success_list": df_to_save.loc[success_mask, "Task Evidence"].tolist(),
-                "failed_list": df_to_save.loc[failure_mask, "Task Evidence"].tolist(),
+                "api_successes": ai_success_count,
+                "api_failures": ai_failure_count,
+                "success_list": success_list,
+                "failed_list": failed_list,
                 "user_owned_count": 0,
                 "standard_count": len(df_to_save),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,
@@ -2800,8 +2805,8 @@ if __name__ == "__main__":
         
         logging.info(f"Total Rows Processed (sum of attempts): {total_rows_processed_all}")
         logging.info(f"Total Image Rows Processed: {total_api_calls_all}")
-        logging.info(f"  - ✅ Relevant / Partially Relevant: {total_api_success_all}")
-        logging.info(f"  - ⬜ Irrelevant: {total_api_failure_all}")
+        logging.info(f"  - ✅ AI responded (Relevant/Partial/Irrelevant): {total_api_success_all}")
+        logging.info(f"  - ⬜ Failed (no usable AI response): {total_api_failure_all}")
         if total_not_validated_all > 0:
             logging.info(f"  - 🚫 notValidated (relevant cap reached, no API call): {total_not_validated_all}")
         
@@ -2872,18 +2877,18 @@ if __name__ == "__main__":
         logging.info(f"  - Total Tasks: {total_standard_count + total_user_owned_count}")
 
         if all_failed_lists:
-            logging.warning(f"List of Irrelevant Evidence URLs ({len(all_failed_lists)}):")
+            logging.warning(f"List of Evidence URLs with No Usable AI Response ({len(all_failed_lists)}):")
             for item in all_failed_lists:
                 logging.warning(f"  - {item}")
         else:
-            logging.info("✅ No irrelevant evidence recorded.")
+            logging.info("✅ No failed AI responses recorded.")
 
         if all_success_lists:
-            logging.info(f"List of Relevant / Partially Relevant Evidence URLs ({len(all_success_lists)}):")
+            logging.info(f"List of Evidence URLs the AI Responded To ({len(all_success_lists)}):")
             for item in all_success_lists:
                 logging.info(f"  - {item}")
         else:
-            logging.info("No relevant evidence recorded.")
+            logging.info("No AI responses recorded.")
             
         logging.info("="*80)
         logging.info("===== 🏁 END OF SUMMARY =====")
