@@ -40,7 +40,7 @@ def _parse_args():
     parser.add_argument(
         "--evidence-types",
         default=None,
-        help="Comma list of allowed evidence types (image,pdf,excel); absent or empty = all",
+        help="Comma list of allowed evidence types (image,pdf,excel); required",
     )
     parser.add_argument(
         "--evidence-types-to-validate",
@@ -76,12 +76,14 @@ use_school_filter_value = (
 )
 USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by school_list.csv
 
-evidence_types_value = ARGS.evidence_types or os.getenv("PREPROCESS_EVIDENCE_TYPES", "")
+if not ARGS.evidence_types:
+    print("ERROR: --evidence-types is required but was empty.")
+    sys.exit(1)
 ALLOWED_EVIDENCE_TYPES = {
-    t.strip().lower() for t in evidence_types_value.split(",") if t.strip()
+    t.strip().lower() for t in ARGS.evidence_types.split(",") if t.strip()
 }
 if not ALLOWED_EVIDENCE_TYPES:
-    print("ERROR: evidence_types is required (--evidence-types or PREPROCESS_EVIDENCE_TYPES) but was empty.")
+    print("ERROR: --evidence-types is required but was empty.")
     sys.exit(1)
 
 # === SPLIT CONFIGURATION ===
