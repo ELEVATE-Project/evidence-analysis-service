@@ -461,8 +461,19 @@ def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
     combined_logs = f"{label} failed.\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}".strip()
+
+    # Scripts that abort on a known, actionable condition print "FATAL: <reason>" to stderr
+    # before exiting non-zero. Surface that reason as the failure message shown to the user
+    # (ExecutionResponse.failure_reason / failure email); otherwise fall back to the generic
+    # exit-code message. Full stdout/stderr is always kept in error_logs for debugging.
+    fatal_reason = next(
+        (line[len("FATAL: "):].strip() for line in reversed(stderr.splitlines()) if line.startswith("FATAL: ")),
+        None,
+    )
+    message = f"{label} failed: {fatal_reason}" if fatal_reason else f"{label} failed with exit code {result.returncode}"
+
     raise ExecutionProcessingError(
-        message=f"{label} failed with exit code {result.returncode}",
+        message=message,
         error_logs=combined_logs,
     )
 
@@ -709,7 +720,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # threshold_config shape: {"max_relevant_per_user_task": 5}, or None when no cap was requested.
         cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
         max_relevant = cap_config.get("max_relevant_per_user_task")
-        cap_enabled = isinstance(max_relevant, int) and max_relevant > 0
+        is_relevant_limit_enabled = isinstance(max_relevant, int) and max_relevant > 0
 
         preprocessor_env = {
             **base_env,
@@ -740,7 +751,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # this same value. Applied at each processor invocation below (single-file path
         # and per-batch path, since MAIN_FILE_SPLIT builds its own command per batch).
         # Omitted entirely means no cap, all rows processed.
-        if cap_enabled:
+        if is_relevant_limit_enabled:
             logger.info(
                 "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
                 execution.id,
@@ -784,7 +795,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--max-main-batches",
                 str(settings.MAX_MAIN_BATCHES),
             ]
-            if cap_enabled:
+            if is_relevant_limit_enabled:
                 # Keep (UUID, task) groups within a single main batch so per-batch
                 # cap counts stay correct (mirrors group-aware fine-splitting below).
                 batch_cut_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
@@ -849,7 +860,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 if batch_enable_split:
                     batch_preprocessor_cmd.extend(["--rows-per-file", str(batch_rows_per_file)])
                 batch_preprocessor_cmd.extend(["--use-school-filter", "false", "--skip-batch-cut"])
-                if cap_enabled:
+                if is_relevant_limit_enabled:
                     batch_preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
                 _run_command(batch_preprocessor_cmd, preprocessor_env, f"Pre-processor script ({label})")
 
@@ -891,7 +902,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                     "--max-processed-rows",
                     str(settings.PROCESSOR_MAX_ROWS),
                 ]
-                if cap_enabled:
+                if is_relevant_limit_enabled:
                     batch_processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
                 _run_command(batch_processor_cmd, processor_env, f"Processor script ({label})")
 
@@ -946,7 +957,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--use-school-filter",
                 "false",
             ])
-            if cap_enabled:
+            if is_relevant_limit_enabled:
                 preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
 
             _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
@@ -1002,7 +1013,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--max-processed-rows",
                 str(settings.PROCESSOR_MAX_ROWS),
             ]
-            if cap_enabled:
+            if is_relevant_limit_enabled:
                 processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
             _run_command(processor_cmd, processor_env, "Processor script")
 

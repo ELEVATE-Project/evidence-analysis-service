@@ -483,7 +483,12 @@ if GROUP_AWARE_SPLIT and not _group_aware_active:
     # split files; each processor worker enforces the cap independently, so the per-pair
     # cap silently stops being a real cap. Abort instead of producing output that looks
     # fine but breaks the guarantee the caller (execution_processor.py) is relying on.
-    print("❌ group-aware splitting requested (--max-relevant-per-user-task) but UUID/task column missing — aborting.")
+    # FATAL: prefix on stderr is picked up by execution_processor._run_command() and
+    # surfaced verbatim as the execution's failure_reason instead of a generic exit-code message.
+    print(
+        "FATAL: group-aware splitting requested (--max-relevant-per-user-task) but UUID/task column missing — aborting.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 if _group_aware_active:
     filtered_rows.sort(key=lambda r: (str(r[_uuid_idx]), str(r[_task_idx])))
