@@ -355,6 +355,13 @@ class ExecutionService:
         return sorted({str(item.get("key", "")).strip() for item in evidence_types_config if item.get("key")})
 
     @staticmethod
+    def _required_school_filter_column(source_type: Optional[CsvSourceType]) -> str:
+        school_filter_config = source_type.school_filter_config if source_type else None
+        if not isinstance(school_filter_config, dict) or not school_filter_config.get("required_column"):
+            return SCHOOL_FILTER_REQUIRED_COLUMN
+        return str(school_filter_config["required_column"]).strip() or SCHOOL_FILTER_REQUIRED_COLUMN
+
+    @staticmethod
     def _resolve_processing_config(
         request_data: ExecutionCreate, source_type: CsvSourceType
     ) -> dict[str, Any]:
@@ -1316,14 +1323,19 @@ class ExecutionService:
             )
 
         headers, row_count = self._extract_headers_and_row_count(file_bytes, label)
-        if normalized_file_type == "school_filter" and SCHOOL_FILTER_REQUIRED_COLUMN not in headers:
-            execution.school_filter_file_url = None
-            execution.school_filter_file_size = None
-            self.db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"School filter file must contain a '{SCHOOL_FILTER_REQUIRED_COLUMN}' column.",
+        if normalized_file_type == "school_filter":
+            source_type = self._get_csv_source_type(
+                execution.tenant_code, execution.organization_code, execution.csv_type_id
             )
+            required_school_filter_column = self._required_school_filter_column(source_type)
+            if required_school_filter_column not in headers:
+                execution.school_filter_file_url = None
+                execution.school_filter_file_size = None
+                self.db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                )
         self._set_file_size_by_type(execution, normalized_file_type, int(metadata.get("size_bytes", 0)))
         self._update_file_checkpoint(
             execution,
@@ -1393,11 +1405,16 @@ class ExecutionService:
 
         # Extract headers and row count
         headers, row_count = self._extract_headers_and_row_count(file_bytes, label)
-        if normalized_file_type == "school_filter" and SCHOOL_FILTER_REQUIRED_COLUMN not in headers:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"School filter file must contain a '{SCHOOL_FILTER_REQUIRED_COLUMN}' column.",
+        if normalized_file_type == "school_filter":
+            source_type = self._get_csv_source_type(
+                execution.tenant_code, execution.organization_code, execution.csv_type_id
             )
+            required_school_filter_column = self._required_school_filter_column(source_type)
+            if required_school_filter_column not in headers:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                )
 
         # Update execution with file path and metadata
         self._set_file_path_by_type(execution, normalized_file_type, file_path)

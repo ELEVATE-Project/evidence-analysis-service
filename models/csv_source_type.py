@@ -54,6 +54,14 @@ class CsvSourceType(Base):
             "{\"key\": \"excel\", \"label\": \"Excel\", \"extensions\": [\".xlsx\"]}]'::jsonb"
         ),
     )
+    # Required header column in an uploaded school-filter CSV — {"required_column": "..."}.
+    # Source of truth for school-filter upload validation and the pre-processor's row
+    # filter; lets the column name change per tenant without a code deploy.
+    school_filter_config = Column(
+        JSONB,
+        nullable=False,
+        server_default=text('\'{"required_column": "UDISE+ SCHOOL CODE"}\'::jsonb'),
+    )
     evidence_context_config = Column(JSONB, nullable=False)
     available_filters = Column(JSONB, nullable=True, server_default=text("'[]'::jsonb"))
     question_config = Column(

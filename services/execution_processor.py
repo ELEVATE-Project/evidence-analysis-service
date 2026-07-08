@@ -25,7 +25,11 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import SERVICE_ROOT, settings
-from core.constants import EVIDENCE_TYPE_EXTENSIONS, PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
+from core.constants import (
+    EVIDENCE_TYPE_EXTENSIONS,
+    PROCESSING_CONFIG_KEY_EVIDENCE_TYPES,
+    SCHOOL_FILTER_REQUIRED_COLUMN,
+)
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
@@ -384,6 +388,31 @@ def _resolve_evidence_type_extensions_from_config(db: Session, execution: Execut
     }
 
 
+def _resolve_school_filter_column_from_config(db: Session, execution: Execution) -> str:
+    """Per-tenant required column name for an uploaded school-filter CSV, sourced from
+    CsvSourceType.school_filter_config so the column name is changeable per tenant without
+    a deploy. Falls back to core.constants.SCHOOL_FILTER_REQUIRED_COLUMN when no active
+    config row exists.
+    """
+    csv_type_id = (execution.csv_type_id or "").strip()
+    source_type = (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == execution.tenant_code,
+            CsvSourceType.organization_code == execution.organization_code,
+            CsvSourceType.type_key == csv_type_id,
+            CsvSourceType.is_active.is_(True),
+        )
+        .first()
+        if csv_type_id
+        else None
+    )
+    school_filter_config = source_type.school_filter_config if source_type else None
+    if not isinstance(school_filter_config, dict) or not school_filter_config.get("required_column"):
+        return SCHOOL_FILTER_REQUIRED_COLUMN
+    return str(school_filter_config["required_column"]).strip() or SCHOOL_FILTER_REQUIRED_COLUMN
+
+
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     result = subprocess.run(
         command,
@@ -694,6 +723,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # Per-tenant type->extension map (DB-driven; see CsvSourceType.evidence_types_config)
         # passed to both scripts so a new type/extension is addable without a code change.
         evidence_types_to_validate_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
+        # Per-tenant required column name for an uploaded school-filter CSV (DB-driven; see
+        # CsvSourceType.school_filter_config), so the column name is changeable without a
+        # code change. Only meaningful when school filtering is actually enabled below.
+        school_filter_column = _resolve_school_filter_column_from_config(db, execution)
 
         preprocessor_cmd = [
             sys.executable,
@@ -716,6 +749,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             preprocessor_cmd.extend([
                 "--filter-csv", str(workspace.school_filter_csv),
                 "--use-school-filter", "true",
+                "--school-filter-column", school_filter_column,
             ])
         else:
             preprocessor_cmd.extend(["--use-school-filter", "false"])

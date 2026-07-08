@@ -81,8 +81,39 @@ class ConfigService:
         Supported contract:
         - type=project        -> project CSV source types (type_key=project_report).
         - type=evidence_type  -> allowed evidence types for the evidence-type filter.
+        - type=school_filter  -> required column name for the school-filter CSV.
         """
         normalized_type = (config_type or "").strip().lower()
+        if normalized_type == "school_filter":
+            tenant_code, organization_code = self._resolve_scope(current_user)
+            source_type = (
+                self.db.query(CsvSourceType)
+                .filter(
+                    CsvSourceType.tenant_code == tenant_code,
+                    CsvSourceType.organization_code == organization_code,
+                    CsvSourceType.is_active.is_(True),
+                    CsvSourceType.type_key == "project_report",
+                )
+                .first()
+            )
+            if not source_type:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="No active project_report CSV source type configured for this tenant/organization.",
+                )
+            school_filter_config = source_type.school_filter_config
+            required_column = (
+                school_filter_config.get("required_column")
+                if isinstance(school_filter_config, dict)
+                else None
+            )
+            if not required_column:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="school_filter_config is not configured for this tenant's CSV source type.",
+                )
+            return [{"required_column": str(required_column).strip()}]
+
         if normalized_type == "evidence_type":
             tenant_code, organization_code = self._resolve_scope(current_user)
             source_type = (
@@ -119,7 +150,7 @@ class ConfigService:
         if normalized_type != "project":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported config type. Use type=project or type=evidence_type.",
+                detail="Unsupported config type. Use type=project, type=evidence_type, or type=school_filter.",
             )
 
         tenant_code, organization_code = self._resolve_scope(current_user)
