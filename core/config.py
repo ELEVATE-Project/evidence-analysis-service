@@ -161,17 +161,12 @@ class Settings(BaseSettings):
     # upload exceeds MIN_ROWS_FOR_MAIN_BATCHING, the same manual/dynamic split the fine-grained
     # SPLIT_FILES setting above already uses, instead of a fixed all-or-nothing toggle.
     MAIN_FILE_SPLIT: str = ""  # "yes", "no", or "" for dynamic
-    MIN_ROWS_FOR_MAIN_BATCHING: int = 10000  # Below this, single main file even in dynamic mode
+    # Below this, single main file even in dynamic mode. Dynamic mode's batch count is also
+    # tiered off this same value (T): T-2T->2 batches, 2T-5T->5, 5T-10T->10, 10T-20T->20,
+    # >=20T-> row_count // T capped at MAX_MAIN_BATCHES. See _calculate_optimal_batch_count.
+    MIN_ROWS_FOR_MAIN_BATCHING: int = 10000
     MAIN_BATCH_ROWS_PER_BATCH: int = 10000  # Manual-mode target rows per main batch
-    MAX_MAIN_BATCHES: int = 200  # Manual-mode hard cap on number of main batches
-    # Dynamic mode derives its batch size from THIS instead of MAIN_BATCH_ROWS_PER_BATCH above.
-    # A main batch's row count isn't itself what drives peak memory — it's how many rows the
-    # fine-grained split (SPLIT_FILES block above) processes concurrently within that batch,
-    # which scales with batch size (~batch_rows / OPTIMAL_ROWS_PER_SPLIT). Sizing batches off a
-    # flat row-count target is an indirect proxy for that and silently drifts if
-    # OPTIMAL_ROWS_PER_SPLIT is ever retuned. This expresses the actual constraint directly:
-    # dynamic-mode batch size = MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH * OPTIMAL_ROWS_PER_SPLIT.
-    MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH: int = 25
+    MAX_MAIN_BATCHES: int = 200  # Manual-mode hard cap; also dynamic mode's cap above 20x threshold
     
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB

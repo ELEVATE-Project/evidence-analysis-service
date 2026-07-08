@@ -343,33 +343,33 @@ def _calculate_optimal_batch_count(row_count: int) -> tuple[bool, int, int, str]
         )
         return False, 1, row_count, "no_main_batch"
 
-    # Dynamic-mode batch size targets a fixed peak concurrency (MAX_CONCURRENT_WORKERS_PER_
-    # MAIN_BATCH), not a fixed row count — peak memory during a batch is driven by how many
-    # rows the fine-grained split processes at once within it (~rows / OPTIMAL_ROWS_PER_SPLIT
-    # workers), not by the batch's total row count sitting in a CSV file. Deriving the target
-    # this way keeps concurrency constant regardless of upload size, instead of drifting up
-    # for bigger files.
-    rows_per_batch_target = settings.MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH * settings.OPTIMAL_ROWS_PER_SPLIT
-    num_batches = max(1, math.ceil(row_count / rows_per_batch_target))
+    # Dynamic-mode batch count: explicit tiers expressed as multiples of
+    # MIN_ROWS_FOR_MAIN_BATCHING (T) rather than fixed absolute row counts, so the whole
+    # table scales automatically if T is ever reconfigured.
+    #   < T        : no batching (handled above)
+    #   T   – 2T   : 2 batches
+    #   2T  – 5T   : 5 batches
+    #   5T  – 10T  : 10 batches
+    #   10T – 20T  : 20 batches
+    #   >= 20T     : row_count // T, capped at MAX_MAIN_BATCHES
+    threshold = settings.MIN_ROWS_FOR_MAIN_BATCHING
+    if row_count < 2 * threshold:
+        num_batches = 2
+    elif row_count < 5 * threshold:
+        num_batches = 5
+    elif row_count < 10 * threshold:
+        num_batches = 10
+    elif row_count < 20 * threshold:
+        num_batches = 20
+    else:
+        num_batches = max(20, row_count // threshold)
+        num_batches = min(num_batches, settings.MAX_MAIN_BATCHES)
+
     rows_per_batch = math.ceil(row_count / num_batches)
-
-    # MAX_MAIN_BATCHES is never used to shrink num_batches back down here — doing so would
-    # silently inflate rows_per_batch (and therefore concurrency) past the target for large
-    # enough uploads, defeating the point of sizing dynamically at all. If the memory-safe
-    # count exceeds it, that's just a signal this upload is bigger than the configured
-    # expectation — log it, don't violate the concurrency bound to force-fit under the cap.
-    if num_batches > settings.MAX_MAIN_BATCHES:
-        logger.warning(
-            "Dynamic main-batching: %s rows needs %d batches to stay at ~%d concurrent workers/batch, "
-            "exceeding MAX_MAIN_BATCHES (%d) — proceeding anyway to preserve the concurrency bound "
-            "instead of inflating batch size.",
-            f"{row_count:,}", num_batches, settings.MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH, settings.MAX_MAIN_BATCHES,
-        )
-
     logger.info(
-        "Large upload detected: %s rows → %d main batches of ~%d rows each, "
-        "~%d concurrent workers/batch (strategy: dynamic_main_batch)",
-        f"{row_count:,}", num_batches, rows_per_batch, settings.MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH,
+        "Large upload detected: %s rows → %d main batches of ~%d rows each "
+        "(strategy: dynamic_main_batch, threshold=%s)",
+        f"{row_count:,}", num_batches, rows_per_batch, f"{threshold:,}",
     )
     return True, num_batches, rows_per_batch, "dynamic_main_batch"
 

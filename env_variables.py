@@ -348,11 +348,6 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "optional": True,
         "default": 200,
     },
-    "MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH": {
-        "message": "Dynamic-mode target peak concurrent workers per main batch",
-        "optional": True,
-        "default": 25,
-    },
     "REMOVE_INVALID_ROWS_FROM_OUTPUT": {
         "message": "Strip notValidated/Failed/blank-tag rows from the delivered output CSV",
         "optional": True,
