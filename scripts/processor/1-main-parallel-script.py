@@ -25,18 +25,21 @@ load_dotenv(dotenv_path=SERVICE_ROOT / ".env")
 # Allow importing from the service package (services/, core/, etc.)
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
-from core.constants import PROVIDER_GEMINI, PROVIDER_OPENROUTER, OPENROUTER_MODELS_URL, RELEVANCE_TAG_NOT_VALIDATED
+from core.constants import (
+    PROVIDER_GEMINI,
+    PROVIDER_OPENROUTER,
+    OPENROUTER_MODELS_URL,
+    RELEVANCE_TAG_RELEVANT,
+    RELEVANCE_TAG_PARTIAL,
+    RELEVANCE_TAG_IRRELEVANT,
+    RELEVANCE_TAG_NOT_VALIDATED,
+    EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS,
+)
 from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
 import time
 from collections import deque
 import hashlib
-
-# === Constants ===
-IMAGE_FORMATS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"}
-PDF_FORMATS = {".pdf"}
-EXCEL_FORMATS = {".xlsx", ".xls"}
-ALL_VALID_FORMATS = IMAGE_FORMATS | PDF_FORMATS | EXCEL_FORMATS
 
 
 def _parse_args():
@@ -56,10 +59,38 @@ def _parse_args():
         help="Input CSV column that holds mapped question text",
     )
     parser.add_argument("--max-processed-rows", type=int, default=None, help="Row cap; <=0 means no cap")
+    parser.add_argument(
+        "--max-relevant-per-user-task",
+        type=int,
+        default=None,
+        help="Per-(UUID, task) relevant-evidence cap; unset means no cap",
+    )
+    parser.add_argument(
+        "--evidence-types-to-validate",
+        default=None,
+        help="JSON object mapping evidence type key -> list of file extensions "
+        "(per-tenant, from CsvSourceType.evidence_types_config); absent = core.constants default",
+    )
     return parser.parse_args()
 
 
 ARGS = _parse_args()
+
+# === Constants ===
+# Per-tenant type->extension map, passed in by execution_processor.py from
+# CsvSourceType.evidence_types_config; falls back to the core.constants default when this
+# script is run standalone (no execution context to resolve tenant config from).
+if ARGS.evidence_types_to_validate:
+    EVIDENCE_TYPE_EXTENSIONS = {
+        str(key): [str(ext).lower() for ext in exts]
+        for key, exts in json.loads(ARGS.evidence_types_to_validate).items()
+    }
+else:
+    EVIDENCE_TYPE_EXTENSIONS = DEFAULT_EVIDENCE_TYPE_EXTENSIONS
+
+# Only IMAGE_FORMATS remains: used for Image Preview rendering. get_evidence_type()
+# resolves types dynamically from EVIDENCE_TYPE_EXTENSIONS directly (see below).
+IMAGE_FORMATS = set(EVIDENCE_TYPE_EXTENSIONS.get("image", []))
 
 MAX_PROCESSED_ROWS = (
     ARGS.max_processed_rows
@@ -129,13 +160,15 @@ RELEVANT_THRESHOLD = float(os.getenv("RELEVANT_THRESHOLD", "0.7"))  # Score >= 0
 PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "0.4"))  # Score >= 0.4 = Partially Relevant
 
 # === RELEVANT-EVIDENCE CAP (per UUID+task; distinct from the scoring thresholds above) ===
-# Set per execution by the service via env. Once a (UUID, task) pair accumulates
-# MAX_RELEVANT_PER_USER_TASK "Relevant" tags, remaining rows for that pair are written as
-# "notValidated" with NO API call. Relies on the pre-processor's group-aware splitting so
-# each (UUID, task) group stays inside one worker's file. The env var's presence is the
-# on/off signal itself — unset (None) means no cap, all rows processed.
-_max_relevant_env = os.getenv("MAX_RELEVANT_PER_USER_TASK")
-MAX_RELEVANT_PER_USER_TASK = int(_max_relevant_env) if _max_relevant_env else None
+# Set per execution by the service via CLI arg only. No env var fallback: the subprocess
+# environment is a copy of the service process's own env (see _inject_llm_env(os.environ.copy())
+# in execution_processor.py), so a globally-set env var would silently leak a cap into
+# executions whose threshold_config explicitly requested none. Once a (UUID, task) pair
+# accumulates MAX_RELEVANT_PER_USER_TASK "Relevant" tags, remaining rows for that pair are
+# written as "notValidated" with NO API call. Relies on the pre-processor's group-aware
+# splitting so each (UUID, task) group stays inside one worker's file. None means no cap,
+# all rows processed.
+MAX_RELEVANT_PER_USER_TASK = ARGS.max_relevant_per_user_task
 
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers
@@ -371,14 +404,13 @@ def save_checkpoint(checkpoint_data):
     except Exception as e:
         logger.error(f"[Checkpoint] Error saving checkpoint: {e}")
 
-def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None, cap_key=None):
+def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None):
     """
     Mark a row as processed in the checkpoint data.
 
-    cap_key: optional (UUID, task) tuple. When given it is stored alongside the row so the
-    per-(UUID, task) "Relevant" cap counters can be rebuilt on resume directly from the
-    checkpoint (no output-CSV re-parsing). Omitting it keeps the original entry shape, so
-    all existing callers are unaffected.
+    Note: the per-(UUID, task) relevant-evidence cap counters are rebuilt on resume by
+    re-parsing the partial output CSV directly (see _read_resume_state), not from this
+    checkpoint — this function only tracks row-level completion.
     """
     if not row_hash:
         return
@@ -395,8 +427,6 @@ def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None, ca
         'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
         'result_summary': row_result if row_result else 'processed'
     }
-    if cap_key:
-        entry['cap_key'] = list(cap_key)  # tuple -> list so it is JSON-serializable
     checkpoint_data[file_name]['processed_ids'][row_hash] = entry
 
     checkpoint_data[file_name]['total_processed'] = len(checkpoint_data[file_name]['processed_ids'])
@@ -442,7 +472,7 @@ def _read_resume_state(output_dir, input_filename, worker_id, identity_col="UUID
                 if url and url.lower() not in ("nan", "null", "none", ""):
                     processed_keys.add((ident, task, url))
         if {"UUID", INPUT_TASK_COLUMN, "Relevance Tag"}.issubset(df.columns):
-            rel_rows = df[df["Relevance Tag"] == "Relevant"]
+            rel_rows = df[df["Relevance Tag"] == RELEVANCE_TAG_RELEVANT]
             for _, r in rel_rows.iterrows():
                 key = (str(r["UUID"]).strip(), str(r[INPUT_TASK_COLUMN]).strip())
                 relevant_count_dict[key] = relevant_count_dict.get(key, 0) + 1
@@ -1280,11 +1310,11 @@ def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=N
         str: 'Relevant', 'Partially Relevant', or 'Irrelevant'
     """
     if not answers or not isinstance(answers, list):
-        return 'Irrelevant'
+        return RELEVANCE_TAG_IRRELEVANT
 
     total_answers = len(answers)
     if total_answers == 0:
-        return 'Irrelevant'
+        return RELEVANCE_TAG_IRRELEVANT
 
     # Use global mode if not specified
     if mode is None:
@@ -1429,11 +1459,11 @@ def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=N
 
     # Determine relevance tag based on combined score and configurable thresholds
     if combined_score >= RELEVANT_THRESHOLD:
-        tag = 'Relevant'
+        tag = RELEVANCE_TAG_RELEVANT
     elif combined_score >= PARTIALLY_RELEVANT_THRESHOLD:
-        tag = 'Partially Relevant'
+        tag = RELEVANCE_TAG_PARTIAL
     else:
-        tag = 'Irrelevant'
+        tag = RELEVANCE_TAG_IRRELEVANT
     
     logging.debug(f"[Relevance-{mode.upper()}] Final score: {combined_score:.2f} → Tag: {tag}")
     return tag
@@ -1690,17 +1720,16 @@ CORRECT JSON Response:
 
 # === Helper function to determine evidence type ===
 def get_evidence_type(url):
-    """Determine evidence type from URL. Returns: 'image', 'pdf', 'excel', or None"""
+    """Determine the evidence type from URL by matching its extension against the
+    configured EVIDENCE_TYPE_EXTENSIONS map — mirrors the pre-processor's resolver so a
+    tenant-custom type (any key beyond image/pdf/excel) is recognized consistently instead
+    of silently resolving to None here while the pre-processor already let the row through.
+    Returns the type key (e.g. 'image', 'pdf', 'excel', or any tenant-configured key), or
+    None if no extension matched."""
     url = str(url).strip().lower()
-    for ext in IMAGE_FORMATS:
-        if url.endswith(ext):
-            return "image"
-    for ext in PDF_FORMATS:
-        if url.endswith(ext):
-            return "pdf"
-    for ext in EXCEL_FORMATS:
-        if url.endswith(ext):
-            return "excel"
+    for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
+        if any(url.endswith(ext) for ext in extensions):
+            return type_key
     return None
 
 
@@ -2185,15 +2214,23 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # ===== RELEVANT CAP: per-(UUID, task) counters for this worker's file =====
         # Per-worker scope is correct because group-aware splitting keeps each (UUID, task)
         # pair inside a single file. Disabled gracefully when the input lacks a UUID column.
-        cap_enabled = MAX_RELEVANT_PER_USER_TASK is not None
-        if cap_enabled and "UUID" not in df_filtered.columns:
+        is_relevant_limit_enabled = MAX_RELEVANT_PER_USER_TASK is not None
+        if is_relevant_limit_enabled and "UUID" not in df_filtered.columns:
             logging.warning(f"[Worker {worker_id}] relevant_cap_disabled reason=missing_uuid_column file={input_filename}")
-            cap_enabled = False
-        relevant_count_per_key = dict(resume_relevant_counts) if cap_enabled else {}
+            is_relevant_limit_enabled = False
+        relevant_count_per_key = dict(resume_relevant_counts) if is_relevant_limit_enabled else {}
         not_validated_count = 0
-        if cap_enabled and relevant_count_per_key:
+        # AI success = the AI returned a usable response (Relevant/Partial/Irrelevant all
+        # count — a real verdict, not a failure). AI failure = no usable response at all
+        # (see the "Invalid response" branch below). Counted directly at the point each
+        # outcome is known, same as the other per-row counters here.
+        ai_success_count = 0
+        ai_failure_count = 0
+        success_list = []
+        failed_list = []
+        if is_relevant_limit_enabled and relevant_count_per_key:
             logging.info(f"[Worker {worker_id}] [Resume] Restored Relevant counts for {len(relevant_count_per_key)} (UUID, task) groups from output CSV")
-        if cap_enabled:
+        if is_relevant_limit_enabled:
             logging.info(f"[Worker {worker_id}] Relevant cap ENABLED: max {MAX_RELEVANT_PER_USER_TASK} Relevant per (UUID, task)")
 
         # 🆕 Add extra key columns if enabled
@@ -2219,7 +2256,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         )
         # On resume an existing partial file is already present; new rows must be
         # appended (no header).  On a fresh run we write the header first.
-        csv_header_written = os.path.exists(output_filename) and rows_skipped_from_checkpoint > 0
+        # Based on the output file's own existence/content, not on whether this run's
+        # resume-key matching happened to find rows to skip — those can diverge (e.g. a
+        # rerun whose current row set doesn't overlap the previous partial output), and
+        # treating "0 rows skipped" as "no prior output" would make the first flush open
+        # the file in write mode and truncate real prior results.
+        csv_header_written = os.path.exists(output_filename) and os.path.getsize(output_filename) > 0
         if csv_header_written:
             # Trim any incomplete trailing line left by a previous crash
             _trim_incomplete_last_line(output_filename, worker_id)
@@ -2280,12 +2322,13 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             # Computed once per row and reused by the success-path increment below. Mirrors
             # the "no question" skip path above to keep the parallel output lists aligned
             # (one append per list + processed_count += 1), but makes no API call.
-            # A blank/NaN UUID must not become a shared cap_key — str(nan) == "nan", which is
-            # truthy, so rows with missing UUIDs would otherwise all be grouped under the same
-            # ("nan", task) key and capped together even though they belong to different users.
+            # A blank/NaN UUID must not become a shared relevant_evidence_cap_key —
+            # str(nan) == "nan", which is truthy, so rows with missing UUIDs would otherwise
+            # all be grouped under the same ("nan", task) key and capped together even though
+            # they belong to different users.
             _row_uuid = str(row.get("UUID", "")).strip()
-            cap_key = (_row_uuid, task_name_raw) if cap_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
-            if cap_key and relevant_count_per_key.get(cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
+            relevant_evidence_cap_key = (_row_uuid, task_name_raw) if is_relevant_limit_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
+            if relevant_evidence_cap_key and relevant_count_per_key.get(relevant_evidence_cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
                 logging.info(f"[Worker {worker_id}] Row {idx+1} — Relevant cap reached for (UUID, task); marking notValidated")
                 task_types.append("Capped")
                 task_evidence_qa.append(None)
@@ -2294,7 +2337,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 for key in EXTRA_KEYS.keys():
                     extra_keys_data[key].append(None)
                 not_validated_count += 1
-                mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED, cap_key)
+                mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED)
                 processed_count += 1
 
                 # Flush batch to CSV if threshold reached (capped path)
@@ -2319,7 +2362,9 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
             task_types.append("User-Owned" if is_user_owned else "Standard")
 
-            # Determine evidence type and route to appropriate processor
+            # Determine evidence type and route to appropriate processor.
+            # Evidence-type filtering is enforced upstream by the pre-processor — rows with
+            # a disallowed evidence_type are dropped there and never reach this script.
             evidence_type = get_evidence_type(task_evidence)
             if evidence_type:
                 logging.info(f"[Worker {worker_id}] Processing {evidence_type} {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
@@ -2356,15 +2401,17 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                         reasonings=reasonings,
                     )
                     relevance_tags.append(relevance_tag)
+                    ai_success_count += 1
+                    success_list.append(task_evidence)
 
                     # Count this Relevant hit toward the per-(UUID, task) cap so later rows
                     # of the same pair are capped once the limit is reached.
-                    if cap_key and relevance_tag == "Relevant":
-                        relevant_count_per_key[cap_key] = relevant_count_per_key.get(cap_key, 0) + 1
+                    if relevant_evidence_cap_key and relevance_tag == RELEVANCE_TAG_RELEVANT:
+                        relevant_count_per_key[relevant_evidence_cap_key] = relevant_count_per_key.get(relevant_evidence_cap_key, 0) + 1
 
                     # ===== CHECKPOINT: Mark row as processed =====
                     rows_processed_new += 1
-                    mark_row_processed(input_filename, row_hash, checkpoint_data, relevance_tag, cap_key)
+                    mark_row_processed(input_filename, row_hash, checkpoint_data, relevance_tag)
 
                     # 🆕 Extract enrollment data from JSON response or use regex fallback
                     if ENABLE_EXTRA_KEYS:
@@ -2427,18 +2474,15 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                     logging.warning(f"[Worker {worker_id}] Invalid response at row {idx+1}")
                     task_evidence_qa.append(None)
                     task_evidence_qa_reason.append(None)
-                    relevance_tags.append('Irrelevant')
+                    relevance_tags.append(RELEVANCE_TAG_IRRELEVANT)
                     task_types[-1] = "Failed"  # Update the last task type
+                    ai_failure_count += 1
+                    failed_list.append(task_evidence)
                     for key in EXTRA_KEYS.keys():
                         extra_keys_data[key].append(None)
-            else:
-                logging.info(f"[Worker {worker_id}] Skipping unsupported evidence type at row {idx+1}")
-                task_evidence_qa.append(None)
-                task_evidence_qa_reason.append(None)
-                relevance_tags.append('Irrelevant')
-                task_types.append("Unsupported")
-                for key in EXTRA_KEYS.keys():
-                    extra_keys_data[key].append(None)
+            # No final else: the pre-processor's Rule 3 already drops any row whose evidence
+            # type can't be resolved at all, so evidence_type is never falsy here for rows
+            # reaching this point through the normal pre-processor -> processor pipeline.
 
             processed_count += 1
 
@@ -2502,6 +2546,16 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         )
         df_to_save = df_filtered  # already written to CSV; used only for stats below
 
+        # ===== SAFETY NET: ensure the output file exists even when nothing was ever flushed =====
+        # _flush_to_csv is only called from inside the per-row loop above, so if every row was
+        # excluded before reaching it (e.g. an evidence-type filter leaves 0 rows for this split),
+        # output_filename is never created and the Main merge step's pd.read_csv(f) crashes with
+        # FileNotFoundError. df_to_save always has the right columns even with 0 rows, so writing
+        # it here (header-only in that case) keeps the merge step working unconditionally.
+        if not os.path.exists(output_filename):
+            df_to_save.to_csv(output_filename, index=False)
+            logging.info(f"[Worker {worker_id}] No rows reached the flush step — wrote header-only output: {output_filename}")
+
         # Separate user-owned tasks for reporting
         user_owned_df = df_to_save[df_to_save["Task Type"] == "User-Owned"]
         if not user_owned_df.empty:
@@ -2513,13 +2567,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "user_owned_file": user_owned_filename,
                 "rows_attempted": processed_count,
                 "api_calls": rows_processed_new,  # Only count new API calls
-                # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
-                # API call — exclude them from success/failure so these stay scoped to rows
-                # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)),
-                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
+                # notValidated rows (relevant-cap reached) made no API call — exclude them
+                # from success/failure so these stay scoped to rows actually sent to the AI.
+                "api_successes": ai_success_count,
+                "api_failures": ai_failure_count,
+                "success_list": success_list,
+                "failed_list": failed_list,
                 "user_owned_count": len(user_owned_df),
                 "standard_count": len(df_to_save) - len(user_owned_df),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,
@@ -2531,13 +2584,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 "output_file": output_filename,
                 "rows_attempted": processed_count,
                 "api_calls": rows_processed_new,  # Only count new API calls
-                # notValidated rows (relevant-cap reached, or evidence-type excluded) made no
-                # API call — exclude them from success/failure so these stay scoped to rows
-                # actually sent to the AI.
-                "api_successes": sum(1 for tag in df_to_save["Relevance Tag"] if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)),
-                "api_failures": sum(1 for tag in df_to_save["Relevance Tag"] if tag == 'Irrelevant'),
-                "success_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag not in ('Irrelevant', RELEVANCE_TAG_NOT_VALIDATED)],
-                "failed_list": [task_evidence for task_evidence, tag in zip(df_to_save["Task Evidence"], df_to_save["Relevance Tag"]) if tag == 'Irrelevant'],
+                # notValidated rows (relevant-cap reached) made no API call — exclude them
+                # from success/failure so these stay scoped to rows actually sent to the AI.
+                "api_successes": ai_success_count,
+                "api_failures": ai_failure_count,
+                "success_list": success_list,
+                "failed_list": failed_list,
                 "user_owned_count": 0,
                 "standard_count": len(df_to_save),
                 "checkpoint_skipped": rows_skipped_from_checkpoint,
@@ -2627,7 +2679,41 @@ if __name__ == "__main__":
         )
     else:
         logging.info(f"[Main] Spawning {max_workers} workers for {len(input_files)} split files")
-    
+
+    # ===== RESUME VISIBILITY: report split-level progress up front =====
+    # Each worker figures out its own row-level resume state by comparing its split file
+    # against its own partial output CSV (see _read_resume_state). That answers "what rows
+    # are left" per split, but nothing previously reported the same signal in aggregate, so a
+    # resumed run gave no visibility into how many of the N splits were already done until
+    # every worker finished one by one. This block reads that same signal up front, purely
+    # for logging — it does not change which rows get processed.
+    def _count_csv_data_rows(path):
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                return max(sum(1 for _ in fh) - 1, 0)  # minus header row
+        except OSError:
+            return 0
+
+    _not_started = _in_progress = _complete = 0
+    for _split_file in input_files:
+        _stem = os.path.basename(_split_file).split(".")[0]
+        _partial_output = os.path.join(OUTPUT_DIR, f"processed_{_stem}.csv")
+        if not os.path.isfile(_partial_output):
+            _not_started += 1
+            continue
+        _split_rows = _count_csv_data_rows(_split_file)
+        _partial_rows = _count_csv_data_rows(_partial_output)
+        if _split_rows and _partial_rows >= _split_rows:
+            _complete += 1
+        else:
+            _in_progress += 1
+
+    logging.info(
+        f"[Main] Resume status (from existing partial output): "
+        f"{_complete}/{len(input_files)} splits already complete, "
+        f"{_in_progress} in progress, {_not_started} not started"
+    )
+
     # ===== CHECKPOINT: Load existing checkpoint =====
     global_checkpoint = load_checkpoint()
     
@@ -2765,14 +2851,14 @@ if __name__ == "__main__":
         
         logging.info(f"Total Rows Processed (sum of attempts): {total_rows_processed_all}")
         logging.info(f"Total Image Rows Processed: {total_api_calls_all}")
-        logging.info(f"  - ✅ Relevant / Partially Relevant: {total_api_success_all}")
-        logging.info(f"  - ⬜ Irrelevant: {total_api_failure_all}")
+        logging.info(f"  - ✅ AI responded (Relevant/Partial/Irrelevant): {total_api_success_all}")
+        logging.info(f"  - ⬜ Failed (no usable AI response): {total_api_failure_all}")
         if total_not_validated_all > 0:
             logging.info(f"  - 🚫 notValidated (relevant cap reached, no API call): {total_not_validated_all}")
         
         # Checkpoint statistics
         logging.info("")
-        logging.info(f"===== CHECKPOINT STATISTICS =====")
+        logging.info("===== CHECKPOINT STATISTICS =====")
         logging.info(f"Rows skipped (from checkpoint): {total_checkpoint_skipped_all}")
         logging.info(f"New API calls made: {total_checkpoint_new_all}")
         logging.info(f"API calls saved: {total_checkpoint_skipped_all}")
@@ -2837,18 +2923,18 @@ if __name__ == "__main__":
         logging.info(f"  - Total Tasks: {total_standard_count + total_user_owned_count}")
 
         if all_failed_lists:
-            logging.warning(f"List of Irrelevant Evidence URLs ({len(all_failed_lists)}):")
+            logging.warning(f"List of Evidence URLs with No Usable AI Response ({len(all_failed_lists)}):")
             for item in all_failed_lists:
                 logging.warning(f"  - {item}")
         else:
-            logging.info("✅ No irrelevant evidence recorded.")
+            logging.info("✅ No failed AI responses recorded.")
 
         if all_success_lists:
-            logging.info(f"List of Relevant / Partially Relevant Evidence URLs ({len(all_success_lists)}):")
+            logging.info(f"List of Evidence URLs the AI Responded To ({len(all_success_lists)}):")
             for item in all_success_lists:
                 logging.info(f"  - {item}")
         else:
-            logging.info("No relevant evidence recorded.")
+            logging.info("No AI responses recorded.")
             
         logging.info("="*80)
         logging.info("===== 🏁 END OF SUMMARY =====")
