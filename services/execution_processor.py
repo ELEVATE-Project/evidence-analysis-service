@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 import logging
 import os
 import shutil
@@ -24,6 +25,7 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import SERVICE_ROOT, settings
+from core.constants import EVIDENCE_TYPE_EXTENSIONS, PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
@@ -353,6 +355,35 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
     return columns
 
 
+def _resolve_evidence_type_extensions_from_config(db: Session, execution: Execution) -> dict[str, list[str]]:
+    """Per-tenant evidence-type -> file-extension map, sourced from
+    CsvSourceType.evidence_types_config so a new type/extension is addable without a deploy.
+    Falls back to core.constants.EVIDENCE_TYPE_EXTENSIONS when no active config row exists.
+    """
+    csv_type_id = (execution.csv_type_id or "").strip()
+    source_type = (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == execution.tenant_code,
+            CsvSourceType.organization_code == execution.organization_code,
+            CsvSourceType.type_key == csv_type_id,
+            CsvSourceType.is_active.is_(True),
+        )
+        .first()
+        if csv_type_id
+        else None
+    )
+    evidence_types_config = source_type.evidence_types_config if source_type else None
+    if not isinstance(evidence_types_config, list) or not evidence_types_config:
+        return EVIDENCE_TYPE_EXTENSIONS
+
+    return {
+        str(item["key"]): [str(ext) for ext in item.get("extensions", [])]
+        for item in evidence_types_config
+        if item.get("key")
+    }
+
+
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     result = subprocess.run(
         command,
@@ -367,8 +398,19 @@ def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
     stdout = (result.stdout or "").strip()
     stderr = (result.stderr or "").strip()
     combined_logs = f"{label} failed.\nSTDOUT:\n{stdout}\n\nSTDERR:\n{stderr}".strip()
+
+    # Scripts that abort on a known, actionable condition print "FATAL: <reason>" to stderr
+    # before exiting non-zero. Surface that reason as the failure message shown to the user
+    # (ExecutionResponse.failure_reason / failure email); otherwise fall back to the generic
+    # exit-code message. Full stdout/stderr is always kept in error_logs for debugging.
+    fatal_reason = next(
+        (line[len("FATAL: "):].strip() for line in reversed(stderr.splitlines()) if line.startswith("FATAL: ")),
+        None,
+    )
+    message = f"{label} failed: {fatal_reason}" if fatal_reason else f"{label} failed with exit code {result.returncode}"
+
     raise ExecutionProcessingError(
-        message=f"{label} failed with exit code {result.returncode}",
+        message=message,
         error_logs=combined_logs,
     )
 
@@ -627,7 +669,11 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # threshold_config shape: {"max_relevant_per_user_task": 5}, or None when no cap was requested.
         cap_config = execution.threshold_config if isinstance(execution.threshold_config, dict) else {}
         max_relevant = cap_config.get("max_relevant_per_user_task")
-        cap_enabled = isinstance(max_relevant, int) and max_relevant > 0
+        # bool is an int subclass in Python — isinstance(True, int) is True — so a malformed
+        # evidence_threshold: true from the client would otherwise silently enable a cap of 1.
+        is_relevant_limit_enabled = (
+            isinstance(max_relevant, int) and not isinstance(max_relevant, bool) and max_relevant > 0
+        )
 
         preprocessor_env = {
             **base_env,
@@ -638,6 +684,16 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         question_text_column = configured_columns.get("question_text_column", "")
         if question_task_column:
             preprocessor_env["PREPROCESS_QUESTION_TASK_COLUMN"] = question_task_column
+
+        processing_config = execution.processing_config if isinstance(execution.processing_config, dict) else {}
+        evidence_types = processing_config.get(PROCESSING_CONFIG_KEY_EVIDENCE_TYPES)
+        if not isinstance(evidence_types, list) or not evidence_types:
+            raise ExecutionProcessingError(
+                f"Execution {execution.id} is missing required evidence_types in processing_config"
+            )
+        # Per-tenant type->extension map (DB-driven; see CsvSourceType.evidence_types_config)
+        # passed to both scripts so a new type/extension is addable without a code change.
+        evidence_types_to_validate_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
 
         preprocessor_cmd = [
             sys.executable,
@@ -663,7 +719,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             ])
         else:
             preprocessor_cmd.extend(["--use-school-filter", "false"])
-        if cap_enabled:
+
+        preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
+        preprocessor_cmd.extend(["--evidence-types-to-validate", evidence_types_to_validate_json])
+        if is_relevant_limit_enabled:
             preprocessor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
         _run_command(preprocessor_cmd, preprocessor_env, "Pre-processor script")
 
@@ -711,18 +770,6 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
 
-        # Per-(user, task) relevant-evidence cap (config resolved above). Presence of
-        # MAX_RELEVANT_PER_USER_TASK in the env is itself the on/off signal for the
-        # processor — omitted entirely means no cap, all rows processed. Passed via
-        # env, not CLI, so the value never appears in `ps`.
-        if cap_enabled:
-            processor_env["MAX_RELEVANT_PER_USER_TASK"] = str(max_relevant)
-            logger.info(
-                "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
-                execution.id,
-                max_relevant,
-            )
-
         processor_cmd = [
             sys.executable,
             str(processor_script),
@@ -740,7 +787,22 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             str(workspace.questions_csv),
             "--max-processed-rows",
             str(settings.PROCESSOR_MAX_ROWS),
+            "--evidence-types-to-validate",
+            evidence_types_to_validate_json,
         ]
+
+        # Per-(user, task) relevant-evidence cap (config resolved above), not a secret —
+        # passed as a CLI arg like every other per-execution setting (task columns,
+        # --max-processed-rows), consistent with how the pre-processor already receives
+        # this same value. Omitted entirely means no cap, all rows processed.
+        if is_relevant_limit_enabled:
+            processor_cmd.extend(["--max-relevant-per-user-task", str(max_relevant)])
+            logger.info(
+                "relevant_cap_enabled  execution=%s  max_relevant_per_user_task=%s",
+                execution.id,
+                max_relevant,
+            )
+
         _run_command(processor_cmd, processor_env, "Processor script")
 
         if not workspace.final_output_csv.exists():
@@ -752,7 +814,16 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # file — unaffected by whether REMOVE_INVALID_ROWS_FROM_OUTPUT later trims the
         # deliverable. Read before any cleanup so this metric never changes meaning.
         unfiltered_bytes = workspace.final_output_csv.read_bytes()
-        processed_rows, _ = _count_csv_rows(workspace.final_output_csv)
+        processed_rows, processed_rows_is_estimate = _count_csv_rows(workspace.final_output_csv)
+        if processed_rows_is_estimate:
+            # _count_csv_rows() estimates from a sample on large files. processed_rows,
+            # total_rows, and average_processing_time below are derived from this value,
+            # so flag it — those persisted metrics are an approximation, not exact.
+            logger.warning(
+                "completion_metrics_estimated  execution=%s  processed_rows=%d",
+                execution.id,
+                processed_rows,
+            )
 
         # Always upload the unfiltered merged output first, before any row-removal step,
         # so the full evidence trail survives in cloud storage even when the cleanup below
