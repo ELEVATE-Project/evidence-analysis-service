@@ -336,7 +336,7 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
     "MIN_ROWS_FOR_MAIN_BATCHING": {
         "message": "Row-count threshold below which dynamic mode uses a single main file",
         "optional": True,
-        "default": 50000,
+        "default": 10000,
     },
     "MAIN_BATCH_ROWS_PER_BATCH": {
         "message": "Target rows per main batch",
@@ -347,6 +347,11 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "message": "Hard cap on the number of main batches",
         "optional": True,
         "default": 200,
+    },
+    "MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH": {
+        "message": "Dynamic-mode target peak concurrent workers per main batch",
+        "optional": True,
+        "default": 25,
     },
     "REMOVE_INVALID_ROWS_FROM_OUTPUT": {
         "message": "Strip notValidated/Failed/blank-tag rows from the delivered output CSV",

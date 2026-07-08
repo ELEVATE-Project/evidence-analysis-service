@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings
 from typing import Dict, List
 from core.constants import PROVIDER_GEMINI
 from env_variables import validate_environment
+from utils.env_parsing import parse_model_cost_settings
 
 SERVICE_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE_PATH = SERVICE_ROOT / ".env"
@@ -125,16 +126,17 @@ class Settings(BaseSettings):
     # to cloud storage first regardless of this setting, so disabling it only changes what the
     # deliverable looks like — the full audit trail is never lost.
     REMOVE_INVALID_ROWS_FROM_OUTPUT: bool = True
-    # Fallback cost-per-row used for any ai_model_id not present in MODEL_COST_PER_INPUT_ROW
-    # below (and while that map is empty, for every model — same estimate regardless of
-    # model, today's behavior, unchanged).
-    ESTIMATED_COST_PER_INPUT_ROW: float = 0.001
-    # Per-model override, keyed by ai_model_id (e.g. "gemini-2.5-flash",
-    # "google/gemini-2.5-flash-lite"). Empty by default — real per-model pricing needs to be
-    # populated by whoever owns billing numbers; until then every model uses the flat
-    # ESTIMATED_COST_PER_INPUT_ROW above. JSON object via env, e.g.
-    # MODEL_COST_PER_INPUT_ROW={"gemini-2.5-flash": 0.001, "google/gemini-2.5-flash-lite": 0.0005}
-    MODEL_COST_PER_INPUT_ROW: Dict[str, float] = {}
+    # Cost-per-row estimate, keyed by ai_model_id. google/gemini-2.5-flash-lite is the
+    # observed average actual_cost/row from a real mixed image+pdf run (82 rows, $0.0224
+    # total); gemini-2.0-flash is derived from that same run's token counts priced at its
+    # GEMINI_PRICING rate. Still overridable via the MODEL_COST_PER_INPUT_ROW env var (JSON
+    # object) for any model, same as every other Settings field. Any ai_model_id not present
+    # here falls back to the private _DEFAULT_ESTIMATED_COST_PER_ROW constant in
+    # execution_service.py.
+    MODEL_COST_PER_INPUT_ROW: Dict[str, float] = {
+        "google/gemini-2.5-flash-lite": 0.000273,
+        "gemini-2.0-flash": 0.000204,
+    }
     ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
 
     # File Splitting Configuration
@@ -159,9 +161,17 @@ class Settings(BaseSettings):
     # upload exceeds MIN_ROWS_FOR_MAIN_BATCHING, the same manual/dynamic split the fine-grained
     # SPLIT_FILES setting above already uses, instead of a fixed all-or-nothing toggle.
     MAIN_FILE_SPLIT: str = ""  # "yes", "no", or "" for dynamic
-    MIN_ROWS_FOR_MAIN_BATCHING: int = 50000  # Below this, single main file even in dynamic mode
-    MAIN_BATCH_ROWS_PER_BATCH: int = 10000  # Target rows per main batch (count is derived)
-    MAX_MAIN_BATCHES: int = 200  # Hard cap on number of main batches
+    MIN_ROWS_FOR_MAIN_BATCHING: int = 10000  # Below this, single main file even in dynamic mode
+    MAIN_BATCH_ROWS_PER_BATCH: int = 10000  # Manual-mode target rows per main batch
+    MAX_MAIN_BATCHES: int = 200  # Manual-mode hard cap on number of main batches
+    # Dynamic mode derives its batch size from THIS instead of MAIN_BATCH_ROWS_PER_BATCH above.
+    # A main batch's row count isn't itself what drives peak memory — it's how many rows the
+    # fine-grained split (SPLIT_FILES block above) processes concurrently within that batch,
+    # which scales with batch size (~batch_rows / OPTIMAL_ROWS_PER_SPLIT). Sizing batches off a
+    # flat row-count target is an indirect proxy for that and silently drifts if
+    # OPTIMAL_ROWS_PER_SPLIT is ever retuned. This expresses the actual constraint directly:
+    # dynamic-mode batch size = MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH * OPTIMAL_ROWS_PER_SPLIT.
+    MAX_CONCURRENT_WORKERS_PER_MAIN_BATCH: int = 25
     
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
@@ -220,20 +230,10 @@ class Settings(BaseSettings):
 
         return value
 
-    @field_validator("MODEL_COST_PER_INPUT_ROW", mode="before")
-    @classmethod
-    def parse_model_cost_settings(cls, value):
-        """Accept a JSON object mapping ai_model_id -> cost-per-row from env."""
-        if isinstance(value, dict):
-            return value
-
-        if isinstance(value, str):
-            raw = value.strip()
-            if not raw:
-                return {}
-            return json.loads(raw)
-
-        return value
+    # Function body lives in utils/env_parsing.py — config.py only registers it.
+    _validate_model_cost_per_input_row = field_validator(
+        "MODEL_COST_PER_INPUT_ROW", mode="before"
+    )(classmethod(parse_model_cost_settings))
 
     class Config:
         env_file = str(ENV_FILE_PATH)
