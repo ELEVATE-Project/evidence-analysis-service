@@ -34,10 +34,16 @@ def _parse_args():
 
 
 def merge_csv_files(input_csvs: list[str], output_csv: str) -> int:
-    """Concatenate input_csvs (in the given order) into output_csv. Returns total rows written."""
-    merged_df = pd.concat([pd.read_csv(f) for f in input_csvs], ignore_index=True)
-    merged_df.to_csv(output_csv, index=False)
-    return len(merged_df)
+    """Concatenate input_csvs (in the given order) into output_csv, one file at a time so
+    memory use is bounded to a single batch rather than every batch loaded simultaneously.
+    Returns total rows written."""
+    total_rows = 0
+    with open(output_csv, "w", newline="", encoding="utf-8") as out_f:
+        for i, csv_path in enumerate(input_csvs):
+            df = pd.read_csv(csv_path)
+            df.to_csv(out_f, index=False, header=(i == 0))
+            total_rows += len(df)
+    return total_rows
 
 
 if __name__ == "__main__":

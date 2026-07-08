@@ -844,6 +844,12 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--evidence-types-to-validate",
                 evidence_types_to_validate_json,
             ]
+            # Forced off here, same as the single-file and per-batch preprocessor calls below —
+            # this branch doesn't wire real school-filter support into the batch-cut step yet.
+            # Without this, the arg is omitted entirely and the script falls back to whatever
+            # USE_SCHOOL_FILTER happens to be set to in the environment, inconsistent with the
+            # other two call sites which explicitly force it false.
+            batch_cut_cmd.extend(["--use-school-filter", "false"])
             if is_relevant_limit_enabled:
                 # Keep (UUID, task) groups within a single main batch so per-batch
                 # cap counts stay correct (mirrors group-aware fine-splitting below).

@@ -323,6 +323,11 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "optional": True,
         "default": "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py",
     },
+    "MERGE_SCRIPT_PATH": {
+        "message": "Batch-output merge script path",
+        "optional": True,
+        "default": "scripts/processor/3-merge-batch-outputs.py",
+    },
     "REMOVE_INVALID_ROWS_FROM_OUTPUT": {
         "message": "Strip notValidated/Failed/blank-tag rows from the delivered output CSV",
         "optional": True,
