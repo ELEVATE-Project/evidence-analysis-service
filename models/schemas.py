@@ -88,7 +88,7 @@ class ExecutionCreate(BaseModel):
     # Per-(user, task) relevant-evidence cap. When set, the AI stops validating a
     # user's task once this many evidences are tagged "Relevant"; the rest are written
     # as "notValidated" with no API call. Omitted/None = feature off (current behavior).
-    evidence_threshold: Optional[int] = Field(None, ge=1, le=100)
+    evidence_threshold: Optional[int] = Field(None, ge=1, le=10)
 
     @field_validator("states", mode="before")
     @classmethod
