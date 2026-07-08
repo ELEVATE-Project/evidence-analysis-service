@@ -833,6 +833,32 @@ class ExecutionService:
         }
 
     @staticmethod
+    def _cached_batch_row_count(merged_output_csv: Path) -> int:
+        """Row count for a *completed* batch's merged_output.csv, cached to a sidecar file.
+
+        A finished batch's output never changes, but _read_processor_checkpoint_file below
+        re-counts every completed batch on every status poll — for an execution with many
+        batches, polled every few seconds, that's a full re-scan of every prior batch's
+        output on each request. Caching to a tiny sidecar file (written once, read many
+        times) turns every poll after the first into a cheap int-parse instead.
+        """
+        cache_file = merged_output_csv.with_suffix(".rowcount")
+        if cache_file.exists():
+            try:
+                return int(cache_file.read_text().strip())
+            except (ValueError, OSError):
+                pass
+
+        from services.execution_processor import _count_csv_rows
+
+        row_count, _ = _count_csv_rows(merged_output_csv)
+        try:
+            cache_file.write_text(str(row_count))
+        except OSError:
+            pass
+        return row_count
+
+    @staticmethod
     def _read_processor_checkpoint_file(execution_id: UUID) -> dict[str, Any]:
         """
         Read real-time row progress for an in-progress execution.
@@ -853,8 +879,6 @@ class ExecutionService:
                     execution_root / "processor_output" / ".processing_checkpoint.json"
                 )
 
-            from services.execution_processor import _count_csv_rows
-
             with open(manifest_file, 'r') as f:
                 total_batches = json.load(f).get('total_batches', 0)
 
@@ -864,8 +888,7 @@ class ExecutionService:
                 batch_output_dir = execution_root / "processor_output" / f"batch_{batch_index:03d}"
                 merged_output_csv = batch_output_dir / "merged_output.csv"
                 if merged_output_csv.exists():
-                    row_count, _ = _count_csv_rows(merged_output_csv)
-                    total_processed += row_count
+                    total_processed += ExecutionService._cached_batch_row_count(merged_output_csv)
                     continue
 
                 # First batch without a merged output yet is the one in flight.
