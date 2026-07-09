@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic import field_validator
+from pydantic import computed_field, field_validator
 from pydantic_settings import BaseSettings
 from typing import Dict, List
 from core.constants import PROVIDER_GEMINI
@@ -178,7 +178,19 @@ class Settings(BaseSettings):
     
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = int(os.getenv("MAX_UPLOAD_SIZE", str(100 * 1024 * 1024)))  # 100MB
-    ALLOWED_EXTENSIONS: List[str] = [".csv"]
+    # Raw string, not List[str]: pydantic-settings auto-JSON-decodes any env value for a
+    # complex-typed (List/Dict) field before validators ever run, so a real ALLOWED_EXTENSIONS
+    # env var in comma-separated format (as documented in .env.example) would crash the app at
+    # startup with an uncaught SettingsError — the JSON branch below never gets a chance to
+    # fall back to comma-splitting. Storing this as a plain str sidesteps that entirely; the
+    # computed_field property below does the actual JSON-or-comma-separated parsing.
+    ALLOWED_EXTENSIONS_RAW: str = os.getenv("ALLOWED_EXTENSIONS", ".csv")
+
+    @computed_field
+    @property
+    def ALLOWED_EXTENSIONS(self) -> List[str]:
+        return Settings.parse_list_settings(self.ALLOWED_EXTENSIONS_RAW)
+
     SIGNED_UPLOAD_URL_EXPIRY_SECONDS: int = int(os.getenv("SIGNED_UPLOAD_URL_EXPIRY_SECONDS", "900"))
     SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS: int = int(os.getenv("SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS", "600"))
 
@@ -214,10 +226,16 @@ class Settings(BaseSettings):
 
         return raw if raw.startswith("/") else f"/{raw}"
 
-    @field_validator("CORS_ORIGINS", "ALLOWED_EXTENSIONS", mode="before")
+    @field_validator("CORS_ORIGINS", mode="before")
     @classmethod
     def parse_list_settings(cls, value):
-        """Accept JSON arrays or comma-separated env values."""
+        """Accept JSON arrays or comma-separated env values.
+
+        Also called directly (not as a field_validator) by the ALLOWED_EXTENSIONS
+        computed_field property above — ALLOWED_EXTENSIONS isn't a field_validator target
+        itself since pydantic-settings would auto-JSON-decode its raw env string before this
+        validator ever ran, crashing on the documented comma-separated format.
+        """
         if isinstance(value, list):
             return value
 
