@@ -161,10 +161,10 @@ class Settings(BaseSettings):
     # upload exceeds MIN_ROWS_FOR_MAIN_BATCHING, the same manual/dynamic split the fine-grained
     # SPLIT_FILES setting above already uses, instead of a fixed all-or-nothing toggle.
     MAIN_FILE_SPLIT: str = ""  # "yes", "no", or "" for dynamic
-    # Below this, single main file even in dynamic mode. Dynamic mode's batch count is also
-    # tiered off this same value (T): T-2T->2 batches, 2T-5T->5, 5T-10T->10, 10T-20T->20,
-    # >=20T-> row_count // T capped at MAX_MAIN_BATCHES. See _calculate_optimal_batch_count.
-    MIN_ROWS_FOR_MAIN_BATCHING: int = 10000
+    # Below this, single main file even in dynamic mode. Also the target rows per batch once
+    # batching kicks in (num_batches = ceil(row_count / this)) — every batch stays at ~this
+    # size no matter how large the upload is. See _calculate_optimal_batch_count.
+    MIN_ROWS_FOR_MAIN_BATCHING: int = 5000
     MAIN_BATCH_ROWS_PER_BATCH: int = 10000  # Manual-mode target rows per main batch
     MAX_MAIN_BATCHES: int = 200  # Manual-mode hard cap; also dynamic mode's cap above 20x threshold
     

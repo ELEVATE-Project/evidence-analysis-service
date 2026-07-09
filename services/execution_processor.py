@@ -343,22 +343,12 @@ def _calculate_optimal_batch_count(row_count: int) -> tuple[bool, int, int, str]
         )
         return False, 1, row_count, "no_main_batch"
 
-    # Dynamic-mode batch count: two explicit small-file tiers, then a fixed rows-per-batch
-    # target beyond that — all expressed relative to MIN_ROWS_FOR_MAIN_BATCHING (T) so the
-    # whole rule scales automatically if T is ever reconfigured.
-    #   <= T       : 2 batches
-    #   T  – 2T    : 5 batches
-    #   >  2T      : ceil(row_count / (T/2)) — no upper cap on batch count, so rows/batch
-    #                stays fixed at T/2 (default 5,000) no matter how large the upload is,
-    #                rather than letting batch size grow past the target for huge files.
+    # Dynamic-mode batch count: one rule, no separate tiers. MIN_ROWS_FOR_MAIN_BATCHING is
+    # both the no-split floor (checked above) and the target rows per batch, so every batch
+    # stays at ~that size no matter how large the upload is — no upper cap on batch count,
+    # so batch size never grows past the target for huge files.
     threshold = settings.MIN_ROWS_FOR_MAIN_BATCHING
-    if row_count <= threshold:
-        num_batches = 2
-    elif row_count <= 2 * threshold:
-        num_batches = 5
-    else:
-        split_size = threshold // 2
-        num_batches = math.ceil(row_count / split_size)
+    num_batches = math.ceil(row_count / threshold)
 
     rows_per_batch = math.ceil(row_count / num_batches)
     logger.info(

@@ -334,9 +334,9 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "default": "",
     },
     "MIN_ROWS_FOR_MAIN_BATCHING": {
-        "message": "Row-count threshold below which dynamic mode uses a single main file",
+        "message": "Row-count threshold below which dynamic mode uses a single main file; also the target rows per batch",
         "optional": True,
-        "default": 10000,
+        "default": 5000,
     },
     "MAIN_BATCH_ROWS_PER_BATCH": {
         "message": "Target rows per main batch",
