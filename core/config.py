@@ -28,112 +28,112 @@ class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
     
     # Application
-    APP_NAME: str = "Evidence Analysis System"
-    APP_VERSION: str = "1.0.0"
-    DEBUG: bool = False
+    APP_NAME: str = os.getenv("APP_NAME", "Evidence Analysis System")
+    APP_VERSION: str = os.getenv("APP_VERSION", "1.0.0")
+    DEBUG: bool = os.getenv("DEBUG", "false").lower() == "true"
 
     # Base path prefix the app is mounted under (e.g. "/evidence-analysis"
     # when served behind a reverse proxy/gateway). Leave empty to serve at root.
-    API_BASE_PATH: str = ""
-    
+    API_BASE_PATH: str = os.getenv("API_BASE_PATH", "")
+
     # Database
-    DATABASE_URL: str = ""
-    
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "")
+
     # JWT Authentication
-    JWT_SECRET_KEY: str = ""
-    JWT_ALGORITHM: str = "HS256"
-    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
+    JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
     
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
 
     # Execution defaults
-    DEFAULT_TENANT_CODE: str = "default"
-    DEFAULT_ORGANIZATION_CODE: str = "default_code"
+    DEFAULT_TENANT_CODE: str = os.getenv("DEFAULT_TENANT_CODE", "default")
+    DEFAULT_ORGANIZATION_CODE: str = os.getenv("DEFAULT_ORGANIZATION_CODE", "default_code")
 
     # Entity Management Service
-    ENTITY_MGMT_BASE_URL: str = ""
-    ENTITY_MGMT_TENANT_ID: str = "shikshalokam"
-    ENTITY_MGMT_ORIGIN: str = "https://dev.elevate-sandbox.shikshalokam.org"
-    ENTITY_MGMT_TIMEOUT_SECONDS: float = 10.0
-    ENTITY_MGMT_RETRY_ATTEMPTS: int = 2
-    ENTITY_MGMT_RETRY_BACKOFF_SECONDS: float = 0.5
-    ENTITY_MGMT_CACHE_ENABLED: bool = True
-    ENTITY_MGMT_STATES_CACHE_TTL_SECONDS: int = 900
-    
+    ENTITY_MGMT_BASE_URL: str = os.getenv("ENTITY_MGMT_BASE_URL", "")
+    ENTITY_MGMT_TENANT_ID: str = os.getenv("ENTITY_MGMT_TENANT_ID", "shikshalokam")
+    ENTITY_MGMT_ORIGIN: str = os.getenv("ENTITY_MGMT_ORIGIN", "https://dev.elevate-sandbox.shikshalokam.org")
+    ENTITY_MGMT_TIMEOUT_SECONDS: float = float(os.getenv("ENTITY_MGMT_TIMEOUT_SECONDS", "10.0"))
+    ENTITY_MGMT_RETRY_ATTEMPTS: int = int(os.getenv("ENTITY_MGMT_RETRY_ATTEMPTS", "2"))
+    ENTITY_MGMT_RETRY_BACKOFF_SECONDS: float = float(os.getenv("ENTITY_MGMT_RETRY_BACKOFF_SECONDS", "0.5"))
+    ENTITY_MGMT_CACHE_ENABLED: bool = os.getenv("ENTITY_MGMT_CACHE_ENABLED", "true").lower() == "true"
+    ENTITY_MGMT_STATES_CACHE_TTL_SECONDS: int = int(os.getenv("ENTITY_MGMT_STATES_CACHE_TTL_SECONDS", "900"))
+
     # File Storage (standardized across AWS/GCP)
-    CLOUD_ENDPOINT: str = ""
-    CLOUD_STORAGE: str = "GCP"
-    CLOUD_STORAGE_ACCOUNTNAME: str = ""
-    CLOUD_STORAGE_BUCKETNAME: str = ""
-    CLOUD_STORAGE_PROVIDER: str = "gcp"  # gcp or aws
-    CLOUD_STORAGE_REGION: str = ""
-    CLOUD_STORAGE_SECRET: str = ""
-    CLOUD_STORAGE_BUCKET_TYPE: str = "private"
-    
+    CLOUD_ENDPOINT: str = os.getenv("CLOUD_ENDPOINT", "")
+    CLOUD_STORAGE: str = os.getenv("CLOUD_STORAGE", "GCP")
+    CLOUD_STORAGE_ACCOUNTNAME: str = os.getenv("CLOUD_STORAGE_ACCOUNTNAME", "")
+    CLOUD_STORAGE_BUCKETNAME: str = os.getenv("CLOUD_STORAGE_BUCKETNAME", "")
+    CLOUD_STORAGE_PROVIDER: str = os.getenv("CLOUD_STORAGE_PROVIDER", "gcp")  # gcp or aws
+    CLOUD_STORAGE_REGION: str = os.getenv("CLOUD_STORAGE_REGION", "")
+    CLOUD_STORAGE_SECRET: str = os.getenv("CLOUD_STORAGE_SECRET", "")
+    CLOUD_STORAGE_BUCKET_TYPE: str = os.getenv("CLOUD_STORAGE_BUCKET_TYPE", "private")
+
     # Local Storage
-    LOCAL_STORAGE_PATH: str = "./uploads"
-    
+    LOCAL_STORAGE_PATH: str = os.getenv("LOCAL_STORAGE_PATH", "./uploads")
+
     # LLM Provider Selection
-    LLM_PROVIDER: str = PROVIDER_GEMINI
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", PROVIDER_GEMINI)
 
     # AI Models (Gemini)
-    GEMINI_API_KEY_1: str = ""
-    GEMINI_API_KEY_2: str = ""
-    GEMINI_API_KEY_3: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_API_KEY_1: str = os.getenv("GEMINI_API_KEY_1", "")
+    GEMINI_API_KEY_2: str = os.getenv("GEMINI_API_KEY_2", "")
+    GEMINI_API_KEY_3: str = os.getenv("GEMINI_API_KEY_3", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     # OpenRouter
-    OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
-    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
-    
+    OPENROUTER_MODEL: str = os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite")
+    OPENROUTER_BASE_URL: str = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+
     # Notification control
-    IS_NOTIFICATION_ENABLED: bool = True
-    
+    IS_NOTIFICATION_ENABLED: bool = os.getenv("IS_NOTIFICATION_ENABLED", "true").lower() == "true"
+
     # Email (SMTP)
-    SMTP_HOST: str = ""
-    SMTP_PORT: int = 587
-    SMTP_API_KEY: str = ""
-    SMTP_USER: str = ""
-    SMTP_PASSWORD: str = ""
-    SMTP_USE_TLS: bool = True
-    SMTP_TIMEOUT_SECONDS: int = 30
-    SMTP_MAX_RETRIES: int = 3
-    SMTP_RETRY_BACKOFF_SECONDS: int = 1
-    SMTP_FROM_EMAIL: str = ""
-    SMTP_FROM_NAME: str = "Evidence Analysis System"
-    PORTAL_BASE_URL: str = "http://localhost:5173"
-    
+    SMTP_HOST: str = os.getenv("SMTP_HOST", "")
+    SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_API_KEY: str = os.getenv("SMTP_API_KEY", "")
+    SMTP_USER: str = os.getenv("SMTP_USER", "")
+    SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+    SMTP_USE_TLS: bool = os.getenv("SMTP_USE_TLS", "true").lower() == "true"
+    SMTP_TIMEOUT_SECONDS: int = int(os.getenv("SMTP_TIMEOUT_SECONDS", "30"))
+    SMTP_MAX_RETRIES: int = int(os.getenv("SMTP_MAX_RETRIES", "3"))
+    SMTP_RETRY_BACKOFF_SECONDS: int = int(os.getenv("SMTP_RETRY_BACKOFF_SECONDS", "1"))
+    SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "")
+    SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "Evidence Analysis System")
+    PORTAL_BASE_URL: str = os.getenv("PORTAL_BASE_URL", "http://localhost:5173")
+
     # Server
-    APP_PORT: int = 8000
+    APP_PORT: int = int(os.getenv("APP_PORT", "8000"))
 
     # Background Processing
-    MAX_CONCURRENT_JOBS: int = 5
-    WORKER_CHECK_INTERVAL: int = 5  # seconds
+    MAX_CONCURRENT_JOBS: int = int(os.getenv("MAX_CONCURRENT_JOBS", "5"))
+    WORKER_CHECK_INTERVAL: int = int(os.getenv("WORKER_CHECK_INTERVAL", "5"))  # seconds
 
     # Celery + RabbitMQ queue processing
-    CELERY_BROKER_URL: str = "amqp://guest:guest@localhost:5672//"
-    CELERY_RESULT_BACKEND: str = "rpc://"
-    CELERY_TASK_QUEUE: str = "execution_queue"
-    CELERY_TASK_ROUTING_KEY: str = "execution.process"
-    CELERY_MAX_RETRIES: int = 3
-    CELERY_RETRY_BACKOFF_SECONDS: int = 30
-    CELERY_WORKER_CONCURRENCY: int = 2
-    CELERY_WORKER_POOL: str = "threads"  # "threads" avoids macOS fork-safety SIGABRT; use "prefork" on Linux
+    CELERY_BROKER_URL: str = os.getenv("CELERY_BROKER_URL", "amqp://guest:guest@localhost:5672//")
+    CELERY_RESULT_BACKEND: str = os.getenv("CELERY_RESULT_BACKEND", "rpc://")
+    CELERY_TASK_QUEUE: str = os.getenv("CELERY_TASK_QUEUE", "execution_queue")
+    CELERY_TASK_ROUTING_KEY: str = os.getenv("CELERY_TASK_ROUTING_KEY", "execution.process")
+    CELERY_MAX_RETRIES: int = int(os.getenv("CELERY_MAX_RETRIES", "3"))
+    CELERY_RETRY_BACKOFF_SECONDS: int = int(os.getenv("CELERY_RETRY_BACKOFF_SECONDS", "30"))
+    CELERY_WORKER_CONCURRENCY: int = int(os.getenv("CELERY_WORKER_CONCURRENCY", "2"))
+    CELERY_WORKER_POOL: str = os.getenv("CELERY_WORKER_POOL", "threads")  # "threads" avoids macOS fork-safety SIGABRT; use "prefork" on Linux
 
     # Execution workspace + script runtime
-    EXECUTION_WORKSPACE_ROOT: str = "/tmp/evidence_analysis/executions"
-    EXECUTION_CLEANUP_ON_SUCCESS: bool = True
+    EXECUTION_WORKSPACE_ROOT: str = os.getenv("EXECUTION_WORKSPACE_ROOT", "/tmp/evidence_analysis/executions")
+    EXECUTION_CLEANUP_ON_SUCCESS: bool = os.getenv("EXECUTION_CLEANUP_ON_SUCCESS", "true").lower() == "true"
     PREPROCESS_SCRIPT_PATH: str = os.getenv("PREPROCESS_SCRIPT_PATH", "scripts/pre-processor/1-pre-processor.py")
     PROCESSOR_SCRIPT_PATH: str = os.getenv("PROCESSOR_SCRIPT_PATH", "scripts/processor/1-main-parallel-script.py")
     CLEANUP_SCRIPT_PATH: str = os.getenv("CLEANUP_SCRIPT_PATH", "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py")
     MERGE_SCRIPT_PATH: str = os.getenv("MERGE_SCRIPT_PATH", "scripts/processor/3-merge-batch-outputs.py")
-    PROCESSOR_MAX_ROWS: int = 0
+    PROCESSOR_MAX_ROWS: int = int(os.getenv("PROCESSOR_MAX_ROWS", "0"))
     # Strip rows with no AI-evaluation result (notValidated/Failed/Unsupported/blank-tag) from
     # the delivered output CSV before upload. The unfiltered merged output is always uploaded
     # to cloud storage first regardless of this setting, so disabling it only changes what the
     # deliverable looks like — the full audit trail is never lost.
-    REMOVE_INVALID_ROWS_FROM_OUTPUT: bool = True
+    REMOVE_INVALID_ROWS_FROM_OUTPUT: bool = os.getenv("REMOVE_INVALID_ROWS_FROM_OUTPUT", "true").lower() == "true"
     # Cost-per-row estimate, keyed by ai_model_id. google/gemini-2.5-flash-lite is the
     # observed average actual_cost/row from a real mixed image+pdf run (82 rows, $0.0224
     # total); gemini-2.0-flash is derived from that same run's token counts priced at its
@@ -145,21 +145,21 @@ class Settings(BaseSettings):
         "google/gemini-2.5-flash-lite": 0.000273,
         "gemini-2.0-flash": 0.000204,
     }
-    ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = 0.5
+    ESTIMATED_TIME_SECONDS_PER_INPUT_ROW: float = float(os.getenv("ESTIMATED_TIME_SECONDS_PER_INPUT_ROW", "0.5"))
 
     # File Splitting Configuration
     # Manual mode: Set SPLIT_FILES and ROWS_PER_FILE to specific values
     # Dynamic mode: Leave unset or empty, system will calculate optimal splits
-    SPLIT_FILES: str = ""  # "yes", "no", or "" for dynamic
-    ROWS_PER_FILE: int = 0  # >0 for manual, 0 for dynamic
-    
+    SPLIT_FILES: str = os.getenv("SPLIT_FILES", "")  # "yes", "no", or "" for dynamic
+    ROWS_PER_FILE: int = int(os.getenv("ROWS_PER_FILE", "0"))  # >0 for manual, 0 for dynamic
+
     # Dynamic Splitting Settings (used when manual settings not provided)
-    ENABLE_DYNAMIC_SPLITTING: bool = True  # Master switch for dynamic logic
-    MAX_SPLIT_FILES: int = 100  # Hard cap on number of splits
-    MIN_ROWS_FOR_SPLITTING: int = 200  # Files below this use single file (lowered from 1000)
-    TARGET_ROWS_PER_SPLIT_MIN: int = 100  # Optimal range lower bound (lowered from 500)
-    TARGET_ROWS_PER_SPLIT_MAX: int = 500  # Optimal range upper bound (lowered from 2000)
-    OPTIMAL_ROWS_PER_SPLIT: int = 200  # Default target rows per split (lowered from 1000)
+    ENABLE_DYNAMIC_SPLITTING: bool = os.getenv("ENABLE_DYNAMIC_SPLITTING", "true").lower() == "true"  # Master switch for dynamic logic
+    MAX_SPLIT_FILES: int = int(os.getenv("MAX_SPLIT_FILES", "100"))  # Hard cap on number of splits
+    MIN_ROWS_FOR_SPLITTING: int = int(os.getenv("MIN_ROWS_FOR_SPLITTING", "200"))  # Files below this use single file (lowered from 1000)
+    TARGET_ROWS_PER_SPLIT_MIN: int = int(os.getenv("TARGET_ROWS_PER_SPLIT_MIN", "100"))  # Optimal range lower bound (lowered from 500)
+    TARGET_ROWS_PER_SPLIT_MAX: int = int(os.getenv("TARGET_ROWS_PER_SPLIT_MAX", "500"))  # Optimal range upper bound (lowered from 2000)
+    OPTIMAL_ROWS_PER_SPLIT: int = int(os.getenv("OPTIMAL_ROWS_PER_SPLIT", "200"))  # Default target rows per split (lowered from 1000)
 
     # Main-batch sequential processing (one level above the file splitting above): cuts a
     # large upload into sequential main batches, each processed fully (including its own
@@ -177,13 +177,13 @@ class Settings(BaseSettings):
     MAX_MAIN_BATCHES: int = int(os.getenv("MAX_MAIN_BATCHES", "200"))  # Manual-mode hard cap; also dynamic mode's cap above 20x threshold
     
     # File Upload Limits
-    MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
+    MAX_UPLOAD_SIZE: int = int(os.getenv("MAX_UPLOAD_SIZE", str(100 * 1024 * 1024)))  # 100MB
     ALLOWED_EXTENSIONS: List[str] = [".csv"]
-    SIGNED_UPLOAD_URL_EXPIRY_SECONDS: int = 900
-    SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS: int = 600
+    SIGNED_UPLOAD_URL_EXPIRY_SECONDS: int = int(os.getenv("SIGNED_UPLOAD_URL_EXPIRY_SECONDS", "900"))
+    SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS: int = int(os.getenv("SIGNED_DOWNLOAD_URL_EXPIRY_SECONDS", "600"))
 
     # Interactive criteria validation
-    CRITERIA_VALIDATE_MAX_ITEMS: int = 25
+    CRITERIA_VALIDATE_MAX_ITEMS: int = int(os.getenv("CRITERIA_VALIDATE_MAX_ITEMS", "25"))
 
     @field_validator("DEBUG", "IS_NOTIFICATION_ENABLED", mode="before")
     @classmethod
