@@ -369,13 +369,17 @@ class ExecutionService:
         return {PROCESSING_CONFIG_KEY_EVIDENCE_TYPES: request_data.evidence_types}
 
     @staticmethod
-    def _build_estimates(row_count: int) -> tuple[Optional[Decimal], Optional[int]]:
+    def _build_estimates(
+        row_count: int, ai_model_id: Optional[str] = None
+    ) -> tuple[Optional[Decimal], Optional[int]]:
         if row_count <= 0:
             return None, None
 
-        cost_per_row = Decimal(
-            str(getattr(settings, "ESTIMATED_COST_PER_INPUT_ROW", _DEFAULT_ESTIMATED_COST_PER_ROW))
-        )
+        model_costs = getattr(settings, "MODEL_COST_PER_INPUT_ROW", {}) or {}
+        default_cost = getattr(settings, "ESTIMATED_COST_PER_INPUT_ROW", _DEFAULT_ESTIMATED_COST_PER_ROW)
+        # Falls back to the flat default for any model without a specific entry — including
+        # every model, today, since the map is empty until real pricing is populated.
+        cost_per_row = Decimal(str(model_costs.get(ai_model_id, default_cost)))
         time_per_row_seconds = float(
             getattr(settings, "ESTIMATED_TIME_SECONDS_PER_INPUT_ROW", _DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS)
         )
@@ -813,26 +817,92 @@ class ExecutionService:
         )
 
     @staticmethod
+    def _read_single_checkpoint_file(checkpoint_file: Path) -> dict[str, Any]:
+        """Read one processor checkpoint file's `_metadata` block, if it exists."""
+        if not checkpoint_file.exists():
+            return {}
+
+        with open(checkpoint_file, 'r') as f:
+            checkpoint_data = json.load(f)
+
+        metadata = checkpoint_data.get('_metadata', {})
+        return {
+            'total_processed': metadata.get('total_processed', 0),
+            'total_files': metadata.get('total_files', 0),
+            'last_updated': metadata.get('last_updated'),
+        }
+
+    @staticmethod
+    def _cached_batch_row_count(merged_output_csv: Path) -> int:
+        """Row count for a *completed* batch's merged_output.csv, cached to a sidecar file.
+
+        A finished batch's output never changes, but _read_processor_checkpoint_file below
+        re-counts every completed batch on every status poll — for an execution with many
+        batches, polled every few seconds, that's a full re-scan of every prior batch's
+        output on each request. Caching to a tiny sidecar file (written once, read many
+        times) turns every poll after the first into a cheap int-parse instead.
+        """
+        cache_file = merged_output_csv.with_suffix(".rowcount")
+        if cache_file.exists():
+            try:
+                return int(cache_file.read_text().strip())
+            except (ValueError, OSError):
+                pass
+
+        from services.execution_processor import _count_csv_rows
+
+        row_count, _ = _count_csv_rows(merged_output_csv)
+        try:
+            cache_file.write_text(str(row_count))
+        except OSError:
+            pass
+        return row_count
+
+    @staticmethod
     def _read_processor_checkpoint_file(execution_id: UUID) -> dict[str, Any]:
         """
-        Read the processor's checkpoint file to get real-time progress.
-        Returns dict with 'total_processed' and 'total_files' if checkpoint exists.
+        Read real-time row progress for an in-progress execution.
+
+        Without main-batch splitting there is a single processor_output/ checkpoint.
+        With it on, each main batch has its own processor_output/batch_NNN/ checkpoint —
+        completed batches are counted from their merged_output.csv (exact; the checkpoint
+        for a finished batch is already gone), and the first batch without a
+        merged_output.csv yet is the one currently in flight, whose own checkpoint
+        supplies the live in-progress count.
         """
         try:
-            checkpoint_dir = Path(settings.EXECUTION_WORKSPACE_ROOT) / str(execution_id) / "processor_output"
-            checkpoint_file = checkpoint_dir / ".processing_checkpoint.json"
-            
-            if not checkpoint_file.exists():
-                return {}
-            
-            with open(checkpoint_file, 'r') as f:
-                checkpoint_data = json.load(f)
-            
-            metadata = checkpoint_data.get('_metadata', {})
+            execution_root = Path(settings.EXECUTION_WORKSPACE_ROOT) / str(execution_id)
+            manifest_file = execution_root / "main_batches" / "batch_manifest.json"
+
+            if not manifest_file.exists():
+                return ExecutionService._read_single_checkpoint_file(
+                    execution_root / "processor_output" / ".processing_checkpoint.json"
+                )
+
+            with open(manifest_file, 'r') as f:
+                total_batches = json.load(f).get('total_batches', 0)
+
+            total_processed = 0
+            last_updated = None
+            for batch_index in range(total_batches):
+                batch_output_dir = execution_root / "processor_output" / f"batch_{batch_index:03d}"
+                merged_output_csv = batch_output_dir / "merged_output.csv"
+                if merged_output_csv.exists():
+                    total_processed += ExecutionService._cached_batch_row_count(merged_output_csv)
+                    continue
+
+                # First batch without a merged output yet is the one in flight.
+                live_checkpoint = ExecutionService._read_single_checkpoint_file(
+                    batch_output_dir / ".processing_checkpoint.json"
+                )
+                total_processed += live_checkpoint.get('total_processed', 0)
+                last_updated = live_checkpoint.get('last_updated')
+                break
+
             return {
-                'total_processed': metadata.get('total_processed', 0),
-                'total_files': metadata.get('total_files', 0),
-                'last_updated': metadata.get('last_updated')
+                'total_processed': total_processed,
+                'total_files': 1,
+                'last_updated': last_updated,
             }
         except Exception as e:
             logger.debug(f"Could not read processor checkpoint for execution {execution_id}: {e}")
@@ -940,7 +1010,7 @@ class ExecutionService:
             execution.estimated_time_seconds = None
             return
 
-        estimated_cost, estimated_time_seconds = self._build_estimates(input_rows)
+        estimated_cost, estimated_time_seconds = self._build_estimates(input_rows, execution.ai_model_id)
         execution.total_rows = input_rows
         execution.estimated_cost = estimated_cost
         execution.estimated_time_seconds = estimated_time_seconds
