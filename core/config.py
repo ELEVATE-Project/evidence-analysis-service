@@ -3,8 +3,10 @@ Application Configuration
 Loads environment variables and application settings
 """
 import json
+import os
 from pathlib import Path
 
+from dotenv import load_dotenv
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 from typing import Dict, List
@@ -14,6 +16,12 @@ from utils.env_parsing import parse_model_cost_settings
 
 SERVICE_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE_PATH = SERVICE_ROOT / ".env"
+
+# Populates os.environ from .env so the explicit os.getenv(...) field defaults below can see
+# it — pydantic-settings' own env_file mechanism (Config.env_file, further down) reads the
+# file directly and does NOT touch os.environ, so without this, os.getenv() calls in this
+# class body would silently never see .env values, only real shell-exported ones.
+load_dotenv(dotenv_path=ENV_FILE_PATH)
 
 
 class Settings(BaseSettings):
@@ -116,10 +124,10 @@ class Settings(BaseSettings):
     # Execution workspace + script runtime
     EXECUTION_WORKSPACE_ROOT: str = "/tmp/evidence_analysis/executions"
     EXECUTION_CLEANUP_ON_SUCCESS: bool = True
-    PREPROCESS_SCRIPT_PATH: str = "scripts/pre-processor/1-pre-processor.py"
-    PROCESSOR_SCRIPT_PATH: str = "scripts/processor/1-main-parallel-script.py"
-    CLEANUP_SCRIPT_PATH: str = "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py"
-    MERGE_SCRIPT_PATH: str = "scripts/processor/3-merge-batch-outputs.py"
+    PREPROCESS_SCRIPT_PATH: str = os.getenv("PREPROCESS_SCRIPT_PATH", "scripts/pre-processor/1-pre-processor.py")
+    PROCESSOR_SCRIPT_PATH: str = os.getenv("PROCESSOR_SCRIPT_PATH", "scripts/processor/1-main-parallel-script.py")
+    CLEANUP_SCRIPT_PATH: str = os.getenv("CLEANUP_SCRIPT_PATH", "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py")
+    MERGE_SCRIPT_PATH: str = os.getenv("MERGE_SCRIPT_PATH", "scripts/processor/3-merge-batch-outputs.py")
     PROCESSOR_MAX_ROWS: int = 0
     # Strip rows with no AI-evaluation result (notValidated/Failed/Unsupported/blank-tag) from
     # the delivered output CSV before upload. The unfiltered merged output is always uploaded
@@ -160,13 +168,13 @@ class Settings(BaseSettings):
     # Dynamic mode (default): Leave unset/empty — batching kicks in automatically once the
     # upload exceeds MIN_ROWS_FOR_MAIN_BATCHING, the same manual/dynamic split the fine-grained
     # SPLIT_FILES setting above already uses, instead of a fixed all-or-nothing toggle.
-    MAIN_FILE_SPLIT: str = ""  # "yes", "no", or "" for dynamic
+    MAIN_FILE_SPLIT: str = os.getenv("MAIN_FILE_SPLIT", "")  # "yes", "no", or "" for dynamic
     # Below this, single main file even in dynamic mode. Also the target rows per batch once
     # batching kicks in (num_batches = ceil(row_count / this)) — every batch stays at ~this
     # size no matter how large the upload is. See _calculate_optimal_batch_count.
-    MIN_ROWS_FOR_MAIN_BATCHING: int = 5000
-    MAIN_BATCH_ROWS_PER_BATCH: int = 10000  # Manual-mode target rows per main batch
-    MAX_MAIN_BATCHES: int = 200  # Manual-mode hard cap; also dynamic mode's cap above 20x threshold
+    MIN_ROWS_FOR_MAIN_BATCHING: int = int(os.getenv("MIN_ROWS_FOR_MAIN_BATCHING", "5000"))
+    MAIN_BATCH_ROWS_PER_BATCH: int = int(os.getenv("MAIN_BATCH_ROWS_PER_BATCH", "10000"))  # Manual-mode target rows per main batch
+    MAX_MAIN_BATCHES: int = int(os.getenv("MAX_MAIN_BATCHES", "200"))  # Manual-mode hard cap; also dynamic mode's cap above 20x threshold
     
     # File Upload Limits
     MAX_UPLOAD_SIZE: int = 100 * 1024 * 1024  # 100MB
