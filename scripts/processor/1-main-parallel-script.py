@@ -1004,32 +1004,8 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
     return response_json
 
 
-current_llm_token_index = 0
-llm_token_rotation_lock = threading.Lock()
-
 _dead_tokens: set[str] = set()
 _dead_tokens_lock = threading.Lock()
-
-def get_next_llm_token():
-    global current_llm_token_index
-    with llm_token_rotation_lock:
-        index = min(current_llm_token_index, len(_LLM_TOKENS) - 1)
-        if current_llm_token_index >= len(_LLM_TOKENS):
-            logging.debug("[LLM] All tokens exhausted; reusing last valid token index=%d for retry", index)
-        token = _LLM_TOKENS[index]
-        logging.info("[LLM] Using token: -----")
-        return token
-
-def switch_to_next_llm_token():
-    global current_llm_token_index
-    with llm_token_rotation_lock:
-        current_llm_token_index += 1
-        if current_llm_token_index >= len(_LLM_TOKENS):
-            logging.error("[LLM] All tokens exhausted!")
-            return None
-        token = _LLM_TOKENS[current_llm_token_index]
-        logging.info("[LLM] Using token: -----")
-        return token
 
 def _mark_token_dead(token: str):
     with _dead_tokens_lock:
@@ -1061,10 +1037,10 @@ if not _LLM_TOKENS:
     raise ValueError(f"[{_LLM_PROVIDER_NAME}] No valid tokens found!")
 
 
-def _llm_generate(parts, token=None):
+def _llm_generate(parts, token):
     return generate_content(
         parts,
-        api_key=token or get_next_llm_token(),
+        api_key=token,
         model_name=LLM_MODEL_NAME,
         generation_config=_build_generation_config(),
     )
@@ -1504,7 +1480,7 @@ def rate_limiter(token: str):
 def process_image(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
                   worker_id=None, input_file=None, row_number=None, school_id=None):
     retries = 0
-    worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
+    worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
@@ -1709,7 +1685,7 @@ CORRECT JSON Response:
                 if all_dead:
                     logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
                     break
-                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
+                worker_token = get_worker_token(worker_id)
                 retries += 1
             else:
                 logging.error(f"[Gemini] Error: {e}")
@@ -1783,7 +1759,7 @@ def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_
                 worker_id=None, input_file=None, row_number=None, school_id=None):
     """Process PDF evidence using Gemini API with usage tracking"""
     retries = 0
-    worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
+    worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
@@ -1900,7 +1876,7 @@ Focus on:
                 if all_dead:
                     logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
                     break
-                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
+                worker_token = get_worker_token(worker_id)
                 retries += 1
             else:
                 logging.error(f"[Gemini] PDF processing error: {e}")
@@ -1913,7 +1889,7 @@ def process_excel(task_evidence_link, task_evidence_question, task_name=None, ma
                   worker_id=None, input_file=None, row_number=None, school_id=None):
     """Process Excel evidence - download and convert to text for Gemini with usage tracking"""
     retries = 0
-    worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
+    worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
@@ -2036,7 +2012,7 @@ Focus on:
                 if all_dead:
                     logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
                     break
-                worker_token = get_worker_token(worker_id) if worker_id is not None else get_next_llm_token()
+                worker_token = get_worker_token(worker_id)
                 retries += 1
             else:
                 logging.error(f"[Gemini] Excel processing error: {e}")
