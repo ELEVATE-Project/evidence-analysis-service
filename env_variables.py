@@ -211,6 +211,28 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "default": "google/gemini-2.5-flash-lite",
     },
 
+    # Per-token rate limiting / cooldown (scripts/processor/1-main-parallel-script.py)
+    "MAX_RPM_PER_TOKEN": {
+        "message": (
+            "Requests/minute allowed per LLM token before self-throttling. Default (2000) "
+            "matches the old global bucket as a conservative placeholder — NOT a validated "
+            "provider quota. The real ceiling is account/model-dependent (OpenRouter varies "
+            "by plan and model, Gemini by project tier); tune per deployment."
+        ),
+        "optional": True,
+        "default": "2000",
+    },
+    "DEAD_TOKEN_TTL_SECONDS": {
+        "message": "Seconds an LLM token stays excluded from rotation after an auth failure before being retried",
+        "optional": True,
+        "default": "300",
+    },
+    "RATE_LIMIT_COOLDOWN_SECONDS": {
+        "message": "Seconds an LLM token stays excluded from rotation after a 429/quota response, so other workers reroute to a different token",
+        "optional": True,
+        "default": "60",
+    },
+
     # Notification control
     "IS_NOTIFICATION_ENABLED": {
         "message": "Enable email notifications",
