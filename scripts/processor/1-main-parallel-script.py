@@ -1004,21 +1004,56 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
     return response_json
 
 
-_dead_tokens: set[str] = set()
+# Token -> timestamp it was marked dead. A dict (not a set) so a dead token can be
+# re-admitted to rotation after DEAD_TOKEN_TTL_SECONDS — an unauthorized/401 response can
+# be a transient auth-service blip, not necessarily a permanently revoked key, so banning
+# it for the rest of the process would otherwise silently shrink the token pool forever.
+_dead_tokens: dict[str, float] = {}
 _dead_tokens_lock = threading.Lock()
+DEAD_TOKEN_TTL_SECONDS = max(1, int(os.getenv("DEAD_TOKEN_TTL_SECONDS", "300")))
 
 def _mark_token_dead(token: str):
     with _dead_tokens_lock:
-        _dead_tokens.add(token)
-    logging.error("[LLM] token=***** marked_dead  removing from rotation")
+        _dead_tokens[token] = time.time()
+    logging.error("[LLM] token=***** marked_dead  removing from rotation for %ds", DEAD_TOKEN_TTL_SECONDS)
 
-def get_worker_token(worker_id: int) -> str:
+def _dead_tokens_in_cooldown() -> set[str]:
+    """Tokens still inside their dead-cooldown window. Caller must hold _dead_tokens_lock."""
+    now = time.time()
+    return {t for t, marked_at in _dead_tokens.items() if now - marked_at < DEAD_TOKEN_TTL_SECONDS}
+
+# Token -> timestamp it hit a rate-limit (429/quota) response. Separate from _dead_tokens
+# (auth failures) and much shorter-lived: a rate limit is expected to clear on its own, so
+# the token goes on a brief hold — letting OTHER workers currently pinned to it reroute to
+# a different token — rather than being excluded as broken.
+_rate_limited_tokens: dict[str, float] = {}
+_rate_limited_tokens_lock = threading.Lock()
+RATE_LIMIT_COOLDOWN_SECONDS = max(1, int(os.getenv("RATE_LIMIT_COOLDOWN_SECONDS", "60")))
+
+def _mark_token_rate_limited(token: str):
+    with _rate_limited_tokens_lock:
+        _rate_limited_tokens[token] = time.time()
+    logging.warning("[LLM] token=*****  rate_limited  cooling_down for %ds", RATE_LIMIT_COOLDOWN_SECONDS)
+
+def _rate_limited_tokens_in_cooldown() -> set[str]:
+    """Tokens still inside their rate-limit cooldown window."""
+    now = time.time()
+    with _rate_limited_tokens_lock:
+        return {t for t, marked_at in _rate_limited_tokens.items() if now - marked_at < RATE_LIMIT_COOLDOWN_SECONDS}
+
+def get_worker_token(worker_id: int | None) -> str:
     with _dead_tokens_lock:
-        active = [t for t in _LLM_TOKENS if t not in _dead_tokens]
+        dead_now = _dead_tokens_in_cooldown()
+    cooling_down = _rate_limited_tokens_in_cooldown()
+    active = [t for t in _LLM_TOKENS if t not in dead_now and t not in cooling_down]
     if not active:
-        logging.error("[LLM] all_tokens_dead  falling back to last configured token")
+        logging.error("[LLM] all_tokens_dead_or_cooling_down  falling back to last configured token")
         return _LLM_TOKENS[-1]
-    return active[(worker_id - 1) % len(active)]
+    # worker_id defaults to None on process_image/process_pdf/process_excel (callable
+    # directly without going through main()'s worker pool) — fall back to worker 1
+    # instead of crashing on `None - 1`.
+    resolved_worker_id = worker_id if worker_id is not None else 1
+    return active[(resolved_worker_id - 1) % len(active)]
 
 
 # === Gemini Model Setup ===
@@ -1444,7 +1479,11 @@ def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=N
     logging.debug(f"[Relevance-{mode.upper()}] Final score: {combined_score:.2f} → Tag: {tag}")
     return tag
 
-MAX_RPM_PER_TOKEN = max(1, int(os.getenv("MAX_RPM_PER_TOKEN", "4000")))
+# Default matches the old single global bucket (MAX_REQUESTS_PER_MINUTE=2000, shared by
+# all tokens) as a conservative per-token starting point — NOT a validated provider quota.
+# The real ceiling is account/model-dependent (OpenRouter varies by plan and model,
+# Gemini by project tier) and must be tuned per deployment via this env var.
+MAX_RPM_PER_TOKEN = max(1, int(os.getenv("MAX_RPM_PER_TOKEN", "2000")))
 
 _token_buckets: dict[str, deque] = {}
 _token_locks: dict[str, threading.Lock] = {}
@@ -1671,9 +1710,20 @@ CORRECT JSON Response:
         except Exception as e:
             error_str = str(e).lower()
             if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[LLM] rate_limit_hit  worker=%s  token=*****  error=%s",
+                                worker_id, str(e)[:120])
+                _mark_token_rate_limited(worker_token)
+                previous_token = worker_token
+                worker_token = get_worker_token(worker_id)
+                if worker_token != previous_token:
+                    # Rerouted to a token that isn't currently dead/rate-limited — free
+                    # switch (mirrors the old global-rotation behavior), no retry consumed.
+                    continue
+                # No alternative token available (every other token is dead or also
+                # cooling down) — fall back to backoff+retry on this same token.
                 wait = min(60 * (2 ** retries), 300)
-                logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
-                                worker_id, retries + 1, wait, str(e)[:120])
+                logging.warning("[LLM] rate_limit_backoff  worker=%s  attempt=%d  backoff=%ds  no_alternate_token=true",
+                                worker_id, retries + 1, wait)
                 time.sleep(wait)
                 retries += 1
             elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
@@ -1681,7 +1731,7 @@ CORRECT JSON Response:
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
                 with _dead_tokens_lock:
-                    all_dead = len(_dead_tokens) >= len(_LLM_TOKENS)
+                    all_dead = len(_dead_tokens_in_cooldown()) >= len(_LLM_TOKENS)
                 if all_dead:
                     logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
                     break
@@ -1862,9 +1912,20 @@ Focus on:
         except Exception as e:
             error_str = str(e).lower()
             if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[LLM] rate_limit_hit  worker=%s  token=*****  error=%s",
+                                worker_id, str(e)[:120])
+                _mark_token_rate_limited(worker_token)
+                previous_token = worker_token
+                worker_token = get_worker_token(worker_id)
+                if worker_token != previous_token:
+                    # Rerouted to a token that isn't currently dead/rate-limited — free
+                    # switch (mirrors the old global-rotation behavior), no retry consumed.
+                    continue
+                # No alternative token available (every other token is dead or also
+                # cooling down) — fall back to backoff+retry on this same token.
                 wait = min(60 * (2 ** retries), 300)
-                logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
-                                worker_id, retries + 1, wait, str(e)[:120])
+                logging.warning("[LLM] rate_limit_backoff  worker=%s  attempt=%d  backoff=%ds  no_alternate_token=true",
+                                worker_id, retries + 1, wait)
                 time.sleep(wait)
                 retries += 1
             elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
@@ -1872,7 +1933,7 @@ Focus on:
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
                 with _dead_tokens_lock:
-                    all_dead = len(_dead_tokens) >= len(_LLM_TOKENS)
+                    all_dead = len(_dead_tokens_in_cooldown()) >= len(_LLM_TOKENS)
                 if all_dead:
                     logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
                     break
@@ -1998,9 +2059,20 @@ Focus on:
         except Exception as e:
             error_str = str(e).lower()
             if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[LLM] rate_limit_hit  worker=%s  token=*****  error=%s",
+                                worker_id, str(e)[:120])
+                _mark_token_rate_limited(worker_token)
+                previous_token = worker_token
+                worker_token = get_worker_token(worker_id)
+                if worker_token != previous_token:
+                    # Rerouted to a token that isn't currently dead/rate-limited — free
+                    # switch (mirrors the old global-rotation behavior), no retry consumed.
+                    continue
+                # No alternative token available (every other token is dead or also
+                # cooling down) — fall back to backoff+retry on this same token.
                 wait = min(60 * (2 ** retries), 300)
-                logging.warning("[LLM] rate_limit_hit  worker=%s  attempt=%d  backoff=%ds  error=%s",
-                                worker_id, retries + 1, wait, str(e)[:120])
+                logging.warning("[LLM] rate_limit_backoff  worker=%s  attempt=%d  backoff=%ds  no_alternate_token=true",
+                                worker_id, retries + 1, wait)
                 time.sleep(wait)
                 retries += 1
             elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
@@ -2008,7 +2080,7 @@ Focus on:
                               worker_id, str(e)[:120])
                 _mark_token_dead(worker_token)
                 with _dead_tokens_lock:
-                    all_dead = len(_dead_tokens) >= len(_LLM_TOKENS)
+                    all_dead = len(_dead_tokens_in_cooldown()) >= len(_LLM_TOKENS)
                 if all_dead:
                     logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
                     break
