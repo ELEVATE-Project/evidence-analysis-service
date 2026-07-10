@@ -60,7 +60,7 @@ class CsvSourceType(Base):
     school_filter_config = Column(
         JSONB,
         nullable=False,
-        server_default=text('\'{"required_column": "UDISE+ SCHOOL CODE"}\'::jsonb'),
+        server_default=text('\'{"required_column": "School ID"}\'::jsonb'),
     )
     evidence_context_config = Column(JSONB, nullable=False)
     available_filters = Column(JSONB, nullable=True, server_default=text("'[]'::jsonb"))

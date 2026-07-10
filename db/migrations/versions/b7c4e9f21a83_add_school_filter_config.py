@@ -24,7 +24,7 @@ down_revision: Union[str, Sequence[str], None] = ('9bdd4dbb2f57', 'a1b2c3d4e5f6'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-_DEFAULT_SCHOOL_FILTER_CONFIG_JSON = '{"required_column": "UDISE+ SCHOOL CODE"}'
+_DEFAULT_SCHOOL_FILTER_CONFIG_JSON = '{"required_column": "School ID"}'
 
 
 def upgrade() -> None:
