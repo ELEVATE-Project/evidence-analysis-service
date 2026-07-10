@@ -91,9 +91,10 @@ use_school_filter_value = (
 )
 USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by school_list.csv
 # Per-tenant required column name for the school-filter CSV, passed in by
-# execution_processor.py from CsvSourceType.school_filter_config.
-if ARGS.school_filter_column:
-    SCHOOL_FILTER_COLUMN = ARGS.school_filter_column
+# execution_processor.py from CsvSourceType.school_filter_config. Falls back to the
+# core.constants default so standalone/manual runs without --school-filter-column
+# don't crash with a NameError when USE_SCHOOL_FILTER is on.
+SCHOOL_FILTER_COLUMN = (ARGS.school_filter_column or "").strip() or DEFAULT_SCHOOL_FILTER_REQUIRED_COLUMN
 
 if not ARGS.evidence_types:
     print("ERROR: --evidence-types is required but was empty.")
