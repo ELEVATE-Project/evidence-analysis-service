@@ -775,10 +775,23 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         workspace.questions_csv.write_bytes(questions_bytes)
 
         if execution.school_filter_file_url and execution.school_filter_file_size:
+            logger.info(
+                "school_filter_download_start  execution=%s  url=%s  size=%d",
+                execution.id, execution.school_filter_file_url, execution.school_filter_file_size,
+            )
             school_filter_bytes = _run_async(storage_service.download_file(execution.school_filter_file_url))
             if not school_filter_bytes:
                 raise ExecutionProcessingError("School filter file could not be downloaded from storage.")
             workspace.school_filter_csv.write_bytes(school_filter_bytes)
+            logger.info(
+                "school_filter_download_complete  execution=%s  bytes=%d",
+                execution.id, len(school_filter_bytes),
+            )
+        else:
+            logger.info(
+                "school_filter_not_attached  execution=%s  url=%s  size=%s",
+                execution.id, execution.school_filter_file_url, execution.school_filter_file_size,
+            )
 
         preprocessor_script = _resolve_script_path(settings.PREPROCESS_SCRIPT_PATH)
         processor_script = _resolve_script_path(settings.PROCESSOR_SCRIPT_PATH)
