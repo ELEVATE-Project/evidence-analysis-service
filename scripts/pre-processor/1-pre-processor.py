@@ -19,6 +19,7 @@ SERVICE_ROOT = Path(__file__).resolve().parents[2]
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 from core.constants import EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS
+from core.constants import SCHOOL_FILTER_REQUIRED_COLUMN as DEFAULT_SCHOOL_FILTER_REQUIRED_COLUMN
 
 def str2bool(val):
     return str(val).lower() in ("1", "true", "yes")
@@ -44,6 +45,12 @@ def _parse_args():
         action="store_true",
         help="Run the normal filter/sort/split path even if MAIN_FILE_SPLIT is on — "
         "used for the per-batch sub-invocations, whose input is already one main batch.",
+    )
+    parser.add_argument(
+        "--school-filter-column",
+        default=None,
+        help="Required column name in the school-filter CSV (per-tenant, from "
+        "CsvSourceType.school_filter_config); absent = core.constants default",
     )
     parser.add_argument(
         "--evidence-types",
@@ -83,6 +90,11 @@ use_school_filter_value = (
     else os.getenv("PREPROCESS_USE_SCHOOL_FILTER", os.getenv("USE_SCHOOL_FILTER", False))
 )
 USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by school_list.csv
+# Per-tenant required column name for the school-filter CSV, passed in by
+# execution_processor.py from CsvSourceType.school_filter_config. Falls back to the
+# core.constants default so standalone/manual runs without --school-filter-column
+# don't crash with a NameError when USE_SCHOOL_FILTER is on.
+SCHOOL_FILTER_COLUMN = (ARGS.school_filter_column or "").strip() or DEFAULT_SCHOOL_FILTER_REQUIRED_COLUMN
 
 if not ARGS.evidence_types:
     print("ERROR: --evidence-types is required but was empty.")
@@ -161,7 +173,7 @@ if USE_SCHOOL_FILTER and os.path.exists(FILTER_CSV):
     with open(FILTER_CSV, newline='', encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            school_code = row.get("UDISE+ SCHOOL CODE", "").strip()
+            school_code = row.get(SCHOOL_FILTER_COLUMN, "").strip()
             if school_code:
                 valid_school_codes.add(school_code)
     print(f"✅ Loaded {len(valid_school_codes)} school codes from '{FILTER_CSV}'")

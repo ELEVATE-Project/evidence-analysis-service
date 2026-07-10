@@ -39,6 +39,17 @@ RELEVANCE_TAG_PARTIAL = "Partially Relevant"
 RELEVANCE_TAG_IRRELEVANT = "Irrelevant"
 RELEVANCE_TAG_NOT_VALIDATED = "notValidated"
 
+# Required header in an uploaded school-filter CSV. The pre-processor script
+# (scripts/pre-processor/1-pre-processor.py) reads this exact column name via
+# csv.DictReader; the service validates it up front so a filter that would match
+# nothing is rejected at upload instead of silently dropping every row.
+# Matches the input CSV's own "School ID" column name (scripts/pre-processor/
+# 1-pre-processor.py's hardcoded input-side lookup) rather than the UDISE+ program's
+# branded name, since the two columns are compared by value and using the same label
+# in both files makes that relationship obvious instead of requiring the uploader to
+# learn a second name for the same field.
+SCHOOL_FILTER_REQUIRED_COLUMN = "School ID"
+
 # Full set of bucketed relevance tags — used for report aggregation.
 RELEVANCE_TYPES = {
     RELEVANCE_TAG_RELEVANT,

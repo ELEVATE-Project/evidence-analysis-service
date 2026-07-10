@@ -25,7 +25,11 @@ from uuid import UUID
 from sqlalchemy.orm import Session
 
 from core.config import SERVICE_ROOT, settings
-from core.constants import EVIDENCE_TYPE_EXTENSIONS, PROCESSING_CONFIG_KEY_EVIDENCE_TYPES
+from core.constants import (
+    EVIDENCE_TYPE_EXTENSIONS,
+    PROCESSING_CONFIG_KEY_EVIDENCE_TYPES,
+    SCHOOL_FILTER_REQUIRED_COLUMN,
+)
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
 from models.execution import Execution
@@ -58,6 +62,7 @@ class ExecutionWorkspace:
     processor_output_dir: Path
     input_csv: Path
     questions_csv: Path
+    school_filter_csv: Path
     preprocessed_csv: Path
     final_output_csv: Path
     checkpoint_file: Path
@@ -381,6 +386,7 @@ def _build_workspace(execution_id: UUID) -> ExecutionWorkspace:
         processor_output_dir=processor_output_dir,
         input_csv=input_dir / "input.csv",
         questions_csv=input_dir / "question.csv",
+        school_filter_csv=input_dir / "school_filter.csv",
         preprocessed_csv=preprocessor_output_dir / "preprocessed_data.csv",
         final_output_csv=processor_output_dir / "merged_output.csv",
         checkpoint_file=processor_output_dir / ".processing_checkpoint.json",
@@ -482,6 +488,31 @@ def _resolve_evidence_type_extensions_from_config(db: Session, execution: Execut
         for item in evidence_types_config
         if item.get("key")
     }
+
+
+def _resolve_school_filter_column_from_config(db: Session, execution: Execution) -> str:
+    """Per-tenant required column name for an uploaded school-filter CSV, sourced from
+    CsvSourceType.school_filter_config so the column name is changeable per tenant without
+    a deploy. Falls back to core.constants.SCHOOL_FILTER_REQUIRED_COLUMN when no active
+    config row exists.
+    """
+    csv_type_id = (execution.csv_type_id or "").strip()
+    source_type = (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == execution.tenant_code,
+            CsvSourceType.organization_code == execution.organization_code,
+            CsvSourceType.type_key == csv_type_id,
+            CsvSourceType.is_active.is_(True),
+        )
+        .first()
+        if csv_type_id
+        else None
+    )
+    school_filter_config = source_type.school_filter_config if source_type else None
+    if not isinstance(school_filter_config, dict) or not school_filter_config.get("required_column"):
+        return SCHOOL_FILTER_REQUIRED_COLUMN
+    return str(school_filter_config["required_column"]).strip() or SCHOOL_FILTER_REQUIRED_COLUMN
 
 
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
@@ -743,6 +774,25 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         workspace.input_csv.write_bytes(input_bytes)
         workspace.questions_csv.write_bytes(questions_bytes)
 
+        if execution.school_filter_file_url and execution.school_filter_file_size:
+            logger.info(
+                "school_filter_download_start  execution=%s  url=%s  size=%d",
+                execution.id, execution.school_filter_file_url, execution.school_filter_file_size,
+            )
+            school_filter_bytes = _run_async(storage_service.download_file(execution.school_filter_file_url))
+            if not school_filter_bytes:
+                raise ExecutionProcessingError("School filter file could not be downloaded from storage.")
+            workspace.school_filter_csv.write_bytes(school_filter_bytes)
+            logger.info(
+                "school_filter_download_complete  execution=%s  bytes=%d",
+                execution.id, len(school_filter_bytes),
+            )
+        else:
+            logger.info(
+                "school_filter_not_attached  execution=%s  url=%s  size=%s",
+                execution.id, execution.school_filter_file_url, execution.school_filter_file_size,
+            )
+
         preprocessor_script = _resolve_script_path(settings.PREPROCESS_SCRIPT_PATH)
         processor_script = _resolve_script_path(settings.PROCESSOR_SCRIPT_PATH)
 
@@ -784,6 +834,10 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         # Per-tenant type->extension map (DB-driven; see CsvSourceType.evidence_types_config)
         # passed to both scripts so a new type/extension is addable without a code change.
         evidence_types_to_validate_json = json.dumps(_resolve_evidence_type_extensions_from_config(db, execution))
+        # Per-tenant required column name for an uploaded school-filter CSV (DB-driven; see
+        # CsvSourceType.school_filter_config), so the column name is changeable without a
+        # code change. Only meaningful when school filtering is actually enabled below.
+        school_filter_column = _resolve_school_filter_column_from_config(db, execution)
 
         processor_env = {
             **base_env,
@@ -850,12 +904,19 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 "--evidence-types-to-validate",
                 evidence_types_to_validate_json,
             ]
-            # Forced off here, same as the single-file and per-batch preprocessor calls below —
-            # this branch doesn't wire real school-filter support into the batch-cut step yet.
-            # Without this, the arg is omitted entirely and the script falls back to whatever
-            # USE_SCHOOL_FILTER happens to be set to in the environment, inconsistent with the
-            # other two call sites which explicitly force it false.
-            batch_cut_cmd.extend(["--use-school-filter", "false"])
+            # School filter must be applied here, at the one-time batch-cut step, not
+            # per-batch below — whether an execution gets main-batched is purely a function
+            # of row count, so filtering behavior must not depend on it. Rows are filtered
+            # out of filtered_batch_*.csv once, here; the per-batch fine-split step below
+            # runs on already-filtered batches and correctly forces its own filter off.
+            if execution.school_filter_file_url and execution.school_filter_file_size:
+                batch_cut_cmd.extend([
+                    "--filter-csv", str(workspace.school_filter_csv),
+                    "--use-school-filter", "true",
+                    "--school-filter-column", school_filter_column,
+                ])
+            else:
+                batch_cut_cmd.extend(["--use-school-filter", "false"])
             if is_relevant_limit_enabled:
                 # Keep (UUID, task) groups within a single main batch so per-batch
                 # cap counts stay correct (mirrors group-aware fine-splitting below).
@@ -1018,10 +1079,15 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             if enable_split:
                 preprocessor_cmd.extend(["--rows-per-file", str(rows_per_file)])
 
-            preprocessor_cmd.extend([
-                "--use-school-filter",
-                "false",
-            ])
+            if execution.school_filter_file_url and execution.school_filter_file_size:
+                preprocessor_cmd.extend([
+                    "--filter-csv", str(workspace.school_filter_csv),
+                    "--use-school-filter", "true",
+                    "--school-filter-column", school_filter_column,
+                ])
+            else:
+                preprocessor_cmd.extend(["--use-school-filter", "false"])
+
             preprocessor_cmd.extend(["--evidence-types", ",".join(evidence_types)])
             preprocessor_cmd.extend(["--evidence-types-to-validate", evidence_types_to_validate_json])
             if is_relevant_limit_enabled:

@@ -55,6 +55,7 @@ from services.background_worker import BackgroundWorker
 from services.email_service import EmailService
 from utils.llm_provider import get_llm_model_name
 from services.storage_service import StorageService
+from core.constants import SCHOOL_FILTER_REQUIRED_COLUMN
 
 logger = logging.getLogger(__name__)
 
@@ -352,6 +353,13 @@ class ExecutionService:
         if not isinstance(evidence_types_config, list) or not evidence_types_config:
             return sorted(ALLOWED_EVIDENCE_TYPES)
         return sorted({str(item.get("key", "")).strip() for item in evidence_types_config if item.get("key")})
+
+    @staticmethod
+    def _required_school_filter_column(source_type: Optional[CsvSourceType]) -> str:
+        school_filter_config = source_type.school_filter_config if source_type else None
+        if not isinstance(school_filter_config, dict) or not school_filter_config.get("required_column"):
+            return SCHOOL_FILTER_REQUIRED_COLUMN
+        return str(school_filter_config["required_column"]).strip() or SCHOOL_FILTER_REQUIRED_COLUMN
 
     @staticmethod
     def _resolve_processing_config(
@@ -775,11 +783,11 @@ class ExecutionService:
         normalized = (file_type or "").strip().lower()
         if normalized == "criterias":
             return "questions"
-        if normalized in {"input", "questions"}:
+        if normalized in {"input", "questions", "school_filter"}:
             return normalized
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="file_type must be one of: input, questions, criterias",
+            detail="file_type must be one of: input, questions, criterias, school_filter",
         )
 
     @staticmethod
@@ -788,6 +796,8 @@ class ExecutionService:
             return execution.input_file_url
         if file_type in {"questions", "criterias"}:
             return execution.criterias_file_url
+        if file_type == "school_filter":
+            return execution.school_filter_file_url
         return None
 
     @staticmethod
@@ -797,6 +807,9 @@ class ExecutionService:
             return
         if file_type in {"questions", "criterias"}:
             execution.criterias_file_url = file_path
+            return
+        if file_type == "school_filter":
+            execution.school_filter_file_url = file_path
             return
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -810,6 +823,9 @@ class ExecutionService:
             return
         if file_type in {"questions", "criterias"}:
             execution.criterias_file_size = size_bytes
+            return
+        if file_type == "school_filter":
+            execution.school_filter_file_size = size_bytes
             return
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -969,7 +985,7 @@ class ExecutionService:
         missing_columns: Optional[list[str]] = None,
     ) -> None:
         checkpoint = self._checkpoint(execution)
-        file_checkpoint = checkpoint["files"][file_type]
+        file_checkpoint = checkpoint["files"].setdefault(file_type, {})
 
         if uploaded is not None:
             file_checkpoint["uploaded"] = uploaded
@@ -1290,7 +1306,12 @@ class ExecutionService:
         execution = self._get_execution_or_404(execution_id, user_id)
         self._ensure_not_started_for_file_changes(execution)
 
-        label = "Input file" if normalized_file_type == "input" else "Questions file"
+        if normalized_file_type == "input":
+            label = "Input file"
+        elif normalized_file_type == "school_filter":
+            label = "School filter file"
+        else:
+            label = "Questions file"
         safe_file_name, normalized_content_type = self._validate_file_descriptor(
             request_data.file.file_name,
             request_data.file.size_bytes,
@@ -1356,7 +1377,12 @@ class ExecutionService:
                 detail=f"{normalized_file_type} file upload not found",
             )
 
-        label = "Input file" if normalized_file_type == "input" else "Questions file"
+        if normalized_file_type == "input":
+            label = "Input file"
+        elif normalized_file_type == "school_filter":
+            label = "School filter file"
+        else:
+            label = "Questions file"
         self._validate_uploaded_metadata(metadata, label)
 
         file_bytes = await self.storage_service.download_file(file_path)
@@ -1367,6 +1393,19 @@ class ExecutionService:
             )
 
         headers, row_count = self._extract_headers_and_row_count(file_bytes, label)
+        if normalized_file_type == "school_filter":
+            source_type = self._get_csv_source_type(
+                execution.tenant_code, execution.organization_code, execution.csv_type_id
+            )
+            required_school_filter_column = self._required_school_filter_column(source_type)
+            if required_school_filter_column not in headers:
+                execution.school_filter_file_url = None
+                execution.school_filter_file_size = None
+                self.db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                )
         self._set_file_size_by_type(execution, normalized_file_type, int(metadata.get("size_bytes", 0)))
         self._update_file_checkpoint(
             execution,
@@ -1406,7 +1445,12 @@ class ExecutionService:
         execution = self._get_execution_or_404(execution_id, user_id)
         self._ensure_not_started_for_file_changes(execution)
 
-        label = "Input file" if normalized_file_type == "input" else "Questions file"
+        if normalized_file_type == "input":
+            label = "Input file"
+        elif normalized_file_type == "school_filter":
+            label = "School filter file"
+        else:
+            label = "Questions file"
         safe_file_name, normalized_content_type = self._validate_file_descriptor(
             file_name,
             len(file_bytes),
@@ -1431,6 +1475,16 @@ class ExecutionService:
 
         # Extract headers and row count
         headers, row_count = self._extract_headers_and_row_count(file_bytes, label)
+        if normalized_file_type == "school_filter":
+            source_type = self._get_csv_source_type(
+                execution.tenant_code, execution.organization_code, execution.csv_type_id
+            )
+            required_school_filter_column = self._required_school_filter_column(source_type)
+            if required_school_filter_column not in headers:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                )
 
         # Update execution with file path and metadata
         self._set_file_path_by_type(execution, normalized_file_type, file_path)
@@ -1543,6 +1597,41 @@ class ExecutionService:
                 questions_result.valid = False
                 questions_result.message = self._to_user_friendly_validation_message(str(exc.detail), "Questions file")
 
+        # School filter is optional — only validated (and only shown in the response/preview)
+        # when one is actually attached. Its absence never blocks is_valid; its presence but
+        # invalidity does, same as input/questions.
+        school_filter_result: Optional[FileValidationResult] = None
+        school_filter_path = execution.school_filter_file_url
+        if school_filter_path:
+            school_filter_result = FileValidationResult(file_type="school_filter", valid=False)
+            required_school_filter_column = self._required_school_filter_column(source_type)
+            try:
+                school_filter_bytes = await self.storage_service.download_file(school_filter_path)
+                if not school_filter_bytes:
+                    raise HTTPException(status_code=400, detail="School filter file could not be downloaded.")
+                headers, row_count, preview_rows, _ = self._parse_csv_preview(
+                    school_filter_bytes,
+                    "School filter file",
+                )
+                school_filter_result.rows_detected = row_count
+                school_filter_result.columns_detected = headers
+                school_filter_result.preview_rows = preview_rows
+                if required_school_filter_column not in headers:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                    )
+                school_filter_result.valid = True
+                school_filter_result.message = (
+                    f"✓ School filter file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
+                )
+                school_filter_result.missing_columns = []
+            except HTTPException as exc:
+                detail = str(exc.detail)
+                school_filter_result.message = self._to_user_friendly_validation_message(detail, "School filter file")
+                if detail.endswith("column."):
+                    school_filter_result.missing_columns = [required_school_filter_column]
+
         self._update_file_checkpoint(
             execution,
             file_type="input",
@@ -1557,8 +1646,20 @@ class ExecutionService:
             message=questions_result.message,
             missing_columns=questions_result.missing_columns,
         )
+        if school_filter_result is not None:
+            self._update_file_checkpoint(
+                execution,
+                file_type="school_filter",
+                validated=school_filter_result.valid,
+                message=school_filter_result.message,
+                missing_columns=school_filter_result.missing_columns,
+            )
 
-        is_valid = input_result.valid and questions_result.valid
+        is_valid = (
+            input_result.valid
+            and questions_result.valid
+            and (school_filter_result is None or school_filter_result.valid)
+        )
         execution.status = "validated" if is_valid else "draft"
         execution.failure_reason = None if is_valid else "File validation failed. Upload valid files and retry."
         self.db.commit()
@@ -1569,6 +1670,7 @@ class ExecutionService:
             is_valid=is_valid,
             input_file=input_result,
             questions_file=questions_result,
+            school_filter_file=school_filter_result,
         )
 
     async def start_execution(self, execution_id: UUID, user_id: str) -> ExecutionResponse:
@@ -1893,6 +1995,40 @@ class ExecutionService:
                     detail="Questions file could not be read for validation.",
                 )
             self._validate_questions_csv_against_source(questions_file_bytes, source_type)
+
+            # School filter is optional, so only re-validate it if one is actually attached —
+            # but if it is, it gets the same re-check as input/questions rather than being
+            # trusted blindly until the background worker tries to download it.
+            school_filter_size = execution.school_filter_file_size
+            if execution.school_filter_file_url:
+                school_filter_metadata = await self.storage_service.get_file_metadata(
+                    execution.school_filter_file_url
+                )
+                if not school_filter_metadata:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="School filter file upload not found",
+                    )
+                self._validate_uploaded_metadata(school_filter_metadata, "School filter file")
+
+                school_filter_bytes = await self.storage_service.download_file(execution.school_filter_file_url)
+                if not school_filter_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="School filter file could not be read for validation.",
+                    )
+                school_filter_headers, _ = self._extract_headers_and_row_count(
+                    school_filter_bytes, "School filter file"
+                )
+                required_school_filter_column = self._required_school_filter_column(source_type)
+                if required_school_filter_column not in school_filter_headers:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                    )
+                school_filter_size = int(
+                    school_filter_metadata.get("size_bytes", execution.school_filter_file_size or 0)
+                )
         except HTTPException as exc:
             self._mark_execution_failed(execution, str(exc.detail))
             raise
@@ -1907,6 +2043,7 @@ class ExecutionService:
         await self._apply_execution_estimates(execution)
         execution.input_file_size = int(input_metadata.get("size_bytes", execution.input_file_size or 0))
         execution.criterias_file_size = int(questions_metadata.get("size_bytes", execution.criterias_file_size or 0))
+        execution.school_filter_file_size = school_filter_size
         execution.status = "queued"
         execution.upload_completed_at = datetime.utcnow()
         execution.failure_reason = None
@@ -1959,7 +2096,12 @@ class ExecutionService:
                 detail=f"{normalized_file_type} file was not found in storage.",
             )
 
-        label = "Input file" if normalized_file_type == "input" else "Questions file"
+        if normalized_file_type == "input":
+            label = "Input file"
+        elif normalized_file_type == "school_filter":
+            label = "School filter file"
+        else:
+            label = "Questions file"
         headers, row_count, preview_rows, _ = self._parse_csv_preview(
             file_bytes,
             label,
@@ -2003,6 +2145,8 @@ class ExecutionService:
                 "input_file_size": execution.input_file_size,
                 "criterias_file_size": execution.criterias_file_size,
                 "output_file_size": execution.output_file_size,
+                "school_filter_file_url": execution.school_filter_file_url,
+                "school_filter_file_size": execution.school_filter_file_size,
                 "upload_completed_at": execution.upload_completed_at,
                 "checkpoint_data": checkpoint,
                 "input_file_status": self._checkpoint_file_status(checkpoint, "input"),

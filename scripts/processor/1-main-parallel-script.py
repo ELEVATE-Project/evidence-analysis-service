@@ -168,7 +168,12 @@ PARTIALLY_RELEVANT_THRESHOLD = float(os.getenv("PARTIALLY_RELEVANT_THRESHOLD", "
 # written as "notValidated" with NO API call. Relies on the pre-processor's group-aware
 # splitting so each (UUID, task) group stays inside one worker's file. None means no cap,
 # all rows processed.
-MAX_RELEVANT_PER_USER_TASK = ARGS.max_relevant_per_user_task
+# Mirrors execution_processor.py's `max_relevant > 0` guard — a cap of 0 (or negative)
+# would make every row's `>= MAX_RELEVANT_PER_USER_TASK` check trivially true, silently
+# capping out every row with zero API calls instead of behaving as "no cap".
+MAX_RELEVANT_PER_USER_TASK = (
+    ARGS.max_relevant_per_user_task if (ARGS.max_relevant_per_user_task or 0) > 0 else None
+)
 
 # === ANSWER FORMAT CONFIGURATION ===
 # Set to True for descriptive answers, False for YES/NO answers

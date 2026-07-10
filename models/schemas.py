@@ -88,7 +88,7 @@ class ExecutionCreate(BaseModel):
     # Per-(user, task) relevant-evidence cap. When set, the AI stops validating a
     # user's task once this many evidences are tagged "Relevant"; the rest are written
     # as "notValidated" with no API call. Omitted/None = feature off (current behavior).
-    evidence_threshold: Optional[int] = Field(None, ge=1, le=100)
+    evidence_threshold: Optional[int] = Field(None, ge=1, le=10)
 
     @field_validator("states", mode="before")
     @classmethod
@@ -188,6 +188,9 @@ class ExecutionValidationResponse(BaseModel):
     is_valid: bool
     input_file: FileValidationResult
     questions_file: FileValidationResult
+    # Optional — only present when a school-filter file was actually uploaded for this
+    # execution. Its absence never blocks is_valid; its presence-but-invalid does.
+    school_filter_file: Optional[FileValidationResult] = None
 
 
 class ExecutionFileCheckpointState(BaseModel):
@@ -290,6 +293,8 @@ class ExecutionDetail(ExecutionResponse):
     input_file_size: Optional[int] = None
     criterias_file_size: Optional[int] = None
     output_file_size: Optional[int] = None
+    school_filter_file_url: Optional[str] = None
+    school_filter_file_size: Optional[int] = None
     upload_completed_at: Optional[datetime] = None
     checkpoint_data: Optional[Dict[str, Any]] = None
     input_file_status: Optional[ExecutionFileCheckpointState] = None
