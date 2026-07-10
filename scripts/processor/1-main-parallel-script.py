@@ -11,6 +11,7 @@ import typing_extensions as typing
 import time
 import mimetypes
 import unicodedata
+import random
 from urllib.request import urlopen
 import re
 import logging
@@ -321,13 +322,6 @@ def _resolve_model_pricing(model_name):
         if pricing is None:
             logger.warning("gemini_pricing_not_found  model=%s", model_name)
         return pricing
-
-# Retriable-error markers for the token-rotation retry handlers below.
-_RETRY_ERROR_MARKERS = ["rate limit", "quota", "429", "resource_exhausted"]
-if _LLM_PROVIDER_NAME == PROVIDER_OPENROUTER:
-    _RETRY_ERROR_MARKERS = _RETRY_ERROR_MARKERS + ["401", "unauthorized", "user not found"]
-elif _LLM_PROVIDER_NAME == PROVIDER_GEMINI:
-    pass  # Gemini uses the base markers above
 
 
 
@@ -1010,29 +1004,56 @@ def _ensure_required_qa_fields(response_json, expected_questions=1):
     return response_json
 
 
-current_llm_token_index = 0
-llm_token_rotation_lock = threading.Lock()
+# Token -> timestamp it was marked dead. A dict (not a set) so a dead token can be
+# re-admitted to rotation after DEAD_TOKEN_TTL_SECONDS — an unauthorized/401 response can
+# be a transient auth-service blip, not necessarily a permanently revoked key, so banning
+# it for the rest of the process would otherwise silently shrink the token pool forever.
+_dead_tokens: dict[str, float] = {}
+_dead_tokens_lock = threading.Lock()
+DEAD_TOKEN_TTL_SECONDS = max(1, int(os.getenv("DEAD_TOKEN_TTL_SECONDS", "300")))
 
-def get_next_llm_token():
-    global current_llm_token_index
-    with llm_token_rotation_lock:
-        index = min(current_llm_token_index, len(_LLM_TOKENS) - 1)
-        if current_llm_token_index >= len(_LLM_TOKENS):
-            logging.debug("[LLM] All tokens exhausted; reusing last valid token index=%d for retry", index)
-        token = _LLM_TOKENS[index]
-        logging.info("[LLM] Using token: -----")
-        return token
+def _mark_token_dead(token: str):
+    with _dead_tokens_lock:
+        _dead_tokens[token] = time.time()
+    logging.error("[LLM] token=***** marked_dead  removing from rotation for %ds", DEAD_TOKEN_TTL_SECONDS)
 
-def switch_to_next_llm_token():
-    global current_llm_token_index
-    with llm_token_rotation_lock:
-        current_llm_token_index += 1
-        if current_llm_token_index >= len(_LLM_TOKENS):
-            logging.error("[LLM] All tokens exhausted!")
-            return None
-        token = _LLM_TOKENS[current_llm_token_index]
-        logging.info("[LLM] Using token: -----")
-        return token
+def _dead_tokens_in_cooldown() -> set[str]:
+    """Tokens still inside their dead-cooldown window. Caller must hold _dead_tokens_lock."""
+    now = time.time()
+    return {t for t, marked_at in _dead_tokens.items() if now - marked_at < DEAD_TOKEN_TTL_SECONDS}
+
+# Token -> timestamp it hit a rate-limit (429/quota) response. Separate from _dead_tokens
+# (auth failures) and much shorter-lived: a rate limit is expected to clear on its own, so
+# the token goes on a brief hold — letting OTHER workers currently pinned to it reroute to
+# a different token — rather than being excluded as broken.
+_rate_limited_tokens: dict[str, float] = {}
+_rate_limited_tokens_lock = threading.Lock()
+RATE_LIMIT_COOLDOWN_SECONDS = max(1, int(os.getenv("RATE_LIMIT_COOLDOWN_SECONDS", "60")))
+
+def _mark_token_rate_limited(token: str):
+    with _rate_limited_tokens_lock:
+        _rate_limited_tokens[token] = time.time()
+    logging.warning("[LLM] token=*****  rate_limited  cooling_down for %ds", RATE_LIMIT_COOLDOWN_SECONDS)
+
+def _rate_limited_tokens_in_cooldown() -> set[str]:
+    """Tokens still inside their rate-limit cooldown window."""
+    now = time.time()
+    with _rate_limited_tokens_lock:
+        return {t for t, marked_at in _rate_limited_tokens.items() if now - marked_at < RATE_LIMIT_COOLDOWN_SECONDS}
+
+def get_worker_token(worker_id: int | None) -> str:
+    with _dead_tokens_lock:
+        dead_now = _dead_tokens_in_cooldown()
+    cooling_down = _rate_limited_tokens_in_cooldown()
+    active = [t for t in _LLM_TOKENS if t not in dead_now and t not in cooling_down]
+    if not active:
+        logging.error("[LLM] all_tokens_dead_or_cooling_down  falling back to last configured token")
+        return _LLM_TOKENS[-1]
+    # worker_id defaults to None on process_image/process_pdf/process_excel (callable
+    # directly without going through main()'s worker pool) — fall back to worker 1
+    # instead of crashing on `None - 1`.
+    resolved_worker_id = worker_id if worker_id is not None else 1
+    return active[(resolved_worker_id - 1) % len(active)]
 
 
 # === Gemini Model Setup ===
@@ -1051,10 +1072,10 @@ if not _LLM_TOKENS:
     raise ValueError(f"[{_LLM_PROVIDER_NAME}] No valid tokens found!")
 
 
-def _llm_generate(parts):
+def _llm_generate(parts, token):
     return generate_content(
         parts,
-        api_key=get_next_llm_token(),
+        api_key=token,
         model_name=LLM_MODEL_NAME,
         generation_config=_build_generation_config(),
     )
@@ -1458,38 +1479,51 @@ def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=N
     logging.debug(f"[Relevance-{mode.upper()}] Final score: {combined_score:.2f} → Tag: {tag}")
     return tag
 
-# Track timestamps of recent requests
-_request_times = deque()
-_request_lock = threading.Lock()
-MAX_REQUESTS_PER_MINUTE = 2000
+# Default matches the old single global bucket (MAX_REQUESTS_PER_MINUTE=2000, shared by
+# all tokens) as a conservative per-token starting point — NOT a validated provider quota.
+# The real ceiling is account/model-dependent (OpenRouter varies by plan and model,
+# Gemini by project tier) and must be tuned per deployment via this env var.
+MAX_RPM_PER_TOKEN = max(1, int(os.getenv("MAX_RPM_PER_TOKEN", "2000")))
 
-def rate_limiter():
-    """Block until we are under the 2000 req/min limit."""
-    global _request_times
-    with _request_lock:
-        now = time.time()
-        # Remove requests older than 60 seconds
-        while _request_times and now - _request_times[0] > 60:
-            _request_times.popleft()
+_token_buckets: dict[str, deque] = {}
+_token_locks: dict[str, threading.Lock] = {}
+_buckets_init_lock = threading.Lock()
 
-        if len(_request_times) >= MAX_REQUESTS_PER_MINUTE:
-            sleep_time = 60 - (now - _request_times[0])
-            if sleep_time > 0:
-                logging.info(f"[RateLimiter] Throttling for {sleep_time:.2f} seconds to stay under 2000 req/min...")
-                time.sleep(sleep_time)
-                return rate_limiter()  # Recheck after sleep
+def _ensure_bucket(token: str):
+    if token not in _token_buckets:
+        with _buckets_init_lock:
+            if token not in _token_buckets:          # double-checked under lock
+                _token_locks[token]   = threading.Lock()  # lock first — outer guard checks _token_buckets
+                _token_buckets[token] = deque()
 
-        _request_times.append(time.time())
+def rate_limiter(token: str):
+    """Block until this specific token is under MAX_RPM_PER_TOKEN. Lock released during sleep."""
+    _ensure_bucket(token)
+    lock = _token_locks[token]
+    dq   = _token_buckets[token]
+    while True:
+        with lock:
+            now = time.time()
+            while dq and now - dq[0] > 60:
+                dq.popleft()
+            if len(dq) < MAX_RPM_PER_TOKEN:
+                dq.append(now)
+                return
+            sleep_time = 61.0 - (now - dq[0])
+        if sleep_time > 0:
+            jitter = random.uniform(0, 3)
+            logging.info("[RateLimiter] token=***** throttled %.1fs (+%.1fs jitter)", sleep_time, jitter)
+            time.sleep(sleep_time + jitter)
 
 
 def process_image(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
                   worker_id=None, input_file=None, row_number=None, school_id=None):
-    global current_token_index
     retries = 0
+    worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
-            rate_limiter()
+            rate_limiter(worker_token)
             image = httpx.get(task_evidence_link)
 
             # Check if this is an enrollment-related task (normalize both sides)
@@ -1651,7 +1685,7 @@ CORRECT JSON Response:
             response = _llm_generate([
                 {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
                 prompt,
-            ])
+            ], token=worker_token)
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1675,14 +1709,36 @@ CORRECT JSON Response:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
-                logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_llm_token():
-                    continue
-                else:
-                    logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
-                    time.sleep(60)
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[LLM] rate_limit_hit  worker=%s  token=*****  error=%s",
+                                worker_id, str(e)[:120])
+                _mark_token_rate_limited(worker_token)
+                previous_token = worker_token
+                worker_token = get_worker_token(worker_id)
+                if worker_token != previous_token:
+                    # Rerouted to a token that isn't currently dead/rate-limited. Still
+                    # counts against max_retries — a token pool that keeps reshuffling
+                    # (tokens cycling in/out of cooldown) would otherwise loop forever.
                     retries += 1
+                    continue
+                # No alternative token available (every other token is dead or also
+                # cooling down) — fall back to backoff+retry on this same token.
+                wait = min(60 * (2 ** retries), 300)
+                logging.warning("[LLM] rate_limit_backoff  worker=%s  attempt=%d  backoff=%ds  no_alternate_token=true",
+                                worker_id, retries + 1, wait)
+                time.sleep(wait)
+                retries += 1
+            elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                with _dead_tokens_lock:
+                    all_dead = len(_dead_tokens_in_cooldown()) >= len(_LLM_TOKENS)
+                if all_dead:
+                    logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
+                    break
+                worker_token = get_worker_token(worker_id)
+                retries += 1
             else:
                 logging.error(f"[Gemini] Error: {e}")
                 retries += 1
@@ -1754,12 +1810,12 @@ You are analyzing an ENROLLMENT REPORT. You MUST extract THREE DIFFERENT numeric
 def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
                 worker_id=None, input_file=None, row_number=None, school_id=None):
     """Process PDF evidence using Gemini API with usage tracking"""
-    global current_token_index
     retries = 0
+    worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
-            rate_limiter()
+            rate_limiter(worker_token)
             # Download PDF
             pdf_response = httpx.get(task_evidence_link)
             pdf_data = pdf_response.content
@@ -1833,7 +1889,7 @@ Focus on:
             response = _llm_generate([
                 {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
                 prompt,
-            ])
+            ], token=worker_token)
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1857,14 +1913,36 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
-                logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_llm_token():
-                    continue
-                else:
-                    logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
-                    time.sleep(60)
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[LLM] rate_limit_hit  worker=%s  token=*****  error=%s",
+                                worker_id, str(e)[:120])
+                _mark_token_rate_limited(worker_token)
+                previous_token = worker_token
+                worker_token = get_worker_token(worker_id)
+                if worker_token != previous_token:
+                    # Rerouted to a token that isn't currently dead/rate-limited. Still
+                    # counts against max_retries — a token pool that keeps reshuffling
+                    # (tokens cycling in/out of cooldown) would otherwise loop forever.
                     retries += 1
+                    continue
+                # No alternative token available (every other token is dead or also
+                # cooling down) — fall back to backoff+retry on this same token.
+                wait = min(60 * (2 ** retries), 300)
+                logging.warning("[LLM] rate_limit_backoff  worker=%s  attempt=%d  backoff=%ds  no_alternate_token=true",
+                                worker_id, retries + 1, wait)
+                time.sleep(wait)
+                retries += 1
+            elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                with _dead_tokens_lock:
+                    all_dead = len(_dead_tokens_in_cooldown()) >= len(_LLM_TOKENS)
+                if all_dead:
+                    logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
+                    break
+                worker_token = get_worker_token(worker_id)
+                retries += 1
             else:
                 logging.error(f"[Gemini] PDF processing error: {e}")
                 retries += 1
@@ -1875,12 +1953,12 @@ Focus on:
 def process_excel(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
                   worker_id=None, input_file=None, row_number=None, school_id=None):
     """Process Excel evidence - download and convert to text for Gemini with usage tracking"""
-    global current_token_index
     retries = 0
+    worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
     while retries < max_retries:
         try:
-            rate_limiter()
+            rate_limiter(worker_token)
             # Download Excel file
             excel_response = httpx.get(task_evidence_link)
             
@@ -1960,7 +2038,7 @@ Focus on:
 - Educational context"""
                 prompt += ENROLLMENT_PROMPT_SUFFIX
             
-            response = _llm_generate([prompt])
+            response = _llm_generate([prompt], token=worker_token)
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
@@ -1984,14 +2062,36 @@ Focus on:
             return response_json
         except Exception as e:
             error_str = str(e).lower()
-            if any(k in error_str for k in _RETRY_ERROR_MARKERS):
-                logging.warning("[Gemini] Rate limit or quota exceeded. Switching token...")
-                if switch_to_next_llm_token():
-                    continue
-                else:
-                    logging.warning("[Gemini] No more tokens. Retrying in 60 seconds...")
-                    time.sleep(60)
+            if any(k in error_str for k in ["rate limit", "quota", "429", "resource_exhausted"]):
+                logging.warning("[LLM] rate_limit_hit  worker=%s  token=*****  error=%s",
+                                worker_id, str(e)[:120])
+                _mark_token_rate_limited(worker_token)
+                previous_token = worker_token
+                worker_token = get_worker_token(worker_id)
+                if worker_token != previous_token:
+                    # Rerouted to a token that isn't currently dead/rate-limited. Still
+                    # counts against max_retries — a token pool that keeps reshuffling
+                    # (tokens cycling in/out of cooldown) would otherwise loop forever.
                     retries += 1
+                    continue
+                # No alternative token available (every other token is dead or also
+                # cooling down) — fall back to backoff+retry on this same token.
+                wait = min(60 * (2 ** retries), 300)
+                logging.warning("[LLM] rate_limit_backoff  worker=%s  attempt=%d  backoff=%ds  no_alternate_token=true",
+                                worker_id, retries + 1, wait)
+                time.sleep(wait)
+                retries += 1
+            elif any(k in error_str for k in ["401", "unauthorized", "user not found"]):
+                logging.error("[LLM] unauthorized  worker=%s  token=*****  marking_dead  error=%s",
+                              worker_id, str(e)[:120])
+                _mark_token_dead(worker_token)
+                with _dead_tokens_lock:
+                    all_dead = len(_dead_tokens_in_cooldown()) >= len(_LLM_TOKENS)
+                if all_dead:
+                    logging.error("[LLM] all_tokens_dead  worker=%s  aborting", worker_id)
+                    break
+                worker_token = get_worker_token(worker_id)
+                retries += 1
             else:
                 logging.error(f"[Gemini] Excel processing error: {e}")
                 retries += 1
