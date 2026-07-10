@@ -188,6 +188,9 @@ class ExecutionValidationResponse(BaseModel):
     is_valid: bool
     input_file: FileValidationResult
     questions_file: FileValidationResult
+    # Optional — only present when a school-filter file was actually uploaded for this
+    # execution. Its absence never blocks is_valid; its presence-but-invalid does.
+    school_filter_file: Optional[FileValidationResult] = None
 
 
 class ExecutionFileCheckpointState(BaseModel):

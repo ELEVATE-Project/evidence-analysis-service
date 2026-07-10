@@ -1597,6 +1597,41 @@ class ExecutionService:
                 questions_result.valid = False
                 questions_result.message = self._to_user_friendly_validation_message(str(exc.detail), "Questions file")
 
+        # School filter is optional — only validated (and only shown in the response/preview)
+        # when one is actually attached. Its absence never blocks is_valid; its presence but
+        # invalidity does, same as input/questions.
+        school_filter_result: Optional[FileValidationResult] = None
+        school_filter_path = execution.school_filter_file_url
+        if school_filter_path:
+            school_filter_result = FileValidationResult(file_type="school_filter", valid=False)
+            required_school_filter_column = self._required_school_filter_column(source_type)
+            try:
+                school_filter_bytes = await self.storage_service.download_file(school_filter_path)
+                if not school_filter_bytes:
+                    raise HTTPException(status_code=400, detail="School filter file could not be downloaded.")
+                headers, row_count, preview_rows, _ = self._parse_csv_preview(
+                    school_filter_bytes,
+                    "School filter file",
+                )
+                school_filter_result.rows_detected = row_count
+                school_filter_result.columns_detected = headers
+                school_filter_result.preview_rows = preview_rows
+                if required_school_filter_column not in headers:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                    )
+                school_filter_result.valid = True
+                school_filter_result.message = (
+                    f"✓ School filter file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
+                )
+                school_filter_result.missing_columns = []
+            except HTTPException as exc:
+                detail = str(exc.detail)
+                school_filter_result.message = self._to_user_friendly_validation_message(detail, "School filter file")
+                if detail.endswith("column."):
+                    school_filter_result.missing_columns = [required_school_filter_column]
+
         self._update_file_checkpoint(
             execution,
             file_type="input",
@@ -1611,8 +1646,20 @@ class ExecutionService:
             message=questions_result.message,
             missing_columns=questions_result.missing_columns,
         )
+        if school_filter_result is not None:
+            self._update_file_checkpoint(
+                execution,
+                file_type="school_filter",
+                validated=school_filter_result.valid,
+                message=school_filter_result.message,
+                missing_columns=school_filter_result.missing_columns,
+            )
 
-        is_valid = input_result.valid and questions_result.valid
+        is_valid = (
+            input_result.valid
+            and questions_result.valid
+            and (school_filter_result is None or school_filter_result.valid)
+        )
         execution.status = "validated" if is_valid else "draft"
         execution.failure_reason = None if is_valid else "File validation failed. Upload valid files and retry."
         self.db.commit()
@@ -1623,6 +1670,7 @@ class ExecutionService:
             is_valid=is_valid,
             input_file=input_result,
             questions_file=questions_result,
+            school_filter_file=school_filter_result,
         )
 
     async def start_execution(self, execution_id: UUID, user_id: str) -> ExecutionResponse:
@@ -1947,6 +1995,40 @@ class ExecutionService:
                     detail="Questions file could not be read for validation.",
                 )
             self._validate_questions_csv_against_source(questions_file_bytes, source_type)
+
+            # School filter is optional, so only re-validate it if one is actually attached —
+            # but if it is, it gets the same re-check as input/questions rather than being
+            # trusted blindly until the background worker tries to download it.
+            school_filter_size = execution.school_filter_file_size
+            if execution.school_filter_file_url:
+                school_filter_metadata = await self.storage_service.get_file_metadata(
+                    execution.school_filter_file_url
+                )
+                if not school_filter_metadata:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="School filter file upload not found",
+                    )
+                self._validate_uploaded_metadata(school_filter_metadata, "School filter file")
+
+                school_filter_bytes = await self.storage_service.download_file(execution.school_filter_file_url)
+                if not school_filter_bytes:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="School filter file could not be read for validation.",
+                    )
+                school_filter_headers, _ = self._extract_headers_and_row_count(
+                    school_filter_bytes, "School filter file"
+                )
+                required_school_filter_column = self._required_school_filter_column(source_type)
+                if required_school_filter_column not in school_filter_headers:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"School filter file must contain a '{required_school_filter_column}' column.",
+                    )
+                school_filter_size = int(
+                    school_filter_metadata.get("size_bytes", execution.school_filter_file_size or 0)
+                )
         except HTTPException as exc:
             self._mark_execution_failed(execution, str(exc.detail))
             raise
@@ -1961,6 +2043,7 @@ class ExecutionService:
         await self._apply_execution_estimates(execution)
         execution.input_file_size = int(input_metadata.get("size_bytes", execution.input_file_size or 0))
         execution.criterias_file_size = int(questions_metadata.get("size_bytes", execution.criterias_file_size or 0))
+        execution.school_filter_file_size = school_filter_size
         execution.status = "queued"
         execution.upload_completed_at = datetime.utcnow()
         execution.failure_reason = None
