@@ -323,6 +323,31 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "optional": True,
         "default": "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py",
     },
+    "MERGE_SCRIPT_PATH": {
+        "message": "Batch-output merge script path",
+        "optional": True,
+        "default": "scripts/processor/3-merge-batch-outputs.py",
+    },
+    "MAIN_FILE_SPLIT": {
+        "message": "Main-batch toggle: 'yes'/'no' to force on/off, blank for dynamic",
+        "optional": True,
+        "default": "",
+    },
+    "MIN_ROWS_FOR_MAIN_BATCHING": {
+        "message": "Row-count threshold below which dynamic mode uses a single main file; also the target rows per batch",
+        "optional": True,
+        "default": 5000,
+    },
+    "MAIN_BATCH_ROWS_PER_BATCH": {
+        "message": "Target rows per main batch",
+        "optional": True,
+        "default": 10000,
+    },
+    "MAX_MAIN_BATCHES": {
+        "message": "Hard cap on the number of main batches",
+        "optional": True,
+        "default": 200,
+    },
     "REMOVE_INVALID_ROWS_FROM_OUTPUT": {
         "message": "Strip notValidated/Failed/blank-tag rows from the delivered output CSV",
         "optional": True,
