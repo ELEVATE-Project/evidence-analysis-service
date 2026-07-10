@@ -81,7 +81,7 @@ class ConfigService:
         Supported contract:
         - type=project        -> project CSV source types (type_key=project_report).
         - type=evidence_type  -> allowed evidence types for the evidence-type filter.
-        - type=school_filter  -> required column name for the school-filter CSV.
+        - type=school_filter  -> required column name + enabled flag for the school-filter CSV.
         """
         normalized_type = (config_type or "").strip().lower()
         if normalized_type == "school_filter":
@@ -112,7 +112,13 @@ class ConfigService:
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail="school_filter_config is not configured for this tenant's CSV source type.",
                 )
-            return [{"required_column": str(required_column).strip()}]
+            # Frontend upload-section gate: only show the school-filter upload UI once a
+            # sample CSV has been configured for this tenant's source type — mirrors the
+            # signal bootstrap.py already uses to decide whether the feature is onboarded.
+            return [{
+                "required_column": str(required_column).strip(),
+                "school_filter_enabled": bool(source_type.sample_school_filter_file_url),
+            }]
 
         if normalized_type == "evidence_type":
             tenant_code, organization_code = self._resolve_scope(current_user)
