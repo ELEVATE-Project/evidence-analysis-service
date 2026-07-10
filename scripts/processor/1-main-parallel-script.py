@@ -1716,8 +1716,10 @@ CORRECT JSON Response:
                 previous_token = worker_token
                 worker_token = get_worker_token(worker_id)
                 if worker_token != previous_token:
-                    # Rerouted to a token that isn't currently dead/rate-limited — free
-                    # switch (mirrors the old global-rotation behavior), no retry consumed.
+                    # Rerouted to a token that isn't currently dead/rate-limited. Still
+                    # counts against max_retries — a token pool that keeps reshuffling
+                    # (tokens cycling in/out of cooldown) would otherwise loop forever.
+                    retries += 1
                     continue
                 # No alternative token available (every other token is dead or also
                 # cooling down) — fall back to backoff+retry on this same token.
@@ -1918,8 +1920,10 @@ Focus on:
                 previous_token = worker_token
                 worker_token = get_worker_token(worker_id)
                 if worker_token != previous_token:
-                    # Rerouted to a token that isn't currently dead/rate-limited — free
-                    # switch (mirrors the old global-rotation behavior), no retry consumed.
+                    # Rerouted to a token that isn't currently dead/rate-limited. Still
+                    # counts against max_retries — a token pool that keeps reshuffling
+                    # (tokens cycling in/out of cooldown) would otherwise loop forever.
+                    retries += 1
                     continue
                 # No alternative token available (every other token is dead or also
                 # cooling down) — fall back to backoff+retry on this same token.
@@ -2065,8 +2069,10 @@ Focus on:
                 previous_token = worker_token
                 worker_token = get_worker_token(worker_id)
                 if worker_token != previous_token:
-                    # Rerouted to a token that isn't currently dead/rate-limited — free
-                    # switch (mirrors the old global-rotation behavior), no retry consumed.
+                    # Rerouted to a token that isn't currently dead/rate-limited. Still
+                    # counts against max_retries — a token pool that keeps reshuffling
+                    # (tokens cycling in/out of cooldown) would otherwise loop forever.
+                    retries += 1
                     continue
                 # No alternative token available (every other token is dead or also
                 # cooling down) — fall back to backoff+retry on this same token.
