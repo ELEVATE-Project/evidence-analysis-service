@@ -1,7 +1,7 @@
 """
 Standalone cleanup script: removes rows with no AI-evaluation result from a processed output CSV.
 
-A row ends up with an empty 'Task evidence Q and A' / 'Task evidence Q and A Reason' when the
+A row ends up with an empty 'Evidence Q and A' / 'Evidence Q and A Reason' when the
 processor never got a usable AI answer for it — see 1-main-parallel-script.py's skip paths: no
 question found for the task ("User-Owned"), the relevant-evidence cap was reached ("Capped",
 tag=notValidated), or the AI response was invalid ("Failed"). notValidated rows are identified
@@ -25,10 +25,9 @@ from pathlib import Path
 SERVICE_ROOT = Path(__file__).resolve().parents[2]
 if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
-from core.constants import RELEVANCE_TAG_NOT_VALIDATED
+from core.constants import RELEVANCE_TAG_NOT_VALIDATED, DEFAULT_EVIDENCE_COLUMN
 
-CHECK_COLUMNS = ("Task evidence Q and A", "Task evidence Q and A Reason")
-URL_COLUMN = "Task Evidence"
+CHECK_COLUMNS = ("Evidence Q and A", "Evidence Q and A Reason")
 RELEVANCE_TAG_COLUMN = "Relevance Tag"
 URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 
@@ -39,10 +38,18 @@ def _parse_args():
     )
     parser.add_argument("--input-csv", required=True, help="Path to the processed output CSV to clean")
     parser.add_argument("--output-csv", required=True, help="Path to write the cleaned CSV")
+    parser.add_argument(
+        "--evidence-column",
+        default=None,
+        help="Evidence-URL column in the input CSV (per-tenant, from "
+        "CsvSourceType.evidence_columns[0].column); absent = core.constants default",
+    )
     return parser.parse_args()
 
 
-def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int, int]:
+def remove_not_validated(
+    input_csv: str, output_csv: str, url_column: str = DEFAULT_EVIDENCE_COLUMN
+) -> tuple[int, int, int, int]:
     """Write input_csv to output_csv with invalid rows removed.
 
     A row is invalid if its Relevance Tag is 'notValidated' (relevant-evidence cap reached)
@@ -67,7 +74,7 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int
         reader = csv.DictReader(infile)
         if not reader.fieldnames:
             raise ValueError(f"'{input_csv}' has no header row.")
-        missing = [col for col in (*CHECK_COLUMNS, URL_COLUMN, RELEVANCE_TAG_COLUMN) if col not in reader.fieldnames]
+        missing = [col for col in (*CHECK_COLUMNS, url_column, RELEVANCE_TAG_COLUMN) if col not in reader.fieldnames]
         if missing:
             raise ValueError(f"'{input_csv}' is missing column(s): {', '.join(missing)}")
 
@@ -83,7 +90,7 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int
                     removed += 1
                     if is_not_validated:
                         not_validated_count += 1
-                    evidence_value = (row.get(URL_COLUMN) or "").strip()
+                    evidence_value = (row.get(url_column) or "").strip()
                     if evidence_value:
                         found = URL_PATTERN.findall(evidence_value)
                         extracted_url_count += len(found) if found else 1
@@ -95,9 +102,16 @@ def remove_not_validated(input_csv: str, output_csv: str) -> tuple[int, int, int
 
 if __name__ == "__main__":
     args = _parse_args()
+    evidence_column = (
+        (args.evidence_column or "").strip()
+        or (os.getenv("CLEANUP_EVIDENCE_COLUMN", "") or "").strip()
+        or DEFAULT_EVIDENCE_COLUMN
+    )
 
     print(f"📖 Reading: {args.input_csv}")
-    total, removed, not_validated_count, extracted_url_count = remove_not_validated(args.input_csv, args.output_csv)
+    total, removed, not_validated_count, extracted_url_count = remove_not_validated(
+        args.input_csv, args.output_csv, url_column=evidence_column
+    )
     kept = total - removed
     blank_qa_count = removed - not_validated_count
 

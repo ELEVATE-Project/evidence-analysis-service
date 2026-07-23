@@ -2,7 +2,7 @@
 Config Service
 Provides configuration list APIs.
 """
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
@@ -75,15 +75,24 @@ class ConfigService:
             "threshold_config": default_thresholds,
         }
 
-    def list(self, config_type: str, current_user: UserResponse) -> list[dict[str, Any]]:
+    def list(
+        self, config_type: str, current_user: UserResponse, type_key: Optional[str] = None
+    ) -> list[dict[str, Any]]:
         """
         List config entries for the requested type.
         Supported contract:
-        - type=project        -> project CSV source types (type_key=project_report).
-        - type=evidence_type  -> allowed evidence types for the evidence-type filter.
-        - type=school_filter  -> required column name + enabled flag for the school-filter CSV.
+        - type=project        -> all active CSV source types for this tenant/org (the
+          workflow/source-type selector's option list). type_key is ignored here — this is
+          the endpoint used to discover which type_keys exist.
+        - type=evidence_type  -> allowed evidence types for the evidence-type filter, for
+          the source type identified by type_key (defaults to "project_report" when
+          omitted, for backward compatibility with callers made before multiple source
+          types existed).
+        - type=school_filter  -> required column name + enabled flag for the school-filter
+          CSV, for the source type identified by type_key (same default as evidence_type).
         """
         normalized_type = (config_type or "").strip().lower()
+        resolved_type_key = (type_key or "").strip() or "project_report"
         if normalized_type == "school_filter":
             tenant_code, organization_code = self._resolve_scope(current_user)
             source_type = (
@@ -92,14 +101,14 @@ class ConfigService:
                     CsvSourceType.tenant_code == tenant_code,
                     CsvSourceType.organization_code == organization_code,
                     CsvSourceType.is_active.is_(True),
-                    CsvSourceType.type_key == "project_report",
+                    CsvSourceType.type_key == resolved_type_key,
                 )
                 .first()
             )
             if not source_type:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="No active project_report CSV source type configured for this tenant/organization.",
+                    detail=f"No active '{resolved_type_key}' CSV source type configured for this tenant/organization.",
                 )
             school_filter_config = source_type.school_filter_config
             required_column = (
@@ -128,14 +137,14 @@ class ConfigService:
                     CsvSourceType.tenant_code == tenant_code,
                     CsvSourceType.organization_code == organization_code,
                     CsvSourceType.is_active.is_(True),
-                    CsvSourceType.type_key == "project_report",
+                    CsvSourceType.type_key == resolved_type_key,
                 )
                 .first()
             )
             if not source_type:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail="No active project_report CSV source type configured for this tenant/organization.",
+                    detail=f"No active '{resolved_type_key}' CSV source type configured for this tenant/organization.",
                 )
             if not isinstance(source_type.evidence_types_config, list) or not source_type.evidence_types_config:
                 raise HTTPException(
@@ -166,7 +175,6 @@ class ConfigService:
                 CsvSourceType.tenant_code == tenant_code,
                 CsvSourceType.organization_code == organization_code,
                 CsvSourceType.is_active.is_(True),
-                CsvSourceType.type_key == "project_report",
             )
             .order_by(CsvSourceType.display_name.asc())
             .all()
@@ -175,19 +183,21 @@ class ConfigService:
         return [self._serialize_csv_source_type(item) for item in source_types]
 
     async def get_sample_file_url(
-        self, type_id: int, file_type: str, current_user: UserResponse
+        self, type_key: str, file_type: str, current_user: UserResponse
     ) -> ReportDownloadResponse:
         """
         Get signed download URL for sample CSV file.
-        
+
         Args:
-            type_id: CSV source type ID
+            type_key: CsvSourceType.type_key (e.g. "project_report") — same identifier
+                execution.csv_type_id and /config/list?type_key= already use, so callers
+                never need to resolve a numeric id first.
             file_type: Either "input" or "criteria"
             current_user: Current authenticated user
-            
+
         Returns:
             ReportDownloadResponse with signed download URL
-            
+
         Raises:
             HTTPException: If type not found or sample URL not configured
         """
@@ -199,23 +209,23 @@ class ConfigService:
             )
 
         tenant_code, organization_code = self._resolve_scope(current_user)
-        
+
         # Fetch CSV source type
         source_type = (
             self.db.query(CsvSourceType)
             .filter(
-                CsvSourceType.id == type_id,
+                CsvSourceType.type_key == type_key,
                 CsvSourceType.tenant_code == tenant_code,
                 CsvSourceType.organization_code == organization_code,
                 CsvSourceType.is_active.is_(True),
             )
             .first()
         )
-        
+
         if not source_type:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"CSV source type with id={type_id} not found.",
+                detail=f"CSV source type with type_key='{type_key}' not found.",
             )
         
         # Get the appropriate sample URL

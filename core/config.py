@@ -124,6 +124,9 @@ class Settings(BaseSettings):
     # Execution workspace + script runtime
     EXECUTION_WORKSPACE_ROOT: str = os.getenv("EXECUTION_WORKSPACE_ROOT", "/tmp/evidence_analysis/executions")
     EXECUTION_CLEANUP_ON_SUCCESS: bool = os.getenv("EXECUTION_CLEANUP_ON_SUCCESS", "true").lower() == "true"
+    SPLIT_MULTI_EVIDENCE_SCRIPT_PATH: str = os.getenv(
+        "SPLIT_MULTI_EVIDENCE_SCRIPT_PATH", "scripts/pre-processor/0-split-multi-evidence.py"
+    )
     PREPROCESS_SCRIPT_PATH: str = os.getenv("PREPROCESS_SCRIPT_PATH", "scripts/pre-processor/1-pre-processor.py")
     PROCESSOR_SCRIPT_PATH: str = os.getenv("PROCESSOR_SCRIPT_PATH", "scripts/processor/1-main-parallel-script.py")
     CLEANUP_SCRIPT_PATH: str = os.getenv("CLEANUP_SCRIPT_PATH", "scripts/processor/2-remove-nonvalidated-and-empty-evidences.py")

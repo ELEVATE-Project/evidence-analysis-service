@@ -43,12 +43,35 @@ RELEVANCE_TAG_NOT_VALIDATED = "notValidated"
 # (scripts/pre-processor/1-pre-processor.py) reads this exact column name via
 # csv.DictReader; the service validates it up front so a filter that would match
 # nothing is rejected at upload instead of silently dropping every row.
-# Matches the input CSV's own "School ID" column name (scripts/pre-processor/
-# 1-pre-processor.py's hardcoded input-side lookup) rather than the UDISE+ program's
-# branded name, since the two columns are compared by value and using the same label
-# in both files makes that relationship obvious instead of requiring the uploader to
-# learn a second name for the same field.
+# Matches the input CSV's own school-ID column name by default (see
+# DEFAULT_INPUT_SCHOOL_ID_COLUMN below) rather than the UDISE+ program's branded name,
+# since the two columns are compared by value and using the same label in both files
+# makes that relationship obvious instead of requiring the uploader to learn a second
+# name for the same field. The two constants are independently configurable per tenant
+# via CsvSourceType.school_filter_config / column_mappings.geo.school_id — this is just
+# their shared default.
 SCHOOL_FILTER_REQUIRED_COLUMN = "School ID"
+
+# Fallback/default only — per-tenant source of truth is
+# CsvSourceType.column_mappings["geo"]["school_id"] (models/csv_source_type.py). Used to
+# seed that config's default and as a backstop for scripts run standalone (no execution
+# context to resolve tenant config from).
+DEFAULT_INPUT_SCHOOL_ID_COLUMN = "School ID"
+
+# Fallback/default only — per-tenant source of truth is
+# CsvSourceType.evidence_columns[0]["column"] (models/csv_source_type.py). Used the same
+# way as DEFAULT_INPUT_SCHOOL_ID_COLUMN above.
+DEFAULT_EVIDENCE_COLUMN = "Task Evidence"
+
+# Fallback/default only — per-tenant source of truth is CsvSourceType.identity_column
+# (models/csv_source_type.py). The column whose value identifies "who/what this evidence
+# row belongs to" for the pre-processor's group-aware split, the processor's resume/dedup
+# keys, and the per-(identity, task) relevant-evidence cap. "UUID" is correct for
+# project_report (one evidence upload per user per project); other CSV shapes where the
+# same UUID legitimately recurs across independent submissions (e.g. "observation", where
+# one mentor submits many separate school visits) should point this at a column that's
+# actually unique per submission instead.
+DEFAULT_IDENTITY_COLUMN = "UUID"
 
 # Full set of bucketed relevance tags — used for report aggregation.
 RELEVANCE_TYPES = {

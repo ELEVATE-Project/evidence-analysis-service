@@ -95,39 +95,17 @@ def seed_default_users(db: Session) -> None:
     logger.info("Seed data initialization completed")
 
 
-def seed_default_csv_source_types(db: Session) -> None:
-    """Seed default CSV source type configuration for project reports."""
-    tenant_code = (settings.DEFAULT_TENANT_CODE or "default").strip() or "default"
-    organization_code = (settings.DEFAULT_ORGANIZATION_CODE or "default_code").strip() or "default_code"
-
-    existing = (
-        db.query(CsvSourceType)
-        .filter(
-            CsvSourceType.tenant_code == tenant_code,
-            CsvSourceType.organization_code == organization_code,
-            CsvSourceType.type_key == "project_report",
-        )
-        .first()
-    )
-    if existing:
-        logger.info("CSV source type project_report already exists, skipping")
-        return
-
-    admin_user = AuthService(db).get_user_by_username("admin")
-    admin_user_id = admin_user.id if admin_user else None
-
-    source_type = CsvSourceType(
-        tenant_code=tenant_code,
-        organization_code=organization_code,
-        type_key="project_report",
-        display_name="Project Report",
-        description="Project report CSV format for evidence validation.",
-        has_geo=True,
-        has_program=True,
-        has_rubric=False,
-        has_narrative=False,
-        max_rows_per_upload=10000,
-        column_mappings={
+_DEFAULT_CSV_SOURCE_TYPES = [
+    {
+        "type_key": "project_report",
+        "display_name": "Project Report",
+        "description": "Project report CSV format for evidence validation.",
+        "has_geo": True,
+        "has_program": True,
+        "has_rubric": False,
+        "has_narrative": False,
+        "max_rows_per_upload": 10000,
+        "column_mappings": {
             "identifier": "UUID",
             "geo": {
                 "state": "Declared State",
@@ -139,13 +117,13 @@ def seed_default_csv_source_types(db: Session) -> None:
             "user_id": "UUID",
             "program": {"id": "Program ID", "name": "Program Name"},
         },
-        evidence_columns=[{"column": "Task Evidence", "rule": "VALIDATE"}],
-        evidence_context_config={
+        "evidence_columns": [{"column": "Task Evidence", "rule": "VALIDATE"}],
+        "evidence_context_config": {
             "source": "column",
             "title_column": "Tasks",
         },
-        available_filters=["state", "district", "block", "school_name", "relevance_tag"],
-        question_config={
+        "available_filters": ["state", "district", "block", "school_name", "relevance_tag"],
+        "question_config": {
             "entry_options": [
                 {
                     "key": "UPLOAD",
@@ -156,16 +134,94 @@ def seed_default_csv_source_types(db: Session) -> None:
             "mandatory_columns": ["evidence_context_config.title_column", "Question"],
             "optional_columns": [],
         },
-        default_thresholds={"relevant": 0.7, "partial": 0.5},
-        evidence_types_config=DEFAULT_EVIDENCE_TYPES_CONFIG,
-        is_active=True,
-        created_by=admin_user_id,
-        updated_by=admin_user_id,
-    )
+        "default_thresholds": {"relevant": 0.7, "partial": 0.5},
+    },
+    {
+        "type_key": "observation",
+        "display_name": "Observation",
+        "description": "Observation report CSV format for evidence validation.",
+        "has_geo": True,
+        "has_program": True,
+        "has_rubric": False,
+        "has_narrative": False,
+        "max_rows_per_upload": 10000,
+        "column_mappings": {
+            # Not "UUID": the same UUID legitimately recurs across many independent
+            # observation submissions by one mentor (same rubric questions, different
+            # schools/visits). "Observation Submission Id" is unique per visit, so it's
+            # what the pipeline's group-aware split / resume-dedup / relevant-cap logic
+            # needs to key on instead — see _resolve_identity_column_from_config in
+            # services/execution_processor.py.
+            "identifier": "Observation Submission Id",
+            "geo": {
+                "state": "State",
+                "district": "District",
+                "block": "Block",
+                "school_id": "School Id",
+                "school_name": "School",
+            },
+            "user_id": "UUID",
+            "program": {"id": "Program Id", "name": "Program"},
+        },
+        "evidence_columns": [{"column": "Evidences", "rule": "VALIDATE"}],
+        "evidence_context_config": {
+            "source": "column",
+            "title_column": "Question Id",
+        },
+        "available_filters": ["state", "district", "block", "school_name", "relevance_tag"],
+        "question_config": {
+            "entry_options": [
+                {
+                    "key": "UPLOAD",
+                    "label": "Upload Checklist CSV",
+                    "desc": "Match unique Question IDs to specific evidence_criteria.",
+                }
+            ],
+            "mandatory_columns": ["evidence_context_config.title_column", "Question"],
+            "optional_columns": [],
+        },
+        "default_thresholds": {"relevant": 0.7, "partial": 0.5},
+    },
+]
 
-    db.add(source_type)
-    db.commit()
-    logger.info("Seeded default csv_source_type: project_report")
+
+def seed_default_csv_source_types(db: Session) -> None:
+    """Seed default CSV source type configurations for the default tenant scope."""
+    tenant_code = (settings.DEFAULT_TENANT_CODE or "default").strip() or "default"
+    organization_code = (settings.DEFAULT_ORGANIZATION_CODE or "default_code").strip() or "default_code"
+
+    admin_user = AuthService(db).get_user_by_username("admin")
+    admin_user_id = admin_user.id if admin_user else None
+
+    for type_def in _DEFAULT_CSV_SOURCE_TYPES:
+        type_key = type_def["type_key"]
+
+        existing = (
+            db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.tenant_code == tenant_code,
+                CsvSourceType.organization_code == organization_code,
+                CsvSourceType.type_key == type_key,
+            )
+            .first()
+        )
+        if existing:
+            logger.info("CSV source type %s already exists, skipping", type_key)
+            continue
+
+        source_type = CsvSourceType(
+            tenant_code=tenant_code,
+            organization_code=organization_code,
+            evidence_types_config=DEFAULT_EVIDENCE_TYPES_CONFIG,
+            is_active=True,
+            created_by=admin_user_id,
+            updated_by=admin_user_id,
+            **type_def,
+        )
+
+        db.add(source_type)
+        db.commit()
+        logger.info("Seeded default csv_source_type: %s", type_key)
 
 
 def run_seed() -> None:

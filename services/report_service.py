@@ -20,24 +20,19 @@ from core.constants import (
     RELEVANCE_TAG_IRRELEVANT,
     RELEVANCE_TAG_NOT_VALIDATED,
 )
+from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from models.schemas import ReportDataPageResponse, ReportDownloadResponse, ReportResponse
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_REPORT_COLUMNS = [
-    "UUID",
-    "Declared State",
-    "District",
-    "Block",
-    "School Name",
-    "Tasks",
-    "Project ID",
-    "Project start date of the user",
-    "Project completion date of the user",
-    "Relevance Tag",
-]
+# "Relevance Tag" is the one column every processor output has regardless of CSV source
+# type — scripts/processor/1-main-parallel-script.py writes it as a literal, unconfigurable
+# header, never sourced from CsvSourceType. Everything else that varies by CSV shape
+# (state/district/block/school/task/identity column names) is resolved per-execution by
+# _resolve_report_columns() below instead of being hardcoded here.
+_ALWAYS_REQUIRED_REPORT_COLUMNS = ["Relevance Tag"]
 
 
 class ReportCsvNotFoundError(Exception):
@@ -64,6 +59,49 @@ class ReportService:
             Execution.id == execution_id,
             Execution.created_by == user_id
         ).first()
+
+    def _resolve_required_report_columns(self, execution: Execution) -> list[str]:
+        """Per-tenant required columns for the downloaded output CSV, sourced from
+        CsvSourceType.column_mappings / evidence_context_config so a CSV shape other than
+        project_report (e.g. "observation") isn't rejected for lacking project_report's
+        literal header names. Falls back to those same literal names when no active
+        config row exists, preserving prior behavior exactly for that case.
+
+        Uses column_mappings["user_id"] (the real person/mentor identity) rather than
+        ["identifier"] (which for "observation" is "Observation Submission Id" — the
+        per-visit pipeline dedup/cap key, not a person identity).
+        """
+        csv_type_id = (execution.csv_type_id or "").strip()
+        source_type = (
+            self.db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.tenant_code == execution.tenant_code,
+                CsvSourceType.organization_code == execution.organization_code,
+                CsvSourceType.type_key == csv_type_id,
+                CsvSourceType.is_active.is_(True),
+            )
+            .first()
+            if csv_type_id
+            else None
+        )
+        column_mappings = (
+            source_type.column_mappings if source_type and isinstance(source_type.column_mappings, dict) else {}
+        )
+        geo = column_mappings.get("geo") if isinstance(column_mappings.get("geo"), dict) else {}
+        evidence_context_config = (
+            source_type.evidence_context_config
+            if source_type and isinstance(source_type.evidence_context_config, dict)
+            else {}
+        )
+        return [
+            str(column_mappings.get("user_id") or "UUID").strip() or "UUID",
+            str(geo.get("state") or "Declared State").strip() or "Declared State",
+            str(geo.get("district") or "District").strip() or "District",
+            str(geo.get("block") or "Block").strip() or "Block",
+            str(geo.get("school_name") or "School Name").strip() or "School Name",
+            str(evidence_context_config.get("title_column") or "Tasks").strip() or "Tasks",
+            *_ALWAYS_REQUIRED_REPORT_COLUMNS,
+        ]
     
     def get_report(self, execution_id: UUID, user_id: str) -> Optional[ReportResponse]:
         """Get report data for completed execution"""
@@ -173,10 +211,11 @@ class ReportService:
             )
             raise ReportCsvValidationError("Output CSV is corrupted or not UTF-8 encoded")
 
-        self._validate_report_csv_structure(csv_text)
+        required_columns = self._resolve_required_report_columns(execution)
+        self._validate_report_csv_structure(csv_text, required_columns)
         return csv_text
 
-    def _validate_report_csv_structure(self, csv_text: str) -> None:
+    def _validate_report_csv_structure(self, csv_text: str, required_columns: list[str]) -> None:
         try:
             reader = csv.DictReader(StringIO(csv_text))
         except csv.Error as exc:
@@ -194,7 +233,7 @@ class ReportService:
                 cleaned = cleaned.lstrip("\ufeff")
             normalized_headers.append(cleaned)
 
-        missing_columns = [column for column in REQUIRED_REPORT_COLUMNS if column not in normalized_headers]
+        missing_columns = [column for column in required_columns if column not in normalized_headers]
         if missing_columns:
             raise ReportCsvValidationError(
                 f"Missing required CSV columns: {', '.join(missing_columns)}"
