@@ -500,6 +500,19 @@ if header is None:
 print(f"Loaded {total_input_rows} data rows to process.")
 # --- END NEW ---
 
+# Guard against a config mismatch: if SCHOOL_ID_COLUMN isn't in the input CSV header,
+# `school_id = row.get(SCHOOL_ID_COLUMN, "")` below would silently resolve to "" for
+# every row, so the USE_SCHOOL_FILTER membership check would filter out every single
+# row with no indication it's a config mismatch rather than a real 0-match result.
+# Mirrors the FILTER_CSV-not-found fallback above: disable filtering and continue
+# rather than aborting the whole run.
+if USE_SCHOOL_FILTER and SCHOOL_ID_COLUMN not in header:
+    print(
+        f"⚠️  USE_SCHOOL_FILTER is True but '{SCHOOL_ID_COLUMN}' column not found in "
+        f"input CSV header. Skipping school filter."
+    )
+    USE_SCHOOL_FILTER = False
+
 input_task_column = _resolve_input_task_column(header, TASK_MATCH_COLUMN_CONFIG)
 
 filtered_rows = []
