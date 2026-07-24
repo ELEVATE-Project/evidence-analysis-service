@@ -73,6 +73,11 @@ DEFAULT_EVIDENCE_COLUMN = "Task Evidence"
 # actually unique per submission instead.
 DEFAULT_IDENTITY_COLUMN = "UUID"
 
+# Backward-compat default type_key for config lookups (services/config_service.py) made
+# before multiple CsvSourceTypes existed, where an omitted type_key implicitly meant
+# "project_report".
+DEFAULT_CSV_TYPE_KEY = "project_report"
+
 # Full set of bucketed relevance tags — used for report aggregation.
 RELEVANCE_TYPES = {
     RELEVANCE_TAG_RELEVANT,

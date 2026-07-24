@@ -8,6 +8,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.config import settings
+from core.constants import DEFAULT_CSV_TYPE_KEY
 from models.csv_source_type import CsvSourceType
 from models.schemas import ReportDownloadResponse, UserResponse
 from services.storage_service import StorageService
@@ -92,7 +93,7 @@ class ConfigService:
           CSV, for the source type identified by type_key (same default as evidence_type).
         """
         normalized_type = (config_type or "").strip().lower()
-        resolved_type_key = (type_key or "").strip() or "project_report"
+        resolved_type_key = (type_key or "").strip() or DEFAULT_CSV_TYPE_KEY
         if normalized_type == "school_filter":
             tenant_code, organization_code = self._resolve_scope(current_user)
             source_type = (

@@ -2568,7 +2568,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                         else:
                             # Fallback to regex extraction for non-enrollment tasks or older responses
                             text_to_analyze = {
-                                'Task Evidence': row.get('Task Evidence', ''),
+                                'Task Evidence': row.get(EVIDENCE_COLUMN, ''),
                                 'Task Remarks': row.get('Task Remarks', ''),
                                 'Sub-Tasks': row.get('Sub-Tasks', ''),
                                 'Answers': ' '.join(str(a) for a in answers),
