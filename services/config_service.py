@@ -8,7 +8,6 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.config import settings
-from core.constants import DEFAULT_CSV_TYPE_KEY
 from models.csv_source_type import CsvSourceType
 from models.schemas import ReportDownloadResponse, UserResponse
 from services.storage_service import StorageService
@@ -86,14 +85,19 @@ class ConfigService:
           workflow/source-type selector's option list). type_key is ignored here — this is
           the endpoint used to discover which type_keys exist.
         - type=evidence_type  -> allowed evidence types for the evidence-type filter, for
-          the source type identified by type_key (defaults to "project_report" when
-          omitted, for backward compatibility with callers made before multiple source
-          types existed).
+          the source type identified by type_key. type_key is required — a caller that
+          omits it silently getting some other type's config (previously defaulted to
+          "project_report") is exactly the class of bug this guards against.
         - type=school_filter  -> required column name + enabled flag for the school-filter
-          CSV, for the source type identified by type_key (same default as evidence_type).
+          CSV, for the source type identified by type_key (also required).
         """
         normalized_type = (config_type or "").strip().lower()
-        resolved_type_key = (type_key or "").strip() or DEFAULT_CSV_TYPE_KEY
+        resolved_type_key = (type_key or "").strip()
+        if normalized_type in ("evidence_type", "school_filter") and not resolved_type_key:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"type_key is required for type={normalized_type}.",
+            )
         if normalized_type == "school_filter":
             tenant_code, organization_code = self._resolve_scope(current_user)
             source_type = (

@@ -34,8 +34,8 @@ async def list(
         default=None,
         description="CsvSourceType.type_key to scope evidence_type/school_filter to "
         "(e.g. a value from a type=project item). Ignored for type=project itself. "
-        "Defaults to 'project_report' when omitted, for callers made before multiple "
-        "source types existed.",
+        "Required for type=evidence_type and type=school_filter — a request for either "
+        "without type_key returns 400 rather than silently resolving to 'project_report'.",
     ),
 ):
     """List config values by type. Supported: type=project, type=evidence_type, type=school_filter."""
