@@ -13,6 +13,7 @@ import mimetypes
 import unicodedata
 import random
 from urllib.request import urlopen
+from urllib.parse import urlparse
 import re
 import logging
 import csv
@@ -1802,15 +1803,28 @@ CORRECT JSON Response:
 # === Helper function to determine evidence type ===
 def get_evidence_type(url):
     """Determine the evidence type from URL by matching its extension against the
-    configured EVIDENCE_TYPE_EXTENSIONS map — mirrors the pre-processor's resolver so a
-    tenant-custom type (any key beyond image/pdf/excel) is recognized consistently instead
-    of silently resolving to None here while the pre-processor already let the row through.
+    configured EVIDENCE_TYPE_EXTENSIONS map. Checks the URL path first (handles the
+    common case of extra query params after the file, e.g. '?w=100'), then falls back
+    to the full raw URL string — needed for download-proxy URLs that embed the actual
+    filename inside a query value (e.g. '.../download?file=.../photo.jpg'), where the
+    path itself ('/download') has no extension at all. Mirrors the pre-processor's
+    resolver exactly so a row the pre-processor lets through never resolves to None
+    here — a None would leave the per-row accumulator lists misaligned and crash
+    _flush_to_csv on length mismatch.
     Returns the type key (e.g. 'image', 'pdf', 'excel', or any tenant-configured key), or
     None if no extension matched."""
-    url = str(url).strip().lower()
-    for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
-        if any(url.endswith(ext) for ext in extensions):
-            return type_key
+    url = str(url).strip()
+    if not url or url.lower() == "null":
+        return None
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        full = url.lower()
+        for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
+            if any(path.endswith(ext) or full.endswith(ext) for ext in extensions):
+                return type_key
+    except Exception:
+        pass
     return None
 
 
