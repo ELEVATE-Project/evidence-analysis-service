@@ -587,15 +587,15 @@ class ExecutionService:
             mandatory_columns = []
 
         evidence_context_config = source_type.evidence_context_config or {}
-        title_column = str(evidence_context_config.get("title_column", "")).strip()
+        criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip()
 
         required_columns: list[str] = []
         for column in mandatory_columns:
             column_str = str(column).strip()
             if not column_str:
                 continue
-            if column_str == "evidence_context_config.title_column" and title_column:
-                required_columns.append(title_column)
+            if column_str == "evidence_context_config.criteria_csv_column" and criteria_csv_column:
+                required_columns.append(criteria_csv_column)
                 continue
             required_columns.append(column_str)
 
@@ -669,20 +669,21 @@ class ExecutionService:
     ) -> None:
         """Validate that tasks mentioned in questions CSV exist in input CSV."""
         evidence_context_config = source_type.evidence_context_config or {}
-        title_column = evidence_context_config.get("title_column", "")
-        
-        if not title_column:
-            return  # No title column configured, skip cross-validation
+        input_csv_column = str(evidence_context_config.get("input_csv_column", "")).strip()
+        criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip() or input_csv_column
+
+        if not input_csv_column or not criteria_csv_column:
+            return  # No task column configured, skip cross-validation
 
         _, _, _, input_tasks = self._parse_csv_preview(
             input_file_bytes,
             "Input file",
-            tracked_column=title_column,
+            tracked_column=input_csv_column,
         )
         _, _, _, questions_tasks = self._parse_csv_preview(
             questions_file_bytes,
             "Questions file",
-            tracked_column=title_column,
+            tracked_column=criteria_csv_column,
         )
         self._validate_tasks_cross_reference_from_values(input_tasks, questions_tasks)
 
@@ -1533,7 +1534,8 @@ class ExecutionService:
         input_path = execution.input_file_url
         questions_path = execution.criterias_file_url
         evidence_context_config = source_type.evidence_context_config or {}
-        title_column = str(evidence_context_config.get("title_column", "")).strip()
+        input_csv_column = str(evidence_context_config.get("input_csv_column", "")).strip()
+        criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip() or input_csv_column
         input_tasks: set[str] = set()
         questions_tasks: set[str] = set()
 
@@ -1550,7 +1552,7 @@ class ExecutionService:
                 headers, row_count, preview_rows, input_tasks = self._parse_csv_preview(
                     input_bytes,
                     "Input file",
-                    tracked_column=title_column,
+                    tracked_column=input_csv_column,
                 )
                 input_result.rows_detected = row_count
                 input_result.columns_detected = headers
@@ -1573,7 +1575,7 @@ class ExecutionService:
                 headers, row_count, preview_rows, questions_tasks = self._parse_csv_preview(
                     questions_bytes,
                     "Questions file",
-                    tracked_column=title_column,
+                    tracked_column=criteria_csv_column,
                 )
                 questions_result.rows_detected = row_count
                 questions_result.columns_detected = headers
@@ -1589,7 +1591,7 @@ class ExecutionService:
                     questions_result.missing_columns = self._extract_missing_columns_from_detail(detail)
         
         # Cross-validate: Check if tasks in questions exist in input
-        if input_result.valid and questions_result.valid and input_path and questions_path and title_column:
+        if input_result.valid and questions_result.valid and input_path and questions_path and input_csv_column and criteria_csv_column:
             try:
                 self._validate_tasks_cross_reference_from_values(input_tasks, questions_tasks)
             except HTTPException as exc:

@@ -120,7 +120,14 @@ _DEFAULT_CSV_SOURCE_TYPES = [
         "evidence_columns": [{"column": "Task Evidence", "rule": "VALIDATE"}],
         "evidence_context_config": {
             "source": "column",
-            "title_column": "Tasks",
+            # input_csv_column: the real, uploaded input CSV's own task-identifying
+            # column — we don't control this, it's whatever the export already calls it.
+            # criteria_csv_column: our own criteria/questions file's join-key column —
+            # a file we generate, so it can use a friendlier shared name. Kept
+            # independent: renaming the criteria file's column must never require
+            # renaming the real input file's column.
+            "input_csv_column": "Tasks",
+            "criteria_csv_column": "context",
         },
         "available_filters": ["state", "district", "block", "school_name", "relevance_tag"],
         "question_config": {
@@ -131,7 +138,7 @@ _DEFAULT_CSV_SOURCE_TYPES = [
                     "desc": "Match unique Task IDs to specific evidence_criteria.",
                 }
             ],
-            "mandatory_columns": ["evidence_context_config.title_column", "Question"],
+            "mandatory_columns": ["evidence_context_config.criteria_csv_column", "criteria"],
             "optional_columns": [],
         },
         "default_thresholds": {"relevant": 0.7, "partial": 0.5},
@@ -166,7 +173,9 @@ _DEFAULT_CSV_SOURCE_TYPES = [
         "evidence_columns": [{"column": "Evidences", "rule": "VALIDATE"}],
         "evidence_context_config": {
             "source": "column",
-            "title_column": "Question Id",
+            # See project_report's comment above — same input/criteria decoupling.
+            "input_csv_column": "Question Id",
+            "criteria_csv_column": "context",
         },
         "available_filters": ["state", "district", "block", "school_name", "relevance_tag"],
         "question_config": {
@@ -177,7 +186,7 @@ _DEFAULT_CSV_SOURCE_TYPES = [
                     "desc": "Match unique Question IDs to specific evidence_criteria.",
                 }
             ],
-            "mandatory_columns": ["evidence_context_config.title_column", "Question"],
+            "mandatory_columns": ["evidence_context_config.criteria_csv_column", "criteria"],
             "optional_columns": [],
         },
         "default_thresholds": {"relevant": 0.7, "partial": 0.5},

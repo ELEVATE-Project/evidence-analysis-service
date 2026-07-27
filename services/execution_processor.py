@@ -440,9 +440,20 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
     evidence_context_config = (
         source_type.evidence_context_config if isinstance(source_type.evidence_context_config, dict) else {}
     )
-    title_column = str(evidence_context_config.get("title_column", "")).strip()
-    if title_column:
-        columns["task_column"] = title_column
+    # criteria_csv_column: our own criteria/questions file's join-key column (a file we
+    # generate, so it can use a shared, friendlier name like "context"). input_csv_column:
+    # the real, uploaded input CSV's own task-identifying column — we don't control that
+    # file, so it keeps whatever name the export already uses (e.g. "Tasks", "Question
+    # Id"). Kept independent so renaming one never silently requires renaming the other.
+    # input_csv_column falls back to criteria_csv_column for a type where both files
+    # happen to share one name.
+    criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip()
+    if criteria_csv_column:
+        columns["task_column"] = criteria_csv_column
+
+    input_csv_column = str(evidence_context_config.get("input_csv_column", "")).strip() or criteria_csv_column
+    if input_csv_column:
+        columns["input_task_column"] = input_csv_column
 
     question_config = source_type.question_config if isinstance(source_type.question_config, dict) else {}
     question_text_column = str(question_config.get("question_column", "")).strip()
@@ -453,7 +464,7 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
                 column_str = str(column or "").strip()
                 if not column_str:
                     continue
-                if column_str == "evidence_context_config.title_column":
+                if column_str == "evidence_context_config.criteria_csv_column":
                     continue
                 question_text_column = column_str
                 break
@@ -895,9 +906,14 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         }
         configured_columns = _resolve_processor_columns_from_config(db, execution)
         question_task_column = configured_columns.get("task_column", "")
+        input_task_column = configured_columns.get("input_task_column", "")
         question_text_column = configured_columns.get("question_text_column", "")
         if question_task_column:
             preprocessor_env["PREPROCESS_QUESTION_TASK_COLUMN"] = question_task_column
+        if input_task_column:
+            preprocessor_env["PREPROCESS_INPUT_TASK_COLUMN"] = input_task_column
+        if question_text_column:
+            preprocessor_env["PREPROCESS_QUESTION_TEXT_COLUMN"] = question_text_column
 
         # Per-tenant evidence-URL and school-ID column names in the input CSV (DB-driven;
         # see CsvSourceType.evidence_columns / column_mappings.geo.school_id). Set once,
@@ -950,7 +966,8 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         }
         if question_task_column:
             processor_env["PROCESSOR_QUESTION_TASK_COLUMN"] = question_task_column
-            processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = question_task_column
+        if input_task_column:
+            processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = input_task_column
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
         processor_env["PROCESSOR_EVIDENCE_COLUMN"] = evidence_column

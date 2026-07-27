@@ -70,6 +70,12 @@ class ReportService:
         Uses column_mappings["user_id"] (the real person/mentor identity) rather than
         ["identifier"] (which for "observation" is "Observation Submission Id" — the
         per-visit pipeline dedup/cap key, not a person identity).
+
+        Uses evidence_context_config["input_csv_column"] (the real input CSV's task
+        column, e.g. "Tasks"/"Question Id") rather than ["criteria_csv_column"] (the
+        criteria file's own column, e.g. "context") — the output CSV this validates is a
+        passthrough of the *input* file's original columns, so that's the one that
+        actually appears in it.
         """
         csv_type_id = (execution.csv_type_id or "").strip()
         source_type = (
@@ -99,7 +105,7 @@ class ReportService:
             str(geo.get("district") or "District").strip() or "District",
             str(geo.get("block") or "Block").strip() or "Block",
             str(geo.get("school_name") or "School Name").strip() or "School Name",
-            str(evidence_context_config.get("title_column") or "Tasks").strip() or "Tasks",
+            str(evidence_context_config.get("input_csv_column") or "Tasks").strip() or "Tasks",
             *_ALWAYS_REQUIRED_REPORT_COLUMNS,
         ]
     

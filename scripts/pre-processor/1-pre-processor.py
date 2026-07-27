@@ -32,7 +32,23 @@ def _parse_args():
     parser.add_argument(
         "--question-task-column",
         default=None,
-        help="Configured task column name in questions CSV (from CSV config)",
+        help="Configured task/join-key column name in the questions/criteria CSV (from "
+        "CsvSourceType.evidence_context_config.criteria_csv_column)",
+    )
+    parser.add_argument(
+        "--input-task-column",
+        default=None,
+        help="Configured task/join-key column name in the real input CSV (from "
+        "CsvSourceType.evidence_context_config.input_csv_column) — independent of "
+        "--question-task-column since the input CSV's column name is never renamed, "
+        "only the criteria CSV's is",
+    )
+    parser.add_argument(
+        "--question-text-column",
+        default=None,
+        help="Configured question-text column name in the questions/criteria CSV (from "
+        "CsvSourceType.question_config.question_column); absent = fall back to the "
+        "hardcoded candidate list this script has always used ('Question', etc.)",
     )
     parser.add_argument("--filter-csv", default=None, help="Optional school filter CSV path")
     parser.add_argument("--output-dir", default=None, help="Output directory path")
@@ -98,6 +114,22 @@ QUESTION_CSV = ARGS.question_csv or os.getenv("PREPROCESS_QUESTION_CSV") or DEFA
 TASK_MATCH_COLUMN_CONFIG = (
     (ARGS.question_task_column or "").strip()
     or (os.getenv("PREPROCESS_QUESTION_TASK_COLUMN", "") or "").strip()
+)
+# Independent from TASK_MATCH_COLUMN_CONFIG above: that one is searched for in the
+# questions/criteria CSV, this one in the real input CSV. Falls back to
+# TASK_MATCH_COLUMN_CONFIG for a type where both files happen to share one column name.
+INPUT_TASK_MATCH_COLUMN_CONFIG = (
+    (ARGS.input_task_column or "").strip()
+    or (os.getenv("PREPROCESS_INPUT_TASK_COLUMN", "") or "").strip()
+    or TASK_MATCH_COLUMN_CONFIG
+)
+# Question-text column in the questions/criteria CSV. Empty means "not configured" —
+# the Step 2 loader below falls back to its long-standing hardcoded candidate list
+# ("Question", "QUESTION", etc.) so standalone/manual runs without this configured keep
+# working exactly as before.
+QUESTION_TEXT_COLUMN_CONFIG = (
+    (ARGS.question_text_column or "").strip()
+    or (os.getenv("PREPROCESS_QUESTION_TEXT_COLUMN", "") or "").strip()
 )
 FILTER_CSV = ARGS.filter_csv or os.getenv("PREPROCESS_FILTER_CSV") or DEFAULT_FILTER_CSV
 OUTPUT_DIR = ARGS.output_dir or os.getenv("PREPROCESS_OUTPUT_DIR") or "output-pre-processor"
@@ -189,6 +221,8 @@ print(f"   SCHOOL_ID_COLUMN: {SCHOOL_ID_COLUMN}")
 print(f"   IDENTITY_COLUMN: {IDENTITY_COLUMN}")
 print(f"   ALLOWED_EVIDENCE_TYPES: {sorted(ALLOWED_EVIDENCE_TYPES)}")
 print(f"   TASK_MATCH_COLUMN_CONFIG: {TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
+print(f"   INPUT_TASK_MATCH_COLUMN_CONFIG: {INPUT_TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
+print(f"   QUESTION_TEXT_COLUMN_CONFIG: {QUESTION_TEXT_COLUMN_CONFIG or '(not configured, using hardcoded candidates)'}")
 print(f"   QUESTION_TASK_COLUMN_FALLBACK: {DEFAULT_QUESTION_TASK_COLUMN}")
 print(f"   INPUT_TASK_COLUMN_FALLBACK: {DEFAULT_INPUT_TASK_COLUMN}")
 print()
@@ -437,17 +471,26 @@ with open(QUESTION_CSV, newline='', encoding="utf-8") as f:
         reader.fieldnames,
         TASK_MATCH_COLUMN_CONFIG,
     )
-    question_column = _resolve_header_name(
-        reader.fieldnames,
-        [
-            "Refined questions using tool and webpage",
-            "Question",
-            "QUESTION",
-            "Questions",
-            "QUESTIONS FOR METRICS",
-            "Evidence Criteria",
-        ],
+    question_column = (
+        _resolve_header_name(reader.fieldnames, [QUESTION_TEXT_COLUMN_CONFIG])
+        if QUESTION_TEXT_COLUMN_CONFIG
+        else None
     )
+    if not question_column:
+        # Not configured (or configured name wasn't found) — fall back to the long-standing
+        # hardcoded candidate list, so standalone/manual runs and any tenant that hasn't
+        # set question_config.question_column keep working exactly as before.
+        question_column = _resolve_header_name(
+            reader.fieldnames,
+            [
+                "Refined questions using tool and webpage",
+                "Question",
+                "QUESTION",
+                "Questions",
+                "QUESTIONS FOR METRICS",
+                "Evidence Criteria",
+            ],
+        )
     if not question_column:
         print(
             "⚠️  Could not resolve question CSV headers. "
@@ -513,7 +556,7 @@ if USE_SCHOOL_FILTER and SCHOOL_ID_COLUMN not in header:
     )
     USE_SCHOOL_FILTER = False
 
-input_task_column = _resolve_input_task_column(header, TASK_MATCH_COLUMN_CONFIG)
+input_task_column = _resolve_input_task_column(header, INPUT_TASK_MATCH_COLUMN_CONFIG)
 
 filtered_rows = []
 
