@@ -66,6 +66,11 @@ def split_multi_evidence(
     Returns (total_rows_in, total_rows_out, rows_split) where rows_split counts only the
     original rows that actually contained more than one URL (not the resulting row count).
     """
+    if not os.path.isfile(input_csv):
+        raise ValueError(f"Input CSV not found: '{input_csv}'")
+    if os.path.getsize(input_csv) == 0:
+        raise ValueError(f"Input CSV is empty: '{input_csv}'")
+
     output_dir = os.path.dirname(output_csv)
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
@@ -102,6 +107,9 @@ def split_multi_evidence(
                     writer.writerow(split_row)
                     total_out += 1
 
+    if total_in == 0:
+        raise ValueError(f"'{input_csv}' has a header row but no data rows.")
+
     return total_in, total_out, rows_split
 
 
@@ -115,9 +123,16 @@ if __name__ == "__main__":
 
     print(f"📖 Reading: {args.input_csv}")
     print(f"   EVIDENCE_COLUMN: {evidence_column}")
-    total_in, total_out, rows_split = split_multi_evidence(
-        args.input_csv, args.output_csv, evidence_column=evidence_column
-    )
+    try:
+        total_in, total_out, rows_split = split_multi_evidence(
+            args.input_csv, args.output_csv, evidence_column=evidence_column
+        )
+    except ValueError as exc:
+        # FATAL: prefix on stderr is picked up by execution_processor._run_command() and
+        # surfaced verbatim as the execution's failure_reason instead of a generic
+        # exit-code message — matches 1-pre-processor.py's convention.
+        print(f"FATAL: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     print(f"\n{'=' * 60}")
     print(f"{'MULTI-EVIDENCE SPLIT SUMMARY':^60}")
