@@ -81,7 +81,7 @@ class ConfigService:
         """
         List config entries for the requested type.
         Supported contract:
-        - type=project        -> all active CSV source types for this tenant/org (the
+        - type=csv_source_type -> all active CSV source types for this tenant/org (the
           workflow/source-type selector's option list). type_key is ignored here — this is
           the endpoint used to discover which type_keys exist.
         - type=evidence_type  -> allowed evidence types for the evidence-type filter, for
@@ -167,10 +167,10 @@ class ConfigService:
                 if isinstance(item, dict) and item.get("key") and item.get("label")
             ]
 
-        if normalized_type != "project":
+        if normalized_type != "csv_source_type":
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Unsupported config type. Use type=project, type=evidence_type, or type=school_filter.",
+                detail="Unsupported config type. Use type=csv_source_type, type=evidence_type, or type=school_filter.",
             )
 
         tenant_code, organization_code = self._resolve_scope(current_user)

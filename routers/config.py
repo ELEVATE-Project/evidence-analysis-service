@@ -29,16 +29,16 @@ logger = logging.getLogger(__name__)
 async def list(
     config_service: ConfigServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
-    type: Literal["project", "evidence_type", "school_filter"] = Query(...),
+    type: Literal["csv_source_type", "evidence_type", "school_filter"] = Query(...),
     type_key: Optional[str] = Query(
         default=None,
         description="CsvSourceType.type_key to scope evidence_type/school_filter to "
-        "(e.g. a value from a type=project item). Ignored for type=project itself. "
-        "Required for type=evidence_type and type=school_filter — a request for either "
-        "without type_key returns 400 rather than silently resolving to 'project_report'.",
+        "(e.g. a value from a type=csv_source_type item). Ignored for type=csv_source_type "
+        "itself. Required for type=evidence_type and type=school_filter — a request for "
+        "either without type_key returns 400 rather than silently resolving to 'project_report'.",
     ),
 ):
-    """List config values by type. Supported: type=project, type=evidence_type, type=school_filter."""
+    """List config values by type. Supported: type=csv_source_type, type=evidence_type, type=school_filter."""
     try:
         items = config_service.list(type, current_user, type_key=type_key)
         payload = StandardAPIResponse(
