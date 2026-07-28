@@ -37,7 +37,6 @@ from core.constants import (
     EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS,
     DEFAULT_EVIDENCE_COLUMN,
     DEFAULT_INPUT_SCHOOL_ID_COLUMN,
-    DEFAULT_IDENTITY_COLUMN,
 )
 from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
@@ -186,12 +185,14 @@ SCHOOL_ID_COLUMN = (
 # Row-identity column for resume/dedup and the relevant-evidence cap — "UUID" for CSV
 # shapes where one row/UUID maps to one submission (e.g. project_report); a per-submission
 # column (e.g. "Observation Submission Id") for shapes where the same UUID legitimately
-# recurs across independent submissions. Same CLI-arg > env-var > default resolution as
-# EVIDENCE_COLUMN above.
+# recurs across independent submissions. CLI-arg > env-var, same priority as EVIDENCE_COLUMN
+# above, but no DEFAULT_IDENTITY_COLUMN fallback: identity is genuinely optional (see
+# project_report_no_uuid), so unconfigured means "this CSV shape has none" — not "assume
+# UUID". Both consumers below (resume_identity_col, the relevant-cap) already treat an
+# IDENTITY_COLUMN absent from the data as "not available" and degrade gracefully.
 IDENTITY_COLUMN = (
     (ARGS.identity_column or "").strip()
     or (os.getenv("PROCESSOR_IDENTITY_COLUMN", "") or "").strip()
-    or DEFAULT_IDENTITY_COLUMN
 )
 DEFAULT_QUESTION_TASK_COLUMN = "TASK NAME"
 DEFAULT_QUESTION_TEXT_COLUMN = "Refined questions using tool and webpage"

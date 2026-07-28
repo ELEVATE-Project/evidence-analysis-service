@@ -31,7 +31,6 @@ from core.constants import (
     SCHOOL_FILTER_REQUIRED_COLUMN,
     DEFAULT_EVIDENCE_COLUMN,
     DEFAULT_INPUT_SCHOOL_ID_COLUMN,
-    DEFAULT_IDENTITY_COLUMN,
 )
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
@@ -449,7 +448,7 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
     # happen to share one name.
     criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip()
     if criteria_csv_column:
-        columns["task_column"] = criteria_csv_column
+        columns["context_column"] = criteria_csv_column
 
     input_csv_column = str(evidence_context_config.get("input_csv_column", "")).strip() or criteria_csv_column
     if input_csv_column:
@@ -583,23 +582,23 @@ def _resolve_school_id_column_from_config(db: Session, execution: Execution) -> 
 
 def _resolve_identity_column_from_config(db: Session, execution: Execution) -> str:
     """Per-tenant column name that identifies "who/what this evidence row belongs to",
-    sourced from CsvSourceType.column_mappings["identifier"] so it's changeable per
-    tenant without a deploy. Falls back to core.constants.DEFAULT_IDENTITY_COLUMN ("UUID")
-    when no active config row exists or the mapping is missing/malformed.
+    sourced from CsvSourceType.column_mappings["identifier"]. Returns "" when no active
+    config row exists or the mapping is missing/malformed — not a guessed default. Unlike
+    evidence/school-id columns (every source type has those), identity is genuinely
+    optional (see project_report_no_uuid), and every downstream consumer (pre-processor's
+    group-aware split, the processor's resume/dedup keys, the per-(identity, task)
+    relevant-evidence cap) already treats an identity column absent from the actual CSV
+    as "not available" and degrades gracefully — so there's nothing for a guessed "UUID"
+    fallback to buy here, only the risk of it coincidentally matching an unrelated column.
 
-    This drives the pre-processor's group-aware split, the processor's resume/dedup keys,
-    and the per-(identity, task) relevant-evidence cap — all previously hardcoded to the
-    literal "UUID" column. "UUID" is correct for project_report (one evidence upload per
-    user per project); CSV shapes where the same UUID legitimately recurs across
-    independent submissions (e.g. "observation") point this at a per-submission column
-    instead (see db/seed_data.py).
+    "UUID" is correct for project_report (one evidence upload per user per project); CSV
+    shapes where the same UUID legitimately recurs across independent submissions (e.g.
+    "observation") point this at a per-submission column instead (see db/seed_data.py).
     """
     source_type = _get_active_source_type(db, execution)
     column_mappings = source_type.column_mappings if source_type else None
     identifier = column_mappings.get("identifier") if isinstance(column_mappings, dict) else None
-    if not identifier:
-        return DEFAULT_IDENTITY_COLUMN
-    return str(identifier).strip() or DEFAULT_IDENTITY_COLUMN
+    return str(identifier).strip() if identifier else ""
 
 
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
@@ -905,7 +904,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "PYTHONUNBUFFERED": "1",
         }
         configured_columns = _resolve_processor_columns_from_config(db, execution)
-        question_task_column = configured_columns.get("task_column", "")
+        question_task_column = configured_columns.get("context_column", "")
         input_task_column = configured_columns.get("input_task_column", "")
         question_text_column = configured_columns.get("question_text_column", "")
         if question_task_column:

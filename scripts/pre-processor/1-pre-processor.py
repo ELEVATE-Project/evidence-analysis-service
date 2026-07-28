@@ -20,7 +20,7 @@ if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 from core.constants import EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS
 from core.constants import SCHOOL_FILTER_REQUIRED_COLUMN as DEFAULT_SCHOOL_FILTER_REQUIRED_COLUMN
-from core.constants import DEFAULT_EVIDENCE_COLUMN, DEFAULT_INPUT_SCHOOL_ID_COLUMN, DEFAULT_IDENTITY_COLUMN
+from core.constants import DEFAULT_EVIDENCE_COLUMN, DEFAULT_INPUT_SCHOOL_ID_COLUMN
 
 def str2bool(val):
     return str(val).lower() in ("1", "true", "yes")
@@ -167,11 +167,15 @@ SCHOOL_ID_COLUMN = (
 # Row-identity column for group-aware splitting — "UUID" for CSV shapes where one row/UUID
 # maps to one submission (e.g. project_report); a per-submission column (e.g. "Observation
 # Submission Id") for shapes where the same UUID legitimately recurs across independent
-# submissions. Same CLI-arg > env-var > default resolution as EVIDENCE_COLUMN above.
+# submissions. CLI-arg > env-var, same priority as EVIDENCE_COLUMN above, but no
+# DEFAULT_IDENTITY_COLUMN fallback: unlike EVIDENCE_COLUMN/SCHOOL_ID_COLUMN (every source
+# type has those), identity is genuinely optional (see project_report_no_uuid), so an
+# unconfigured identity column means "this CSV shape has none" — not "assume UUID". Group-
+# aware splitting below already treats an empty/absent IDENTITY_COLUMN as "not active" and
+# processes every row without the cap.
 IDENTITY_COLUMN = (
     (ARGS.identity_column or "").strip()
     or (os.getenv("PREPROCESS_IDENTITY_COLUMN", "") or "").strip()
-    or DEFAULT_IDENTITY_COLUMN
 )
 
 if not ARGS.evidence_types:
@@ -634,22 +638,29 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
 # files only at group boundaries, keeping each pair inside one file (required for the
 # processor's per-worker cap to count correctly). Skipped unless group-aware splitting is
 # enabled, so default runs keep their original row order untouched.
+
+# _identity_idx is used for group-aware splitting.
+# If the identity column is not present, _identity_idx will be None. In that case, the
+# relevant-evidence cap (--max-relevant-per-user-task) will not work — all evidence
+# will be evaluated instead.
+
 _identity_idx = final_header.index(IDENTITY_COLUMN) if IDENTITY_COLUMN in final_header else None
 _task_idx = final_header.index(input_task_column) if input_task_column in final_header else None
 _group_aware_active = GROUP_AWARE_SPLIT and _identity_idx is not None and _task_idx is not None
 if GROUP_AWARE_SPLIT and not _group_aware_active:
-    # Falling back to size-only splitting here would let an (identity, task) pair straddle
-    # two split files; each processor worker enforces the cap independently, so the
-    # per-pair cap silently stops being a real cap. Abort instead of producing output that
-    # looks fine but breaks the guarantee the caller (execution_processor.py) is relying on.
-    # FATAL: prefix on stderr is picked up by execution_processor._run_command() and
-    # surfaced verbatim as the execution's failure_reason instead of a generic exit-code message.
+    # A CSV source type configured with no identity column (e.g. project_report_no_uuid)
+    # has no (IDENTITY_COLUMN, task) key to group-aware split on. The processor already
+    # degrades gracefully in this situation — it disables the per-worker relevant-evidence
+    # cap and processes every row (see relevant_cap_disabled in 1-main-parallel-script.py).
+    # Mirror that here: skip group-aware splitting/sorting and fall through to plain
+    # size-only splitting instead of aborting, so evidence still gets processed, just
+    # without the cap.
     print(
-        f"FATAL: group-aware splitting requested (--max-relevant-per-user-task) but "
-        f"{IDENTITY_COLUMN}/task column missing — aborting.",
+        f"WARNING: relevant_cap_disabled reason=missing_identity_column "
+        f"column={IDENTITY_COLUMN} task_column={input_task_column} — group-aware splitting "
+        f"skipped, all evidences will be processed without the per-user relevant-evidence cap.",
         file=sys.stderr,
     )
-    sys.exit(1)
 if _group_aware_active:
     filtered_rows.sort(key=lambda r: (str(r[_identity_idx]), str(r[_task_idx])))
     print(f"✅ Sorted {len(filtered_rows)} rows by ({IDENTITY_COLUMN}, {input_task_column}) for group-aware splitting.")
