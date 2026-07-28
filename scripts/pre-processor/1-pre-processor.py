@@ -32,23 +32,25 @@ def _parse_args():
     parser.add_argument(
         "--question-task-column",
         default=None,
-        help="Configured task/join-key column name in the questions/criteria CSV (from "
-        "CsvSourceType.evidence_context_config.criteria_csv_column)",
+        help="Column in the questions/criteria CSV used to match each question to a "
+        "task. Used as the join key: every input row's task (see --input-task-column) "
+        "is looked up against this column to find the right question/criteria for it.",
     )
     parser.add_argument(
         "--input-task-column",
         default=None,
-        help="Configured task/join-key column name in the real input CSV (from "
-        "CsvSourceType.evidence_context_config.input_csv_column) — independent of "
-        "--question-task-column since the input CSV's column name is never renamed, "
-        "only the criteria CSV's is",
+        help="Column in the real input CSV that holds each row's task. Read per row and "
+        "looked up in the questions CSV (via --question-task-column) to find which "
+        "question to evaluate that row's evidence against. Usually a different column "
+        "name than --question-task-column, since we don't control the input file's "
+        "column names.",
     )
     parser.add_argument(
         "--question-text-column",
         default=None,
-        help="Configured question-text column name in the questions/criteria CSV (from "
-        "CsvSourceType.question_config.question_column); absent = fall back to the "
-        "hardcoded candidate list this script has always used ('Question', etc.)",
+        help="Column in the questions/criteria CSV that holds the actual question text "
+        "sent to the AI for evaluation. If not set, falls back to a list of common "
+        "column names this script already recognizes (like 'Question').",
     )
     parser.add_argument("--filter-csv", default=None, help="Optional school filter CSV path")
     parser.add_argument("--output-dir", default=None, help="Output directory path")
@@ -66,40 +68,55 @@ def _parse_args():
     parser.add_argument(
         "--school-filter-column",
         default=None,
-        help="Required column name in the school-filter CSV (per-tenant, from "
-        "CsvSourceType.school_filter_config); absent = core.constants default",
+        help="Column in the school-filter CSV that holds each valid school code. Used "
+        "to build the allowlist of schools to process (only when school filtering is "
+        "on). If not set, uses a built-in default.",
     )
     parser.add_argument(
         "--evidence-column",
         default=None,
-        help="Evidence-URL column name in the input CSV (per-tenant, from "
-        "CsvSourceType.evidence_columns[0].column); absent = core.constants default",
+        help="Column in the input CSV that holds the evidence URL (the image/PDF/Excel "
+        "file to evaluate). If not set, uses a built-in default.",
     )
     parser.add_argument(
         "--school-id-column",
         default=None,
-        help="School-ID column name in the input CSV (per-tenant, from "
-        "CsvSourceType.column_mappings.geo.school_id); absent = core.constants default",
+        help="Column in the input CSV that holds each row's own school ID. Compared "
+        "against the school-filter CSV's allowlist to decide whether to keep or skip "
+        "that row (only when school filtering is on). If not set, uses a built-in "
+        "default.",
     )
     parser.add_argument(
         "--identity-column",
         default=None,
-        help="Row-identity column in the input CSV, used for group-aware splitting "
-        "(per-tenant, from CsvSourceType.column_mappings.identifier); absent = "
-        "core.constants default (\"UUID\")",
+        help="Column that identifies who each row belongs to (e.g. 'UUID'). Used to "
+        "sort/group rows so all evidence for the same person+task ends up in the same "
+        "split file — needed for the relevant-evidence cap (--max-relevant-per-user-"
+        "task) to count correctly across files. If not set, group-aware splitting is "
+        "skipped and the cap is disabled — evidence still gets processed normally.",
     )
     parser.add_argument(
         "--evidence-types",
         default=None,
-        help="Comma list of allowed evidence types (image,pdf,excel); required",
+        help="Comma list of evidence types to actually process (image,pdf,excel); "
+        "rows whose evidence doesn't match one of these are skipped. Required.",
     )
     parser.add_argument(
         "--evidence-types-to-validate",
         default=None,
-        help="JSON object mapping evidence type key -> list of file extensions "
-        "(per-tenant, from CsvSourceType.evidence_types_config); absent = core.constants default",
+        help="Maps each evidence type (image/pdf/excel) to its allowed file "
+        "extensions, as JSON — used to tell what type a given evidence URL is. If not "
+        "set, uses a built-in default.",
     )
-    parser.add_argument("--max-relevant-per-user-task", default=None, type=int, help="Per-(UUID, task) relevant-evidence cap; enables group-aware splitting when set")
+    parser.add_argument(
+        "--max-relevant-per-user-task",
+        default=None,
+        type=int,
+        help="Stop sending evidence to the AI for a given person+task once this many "
+        "have already been marked Relevant — the rest are written as notValidated, no "
+        "API call, saving cost. Setting this also turns on group-aware splitting "
+        "(see --identity-column), which the cap depends on to count correctly.",
+    )
     return parser.parse_args()
 
 ARGS = _parse_args()
