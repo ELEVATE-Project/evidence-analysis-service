@@ -321,8 +321,9 @@ class ReportService:
         offset = (page - 1) * page_size
         page_rows = filtered_rows[offset: offset + page_size]
 
+        identity_column = self._resolve_identity_column_for_report(execution)
         filter_options = self._compute_filter_options(all_rows, active)
-        summary = self._compute_report_summary(filtered_rows, filter_options)
+        summary = self._compute_report_summary(filtered_rows, filter_options, identity_column)
 
         return ReportDataPageResponse(
             page=page,
@@ -373,9 +374,35 @@ class ReportService:
             "schools": sorted(school_set),
         }
 
+    def _resolve_identity_column_for_report(self, execution: Execution) -> str:
+        """Column name in the output CSV that identifies a distinct participant, sourced
+        from CsvSourceType.column_mappings["user_id"]. Returns "" when no active config
+        row exists or user_id isn't configured — this CSV shape has no real identity
+        column, so per-user aggregates (Participation / unique-users count) must not be
+        computed from a fabricated "UUID" column that isn't actually present in the data.
+        """
+        csv_type_id = (execution.csv_type_id or "").strip()
+        source_type = (
+            self.db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.tenant_code == execution.tenant_code,
+                CsvSourceType.organization_code == execution.organization_code,
+                CsvSourceType.type_key == csv_type_id,
+                CsvSourceType.is_active.is_(True),
+            )
+            .first()
+            if csv_type_id
+            else None
+        )
+        column_mappings = (
+            source_type.column_mappings if source_type and isinstance(source_type.column_mappings, dict) else {}
+        )
+        user_id_column = column_mappings.get("user_id")
+        return str(user_id_column).strip() if user_id_column else ""
+
     @staticmethod
     def _compute_report_summary(
-        rows: list[Dict[str, str]], filter_options: Dict[str, list[str]]
+        rows: list[Dict[str, str]], filter_options: Dict[str, list[str]], identity_column: str
     ) -> Dict[str, Any]:
         """
         Python equivalent of StandardReportRenderer.jsx::computeReportData().
@@ -510,7 +537,10 @@ class ReportService:
             district = row.get("District", "") or "Unknown"
             block = row.get("Block", "") or "Unknown"
             school = row.get("School Name", "") or "Unknown"
-            uuid = row.get("UUID", "") or "Unknown User"
+            # No identity_column configured for this CSV type => uuid stays "" (falsy),
+            # so this row is excluded from users_set below rather than being fabricated
+            # into a fake "Unknown User" — we have no real way to tell participants apart.
+            uuid = (row.get(identity_column, "").strip() or "Unknown User") if identity_column else ""
             task = row.get("Tasks", "") or "Unknown Task"
             state = row.get("Declared State", "")
             state_name = state or "Unknown State"
