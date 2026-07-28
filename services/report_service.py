@@ -20,24 +20,19 @@ from core.constants import (
     RELEVANCE_TAG_IRRELEVANT,
     RELEVANCE_TAG_NOT_VALIDATED,
 )
+from models.csv_source_type import CsvSourceType
 from models.execution import Execution
 from models.schemas import ReportDataPageResponse, ReportDownloadResponse, ReportResponse
 from services.storage_service import StorageService
 
 logger = logging.getLogger(__name__)
 
-REQUIRED_REPORT_COLUMNS = [
-    "UUID",
-    "Declared State",
-    "District",
-    "Block",
-    "School Name",
-    "Tasks",
-    "Project ID",
-    "Project start date of the user",
-    "Project completion date of the user",
-    "Relevance Tag",
-]
+# "Relevance Tag" is the one column every processor output has regardless of CSV source
+# type — scripts/processor/1-main-parallel-script.py writes it as a literal, unconfigurable
+# header, never sourced from CsvSourceType. Everything else that varies by CSV shape
+# (state/district/block/school/task/identity column names) is resolved per-execution by
+# _resolve_report_columns() below instead of being hardcoded here.
+_ALWAYS_REQUIRED_REPORT_COLUMNS = ["Relevance Tag"]
 
 
 class ReportCsvNotFoundError(Exception):
@@ -64,6 +59,55 @@ class ReportService:
             Execution.id == execution_id,
             Execution.created_by == user_id
         ).first()
+
+    def _resolve_required_report_columns(self, execution: Execution) -> list[str]:
+        """Per-tenant required columns for the downloaded output CSV, sourced from
+        CsvSourceType.column_mappings / evidence_context_config so a CSV shape other than
+        project_report (e.g. "observation") isn't rejected for lacking project_report's
+        literal header names. Falls back to those same literal names when no active
+        config row exists, preserving prior behavior exactly for that case.
+
+        Uses column_mappings["user_id"] (the real person/mentor identity) rather than
+        ["identifier"] (which for "observation" is "Observation Submission Id" — the
+        per-visit pipeline dedup/cap key, not a person identity).
+
+        Uses evidence_context_config["input_csv_column"] (the real input CSV's task
+        column, e.g. "Tasks"/"Question Id") rather than ["criteria_csv_column"] (the
+        criteria file's own column, e.g. "context") — the output CSV this validates is a
+        passthrough of the *input* file's original columns, so that's the one that
+        actually appears in it.
+        """
+        csv_type_id = (execution.csv_type_id or "").strip()
+        source_type = (
+            self.db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.tenant_code == execution.tenant_code,
+                CsvSourceType.organization_code == execution.organization_code,
+                CsvSourceType.type_key == csv_type_id,
+                CsvSourceType.is_active.is_(True),
+            )
+            .first()
+            if csv_type_id
+            else None
+        )
+        column_mappings = (
+            source_type.column_mappings if source_type and isinstance(source_type.column_mappings, dict) else {}
+        )
+        geo = column_mappings.get("geo") if isinstance(column_mappings.get("geo"), dict) else {}
+        evidence_context_config = (
+            source_type.evidence_context_config
+            if source_type and isinstance(source_type.evidence_context_config, dict)
+            else {}
+        )
+        return [
+            str(column_mappings.get("user_id") or "UUID").strip() or "UUID",
+            str(geo.get("state") or "Declared State").strip() or "Declared State",
+            str(geo.get("district") or "District").strip() or "District",
+            str(geo.get("block") or "Block").strip() or "Block",
+            str(geo.get("school_name") or "School Name").strip() or "School Name",
+            str(evidence_context_config.get("input_csv_column") or "Tasks").strip() or "Tasks",
+            *_ALWAYS_REQUIRED_REPORT_COLUMNS,
+        ]
     
     def get_report(self, execution_id: UUID, user_id: str) -> Optional[ReportResponse]:
         """Get report data for completed execution"""
@@ -173,10 +217,11 @@ class ReportService:
             )
             raise ReportCsvValidationError("Output CSV is corrupted or not UTF-8 encoded")
 
-        self._validate_report_csv_structure(csv_text)
+        required_columns = self._resolve_required_report_columns(execution)
+        self._validate_report_csv_structure(csv_text, required_columns)
         return csv_text
 
-    def _validate_report_csv_structure(self, csv_text: str) -> None:
+    def _validate_report_csv_structure(self, csv_text: str, required_columns: list[str]) -> None:
         try:
             reader = csv.DictReader(StringIO(csv_text))
         except csv.Error as exc:
@@ -194,7 +239,7 @@ class ReportService:
                 cleaned = cleaned.lstrip("\ufeff")
             normalized_headers.append(cleaned)
 
-        missing_columns = [column for column in REQUIRED_REPORT_COLUMNS if column not in normalized_headers]
+        missing_columns = [column for column in required_columns if column not in normalized_headers]
         if missing_columns:
             raise ReportCsvValidationError(
                 f"Missing required CSV columns: {', '.join(missing_columns)}"
@@ -276,8 +321,9 @@ class ReportService:
         offset = (page - 1) * page_size
         page_rows = filtered_rows[offset: offset + page_size]
 
+        identity_column = self._resolve_identity_column_for_report(execution)
         filter_options = self._compute_filter_options(all_rows, active)
-        summary = self._compute_report_summary(filtered_rows, filter_options)
+        summary = self._compute_report_summary(filtered_rows, filter_options, identity_column)
 
         return ReportDataPageResponse(
             page=page,
@@ -328,9 +374,35 @@ class ReportService:
             "schools": sorted(school_set),
         }
 
+    def _resolve_identity_column_for_report(self, execution: Execution) -> str:
+        """Column name in the output CSV that identifies a distinct participant, sourced
+        from CsvSourceType.column_mappings["user_id"]. Returns "" when no active config
+        row exists or user_id isn't configured — this CSV shape has no real identity
+        column, so per-user aggregates (Participation / unique-users count) must not be
+        computed from a fabricated "UUID" column that isn't actually present in the data.
+        """
+        csv_type_id = (execution.csv_type_id or "").strip()
+        source_type = (
+            self.db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.tenant_code == execution.tenant_code,
+                CsvSourceType.organization_code == execution.organization_code,
+                CsvSourceType.type_key == csv_type_id,
+                CsvSourceType.is_active.is_(True),
+            )
+            .first()
+            if csv_type_id
+            else None
+        )
+        column_mappings = (
+            source_type.column_mappings if source_type and isinstance(source_type.column_mappings, dict) else {}
+        )
+        user_id_column = column_mappings.get("user_id")
+        return str(user_id_column).strip() if user_id_column else ""
+
     @staticmethod
     def _compute_report_summary(
-        rows: list[Dict[str, str]], filter_options: Dict[str, list[str]]
+        rows: list[Dict[str, str]], filter_options: Dict[str, list[str]], identity_column: str
     ) -> Dict[str, Any]:
         """
         Python equivalent of StandardReportRenderer.jsx::computeReportData().
@@ -465,7 +537,10 @@ class ReportService:
             district = row.get("District", "") or "Unknown"
             block = row.get("Block", "") or "Unknown"
             school = row.get("School Name", "") or "Unknown"
-            uuid = row.get("UUID", "") or "Unknown User"
+            # No identity_column configured for this CSV type => uuid stays "" (falsy),
+            # so this row is excluded from users_set below rather than being fabricated
+            # into a fake "Unknown User" — we have no real way to tell participants apart.
+            uuid = (row.get(identity_column, "").strip() or "Unknown User") if identity_column else ""
             task = row.get("Tasks", "") or "Unknown Task"
             state = row.get("Declared State", "")
             state_name = state or "Unknown State"

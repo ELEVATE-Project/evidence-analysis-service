@@ -29,6 +29,8 @@ from core.constants import (
     EVIDENCE_TYPE_EXTENSIONS,
     PROCESSING_CONFIG_KEY_EVIDENCE_TYPES,
     SCHOOL_FILTER_REQUIRED_COLUMN,
+    DEFAULT_EVIDENCE_COLUMN,
+    DEFAULT_INPUT_SCHOOL_ID_COLUMN,
 )
 from db.database import SessionLocal
 from models.csv_source_type import CsvSourceType
@@ -437,9 +439,20 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
     evidence_context_config = (
         source_type.evidence_context_config if isinstance(source_type.evidence_context_config, dict) else {}
     )
-    title_column = str(evidence_context_config.get("title_column", "")).strip()
-    if title_column:
-        columns["task_column"] = title_column
+    # criteria_csv_column: our own criteria/questions file's join-key column (a file we
+    # generate, so it can use a shared, friendlier name like "context"). input_csv_column:
+    # the real, uploaded input CSV's own task-identifying column — we don't control that
+    # file, so it keeps whatever name the export already uses (e.g. "Tasks", "Question
+    # Id"). Kept independent so renaming one never silently requires renaming the other.
+    # input_csv_column falls back to criteria_csv_column for a type where both files
+    # happen to share one name.
+    criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip()
+    if criteria_csv_column:
+        columns["context_column"] = criteria_csv_column
+
+    input_csv_column = str(evidence_context_config.get("input_csv_column", "")).strip() or criteria_csv_column
+    if input_csv_column:
+        columns["input_task_column"] = input_csv_column
 
     question_config = source_type.question_config if isinstance(source_type.question_config, dict) else {}
     question_text_column = str(question_config.get("question_column", "")).strip()
@@ -450,7 +463,7 @@ def _resolve_processor_columns_from_config(db: Session, execution: Execution) ->
                 column_str = str(column or "").strip()
                 if not column_str:
                     continue
-                if column_str == "evidence_context_config.title_column":
+                if column_str == "evidence_context_config.criteria_csv_column":
                     continue
                 question_text_column = column_str
                 break
@@ -513,6 +526,79 @@ def _resolve_school_filter_column_from_config(db: Session, execution: Execution)
     if not isinstance(school_filter_config, dict) or not school_filter_config.get("required_column"):
         return SCHOOL_FILTER_REQUIRED_COLUMN
     return str(school_filter_config["required_column"]).strip() or SCHOOL_FILTER_REQUIRED_COLUMN
+
+
+def _get_active_source_type(db: Session, execution: Execution) -> CsvSourceType | None:
+    """Shared lookup used by the evidence-column and school-ID-column resolvers below —
+    same (tenant_code, organization_code, csv_type_id, is_active) filter as
+    _resolve_school_filter_column_from_config."""
+    csv_type_id = (execution.csv_type_id or "").strip()
+    if not csv_type_id:
+        return None
+    return (
+        db.query(CsvSourceType)
+        .filter(
+            CsvSourceType.tenant_code == execution.tenant_code,
+            CsvSourceType.organization_code == execution.organization_code,
+            CsvSourceType.type_key == csv_type_id,
+            CsvSourceType.is_active.is_(True),
+        )
+        .first()
+    )
+
+
+def _resolve_evidence_column_from_config(db: Session, execution: Execution) -> str:
+    """Per-tenant evidence-URL column name in the input CSV, sourced from
+    CsvSourceType.evidence_columns[0]["column"] so the column name is changeable per
+    tenant without a deploy. Falls back to core.constants.DEFAULT_EVIDENCE_COLUMN when no
+    active config row exists or evidence_columns is empty/malformed.
+    """
+    source_type = _get_active_source_type(db, execution)
+    evidence_columns = source_type.evidence_columns if source_type else None
+    if not isinstance(evidence_columns, list) or not evidence_columns:
+        return DEFAULT_EVIDENCE_COLUMN
+    first_entry = evidence_columns[0]
+    if not isinstance(first_entry, dict) or not first_entry.get("column"):
+        return DEFAULT_EVIDENCE_COLUMN
+    return str(first_entry["column"]).strip() or DEFAULT_EVIDENCE_COLUMN
+
+
+def _resolve_school_id_column_from_config(db: Session, execution: Execution) -> str:
+    """Per-tenant school-ID column name in the input CSV, sourced from
+    CsvSourceType.column_mappings["geo"]["school_id"] so the column name is changeable
+    per tenant without a deploy. Falls back to core.constants.DEFAULT_INPUT_SCHOOL_ID_COLUMN
+    when no active config row exists or the geo mapping is missing/malformed. Kept
+    independent of _resolve_school_filter_column_from_config above — that one governs the
+    *School Filter CSV's* own required column, this one governs the *Input CSV's* column.
+    """
+    source_type = _get_active_source_type(db, execution)
+    column_mappings = source_type.column_mappings if source_type else None
+    geo = column_mappings.get("geo") if isinstance(column_mappings, dict) else None
+    school_id = geo.get("school_id") if isinstance(geo, dict) else None
+    if not school_id:
+        return DEFAULT_INPUT_SCHOOL_ID_COLUMN
+    return str(school_id).strip() or DEFAULT_INPUT_SCHOOL_ID_COLUMN
+
+
+def _resolve_identity_column_from_config(db: Session, execution: Execution) -> str:
+    """Per-tenant column name that identifies "who/what this evidence row belongs to",
+    sourced from CsvSourceType.column_mappings["identifier"]. Returns "" when no active
+    config row exists or the mapping is missing/malformed — not a guessed default. Unlike
+    evidence/school-id columns (every source type has those), identity is genuinely
+    optional (see project_report_no_uuid), and every downstream consumer (pre-processor's
+    group-aware split, the processor's resume/dedup keys, the per-(identity, task)
+    relevant-evidence cap) already treats an identity column absent from the actual CSV
+    as "not available" and degrades gracefully — so there's nothing for a guessed "UUID"
+    fallback to buy here, only the risk of it coincidentally matching an unrelated column.
+
+    "UUID" is correct for project_report (one evidence upload per user per project); CSV
+    shapes where the same UUID legitimately recurs across independent submissions (e.g.
+    "observation") point this at a per-submission column instead (see db/seed_data.py).
+    """
+    source_type = _get_active_source_type(db, execution)
+    column_mappings = source_type.column_mappings if source_type else None
+    identifier = column_mappings.get("identifier") if isinstance(column_mappings, dict) else None
+    return str(identifier).strip() if identifier else ""
 
 
 def _run_command(command: list[str], env: dict[str, str], label: str) -> None:
@@ -818,10 +904,43 @@ def process_execution(execution_id: str) -> dict[str, Any]:
             "PYTHONUNBUFFERED": "1",
         }
         configured_columns = _resolve_processor_columns_from_config(db, execution)
-        question_task_column = configured_columns.get("task_column", "")
+        question_task_column = configured_columns.get("context_column", "")
+        input_task_column = configured_columns.get("input_task_column", "")
         question_text_column = configured_columns.get("question_text_column", "")
         if question_task_column:
             preprocessor_env["PREPROCESS_QUESTION_TASK_COLUMN"] = question_task_column
+        if input_task_column:
+            preprocessor_env["PREPROCESS_INPUT_TASK_COLUMN"] = input_task_column
+        if question_text_column:
+            preprocessor_env["PREPROCESS_QUESTION_TEXT_COLUMN"] = question_text_column
+
+        # Per-tenant evidence-URL and school-ID column names in the input CSV (DB-driven;
+        # see CsvSourceType.evidence_columns / column_mappings.geo.school_id). Set once,
+        # same as PREPROCESS_QUESTION_TASK_COLUMN above, so every pre-processor invocation
+        # (single-file, main-batch-cut, per-batch) picks it up without touching each cmd.
+        evidence_column = _resolve_evidence_column_from_config(db, execution)
+        school_id_column = _resolve_school_id_column_from_config(db, execution)
+        identity_column = _resolve_identity_column_from_config(db, execution)
+        preprocessor_env["PREPROCESS_EVIDENCE_COLUMN"] = evidence_column
+        preprocessor_env["PREPROCESS_SCHOOL_ID_COLUMN"] = school_id_column
+        preprocessor_env["PREPROCESS_IDENTITY_COLUMN"] = identity_column
+
+        # Normalize multi-URL evidence cells (e.g. "url1, url2" from observation/survey-style
+        # exports) into one row per URL before anything else touches workspace.input_csv —
+        # every downstream stage (school-filter, task matching, evidence-type detection,
+        # resume/dedup keys) assumes exactly one evidence URL per row. No-op (byte-for-byte
+        # unchanged) for rows that already have 0 or 1 URLs, which is the common case.
+        split_script = _resolve_script_path(settings.SPLIT_MULTI_EVIDENCE_SCRIPT_PATH)
+        split_input_csv = workspace.input_dir / "input.split.csv"
+        split_cmd = [
+            sys.executable,
+            str(split_script),
+            "--input-csv", str(workspace.input_csv),
+            "--output-csv", str(split_input_csv),
+            "--evidence-column", evidence_column,
+        ]
+        _run_command(split_cmd, base_env, "Multi-evidence split script")
+        split_input_csv.replace(workspace.input_csv)
 
         # processor_env is built here (not inside either branch below) because both the
         # off-path and every per-batch run in the on-path need an identical copy of it.
@@ -846,9 +965,13 @@ def process_execution(execution_id: str) -> dict[str, Any]:
         }
         if question_task_column:
             processor_env["PROCESSOR_QUESTION_TASK_COLUMN"] = question_task_column
-            processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = question_task_column
+        if input_task_column:
+            processor_env["PROCESSOR_INPUT_TASK_COLUMN"] = input_task_column
         if question_text_column:
             processor_env["PROCESSOR_QUESTION_TEXT_COLUMN"] = question_text_column
+        processor_env["PROCESSOR_EVIDENCE_COLUMN"] = evidence_column
+        processor_env["PROCESSOR_SCHOOL_ID_COLUMN"] = school_id_column
+        processor_env["PROCESSOR_IDENTITY_COLUMN"] = identity_column
 
         # Per-(user, task) relevant-evidence cap (config resolved above), not a secret —
         # passed as a CLI arg like every other per-execution setting (task columns,
@@ -1207,6 +1330,7 @@ def process_execution(execution_id: str) -> dict[str, Any]:
                 str(cleanup_script),
                 "--input-csv", str(workspace.final_output_csv),
                 "--output-csv", str(cleaned_path),
+                "--evidence-column", evidence_column,
             ]
             _run_command(cleanup_cmd, base_env, "Cleanup script")
             cleaned_path.replace(workspace.final_output_csv)

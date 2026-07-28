@@ -40,32 +40,63 @@ logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-_SAMPLE_UPLOADS: list[dict] = [
-    {
-        "local_path": (
-            _PROJECT_ROOT / "public" / "sample-csv" / "projects" / "sample_input.csv"
-        ),
-        "cloud_path": "projects/sample_input.csv",
-        "db_field": "sample_input_file_url",
-        "label": "sample_input",
-    },
-    {
-        "local_path": (
-            _PROJECT_ROOT / "public" / "sample-csv" / "projects" / "sample_criteria.csv"
-        ),
-        "cloud_path": "projects/sample_criteria.csv",
-        "db_field": "sample_criteria_file_url",
-        "label": "sample_criteria",
-    },
-    {
-        "local_path": (
-            _PROJECT_ROOT / "public" / "sample-csv" / "projects" / "sample_school_filter.csv"
-        ),
-        "cloud_path": "projects/sample_school_filter.csv",
-        "db_field": "sample_school_filter_file_url",
-        "label": "sample_school_filter",
-    },
-]
+# Sample-CSV manifest, per CsvSourceType.type_key. Each type's own local dir + cloud
+# prefix, so uploading (or missing) samples for one type never touches another's — a new
+# type added here is picked up automatically by _upload_sample_csvs's loop below.
+_SAMPLE_UPLOAD_MANIFEST: dict[str, list[dict]] = {
+    "project_report": [
+        {
+            "local_path": (
+                _PROJECT_ROOT / "public" / "sample-csv" / "projects" / "sample_input.csv"
+            ),
+            "cloud_path": "projects/sample_input.csv",
+            "db_field": "sample_input_file_url",
+            "label": "sample_input",
+        },
+        {
+            "local_path": (
+                _PROJECT_ROOT / "public" / "sample-csv" / "projects" / "sample_criteria.csv"
+            ),
+            "cloud_path": "projects/sample_criteria.csv",
+            "db_field": "sample_criteria_file_url",
+            "label": "sample_criteria",
+        },
+        {
+            "local_path": (
+                _PROJECT_ROOT / "public" / "sample-csv" / "projects" / "sample_school_filter.csv"
+            ),
+            "cloud_path": "projects/sample_school_filter.csv",
+            "db_field": "sample_school_filter_file_url",
+            "label": "sample_school_filter",
+        },
+    ],
+    "observation": [
+        {
+            "local_path": (
+                _PROJECT_ROOT / "public" / "sample-csv" / "observation" / "sample_input.csv"
+            ),
+            "cloud_path": "observation/sample_input.csv",
+            "db_field": "sample_input_file_url",
+            "label": "sample_input",
+        },
+        {
+            "local_path": (
+                _PROJECT_ROOT / "public" / "sample-csv" / "observation" / "sample_criteria.csv"
+            ),
+            "cloud_path": "observation/sample_criteria.csv",
+            "db_field": "sample_criteria_file_url",
+            "label": "sample_criteria",
+        },
+        {
+            "local_path": (
+                _PROJECT_ROOT / "public" / "sample-csv" / "observation" / "sample_school_filter.csv"
+            ),
+            "cloud_path": "observation/sample_school_filter.csv",
+            "db_field": "sample_school_filter_file_url",
+            "label": "sample_school_filter",
+        },
+    ],
+}
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -81,92 +112,93 @@ def _resolve_scope() -> tuple[str, str]:
 async def _upload_sample_csvs(db: Session, storage: StorageService) -> None:
     """Upload sample CSVs that have not been uploaded yet, sync DB paths, and verify signing.
 
-    Each file is skipped individually if its DB field (sample_input_file_url /
-    sample_criteria_file_url) is already populated, meaning it was successfully
-    uploaded in a previous startup.
+    Runs once per type_key in _SAMPLE_UPLOAD_MANIFEST — each CsvSourceType gets its own
+    sample files uploaded to its own row. Within a type, each file is skipped individually
+    if its DB field (sample_input_file_url / sample_criteria_file_url / ...) is already
+    populated, meaning it was successfully uploaded in a previous startup.
     """
     tenant_code, organization_code = _resolve_scope()
-
-    record: CsvSourceType | None = (
-        db.query(CsvSourceType)
-        .filter(
-            CsvSourceType.tenant_code == tenant_code,
-            CsvSourceType.organization_code == organization_code,
-            CsvSourceType.type_key == "project_report",
-        )
-        .first()
-    )
-
-    if record is None:
-        # Seed hasn't run yet (e.g. bootstrap script invoked before first uvicorn start).
-        # The lifespan seeds before calling run_bootstrap, so this only happens from the
-        # standalone script on a completely empty database.
-        logger.warning(
-            "csv_source_type 'project_report' not found — "
-            "sample CSV upload skipped.  "
-            "Ensure seed data has been applied first (run the application once or "
-            "run scripts/upload_sample_csvs.py after applying migrations)."
-        )
-        return
-
     provider = storage.storage_provider.upper()
     updated = False
 
-    for spec in _SAMPLE_UPLOADS:
-        local_path: Path = spec["local_path"]
-        cloud_path: str = spec["cloud_path"]
-        db_field: str = spec["db_field"]
-        label: str = spec["label"]
+    for type_key, uploads in _SAMPLE_UPLOAD_MANIFEST.items():
+        record: CsvSourceType | None = (
+            db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.tenant_code == tenant_code,
+                CsvSourceType.organization_code == organization_code,
+                CsvSourceType.type_key == type_key,
+            )
+            .first()
+        )
 
-        # Skip if this file was already uploaded in a previous startup.
-        if getattr(record, db_field, None):
-            logger.info("[Bootstrap] %-20s already uploaded — skipping.", label)
+        if record is None:
+            # Seed hasn't run yet (e.g. bootstrap script invoked before first uvicorn start).
+            # The lifespan seeds before calling run_bootstrap, so this only happens from the
+            # standalone script on a completely empty database.
+            logger.warning(
+                "csv_source_type '%s' not found — sample CSV upload skipped for this type.  "
+                "Ensure seed data has been applied first (run the application once or "
+                "run scripts/upload_sample_csvs.py after applying migrations).",
+                type_key,
+            )
             continue
 
-        # Verify the source file exists in the repository
-        if not local_path.exists():
-            raise FileNotFoundError(
-                f"Sample CSV not found at expected repository path: {local_path}\n"
-                "Ensure the repository was cloned with the public/sample-csv/ "
-                "directory intact."
+        for spec in uploads:
+            local_path: Path = spec["local_path"]
+            cloud_path: str = spec["cloud_path"]
+            db_field: str = spec["db_field"]
+            label: str = spec["label"]
+
+            # Skip if this file was already uploaded in a previous startup.
+            if getattr(record, db_field, None):
+                logger.info("[Bootstrap] %s/%-20s already uploaded — skipping.", type_key, label)
+                continue
+
+            # Verify the source file exists in the repository
+            if not local_path.exists():
+                raise FileNotFoundError(
+                    f"Sample CSV not found at expected repository path: {local_path}\n"
+                    "Ensure the repository was cloned with the public/sample-csv/ "
+                    "directory intact."
+                )
+
+            logger.info(
+                "[Bootstrap] Uploading %s/%-20s  →  %s (provider=%s)",
+                type_key, local_path.name, cloud_path, provider,
             )
+            content = local_path.read_bytes()
 
-        logger.info(
-            "[Bootstrap] Uploading %-20s  →  %s (provider=%s)",
-            local_path.name, cloud_path, provider,
-        )
-        content = local_path.read_bytes()
+            try:
+                stored_path = await storage.upload_file(
+                    file_content=content,
+                    file_path=cloud_path,
+                    content_type="text/csv",
+                )
+            except StorageError as exc:
+                raise RuntimeError(
+                    f"[Bootstrap] Failed to upload {type_key}/{label} to {provider} "
+                    f"bucket '{storage.bucket_name}'.\n"
+                    f"  Detail: {exc}"
+                ) from exc
 
-        try:
-            stored_path = await storage.upload_file(
-                file_content=content,
-                file_path=cloud_path,
-                content_type="text/csv",
-            )
-        except StorageError as exc:
-            raise RuntimeError(
-                f"[Bootstrap] Failed to upload {label} to {provider} "
-                f"bucket '{storage.bucket_name}'.\n"
-                f"  Detail: {exc}"
-            ) from exc
+            setattr(record, db_field, stored_path)
+            updated = True
+            logger.info("[Bootstrap]   stored at  %s", stored_path)
 
-        setattr(record, db_field, stored_path)
-        updated = True
-        logger.info("[Bootstrap]   stored at  %s", stored_path)
-
-        # Post-upload verification: confirm a signed download URL can be generated
-        try:
-            signed = await storage.generate_download_url(stored_path, expiration=60)
-            if not (signed or {}).get("url"):
-                raise RuntimeError("generate_download_url returned an empty URL")
-            logger.info("[Bootstrap]   signed URL generation: OK")
-        except StorageError as exc:
-            raise RuntimeError(
-                f"[Bootstrap] Post-upload signed URL check failed for {label}.\n"
-                f"  File was uploaded but signing is broken — "
-                f"the frontend will not be able to download sample files.\n"
-                f"  Detail: {exc}"
-            ) from exc
+            # Post-upload verification: confirm a signed download URL can be generated
+            try:
+                signed = await storage.generate_download_url(stored_path, expiration=60)
+                if not (signed or {}).get("url"):
+                    raise RuntimeError("generate_download_url returned an empty URL")
+                logger.info("[Bootstrap]   signed URL generation: OK")
+            except StorageError as exc:
+                raise RuntimeError(
+                    f"[Bootstrap] Post-upload signed URL check failed for {type_key}/{label}.\n"
+                    f"  File was uploaded but signing is broken — "
+                    f"the frontend will not be able to download sample files.\n"
+                    f"  Detail: {exc}"
+                ) from exc
 
     if updated:
         try:

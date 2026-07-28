@@ -13,6 +13,7 @@ import mimetypes
 import unicodedata
 import random
 from urllib.request import urlopen
+from urllib.parse import urlparse
 import re
 import logging
 import csv
@@ -34,6 +35,8 @@ from core.constants import (
     RELEVANCE_TAG_IRRELEVANT,
     RELEVANCE_TAG_NOT_VALIDATED,
     EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS,
+    DEFAULT_EVIDENCE_COLUMN,
+    DEFAULT_INPUT_SCHOOL_ID_COLUMN,
 )
 from utils.llm_provider import generate_content, _looks_like_placeholder
 import threading
@@ -57,6 +60,25 @@ def _parse_args():
         "--input-task-question-column",
         default=None,
         help="Input CSV column that holds mapped question text",
+    )
+    parser.add_argument(
+        "--evidence-column",
+        default=None,
+        help="Evidence-URL column in the input CSV (per-tenant, from "
+        "CsvSourceType.evidence_columns[0].column); absent = core.constants default",
+    )
+    parser.add_argument(
+        "--school-id-column",
+        default=None,
+        help="School-ID column in the input CSV (per-tenant, from "
+        "CsvSourceType.column_mappings.geo.school_id); absent = core.constants default",
+    )
+    parser.add_argument(
+        "--identity-column",
+        default=None,
+        help="Row-identity column in the input CSV, used for resume/dedup and the "
+        "relevant-evidence cap (per-tenant, from CsvSourceType.column_mappings.identifier); "
+        "absent = core.constants default (\"UUID\")",
     )
     parser.add_argument("--max-processed-rows", type=int, default=None, help="Row cap; <=0 means no cap")
     parser.add_argument(
@@ -144,7 +166,33 @@ INPUT_TASK_COLUMN = (
 INPUT_TASK_QUESTION_COLUMN = (
     (ARGS.input_task_question_column or "").strip()
     or (os.getenv("PROCESSOR_INPUT_TASK_QUESTION_COLUMN", "") or "").strip()
-    or "Task Evidence Question"
+    or "Evidence Question"
+)
+# Per-tenant column names for the input CSV's evidence-URL and school-ID columns,
+# passed in by execution_processor.py from CsvSourceType.evidence_columns /
+# column_mappings.geo.school_id (same env-var wiring as PROCESSOR_INPUT_TASK_COLUMN
+# above — set once, applies to every subprocess invocation).
+EVIDENCE_COLUMN = (
+    (ARGS.evidence_column or "").strip()
+    or (os.getenv("PROCESSOR_EVIDENCE_COLUMN", "") or "").strip()
+    or DEFAULT_EVIDENCE_COLUMN
+)
+SCHOOL_ID_COLUMN = (
+    (ARGS.school_id_column or "").strip()
+    or (os.getenv("PROCESSOR_SCHOOL_ID_COLUMN", "") or "").strip()
+    or DEFAULT_INPUT_SCHOOL_ID_COLUMN
+)
+# Row-identity column for resume/dedup and the relevant-evidence cap — "UUID" for CSV
+# shapes where one row/UUID maps to one submission (e.g. project_report); a per-submission
+# column (e.g. "Observation Submission Id") for shapes where the same UUID legitimately
+# recurs across independent submissions. CLI-arg > env-var, same priority as EVIDENCE_COLUMN
+# above, but no DEFAULT_IDENTITY_COLUMN fallback: identity is genuinely optional (see
+# project_report_no_uuid), so unconfigured means "this CSV shape has none" — not "assume
+# UUID". Both consumers below (resume_identity_col, the relevant-cap) already treat an
+# IDENTITY_COLUMN absent from the data as "not available" and degrade gracefully.
+IDENTITY_COLUMN = (
+    (ARGS.identity_column or "").strip()
+    or (os.getenv("PROCESSOR_IDENTITY_COLUMN", "") or "").strip()
 )
 DEFAULT_QUESTION_TASK_COLUMN = "TASK NAME"
 DEFAULT_QUESTION_TEXT_COLUMN = "Refined questions using tool and webpage"
@@ -338,9 +386,9 @@ def generate_row_hash(row):
     Uses: School ID + Task + Task Evidence URL
     """
     try:
-        school_id = str(row.get("School ID", "")).strip()
+        school_id = str(row.get(SCHOOL_ID_COLUMN, "")).strip()
         task = str(row.get(INPUT_TASK_COLUMN, "")).strip()
-        evidence = str(row.get("Task Evidence", "")).strip()
+        evidence = str(row.get(EVIDENCE_COLUMN, "")).strip()
         
         # Create unique string
         unique_str = f"{school_id}|{task}|{evidence}"
@@ -437,19 +485,21 @@ def mark_row_processed(file_name, row_hash, checkpoint_data, row_result=None):
     checkpoint_data[file_name]['total_processed'] = len(checkpoint_data[file_name]['processed_ids'])
     checkpoint_data[file_name]['last_updated'] = time.strftime('%Y-%m-%d %H:%M:%S')
 
-def _read_resume_state(output_dir, input_filename, worker_id, identity_col="UUID"):
+def _read_resume_state(output_dir, input_filename, worker_id, identity_col=IDENTITY_COLUMN):
     """
     Read the partial output CSV for this worker to rebuild resume state.
 
-    identity_col: column used as the per-row identity in processed_keys — "UUID" when the
-    input has one, else "School ID" (the same field the old hash-based checkpoint used), so
-    datasets without a UUID column still get row-skip resume. Callers must use the same
-    identity_col when checking a row against the returned processed_keys.
+    identity_col: column used as the per-row identity in processed_keys AND as the cap key
+    below — IDENTITY_COLUMN when the input has it, else SCHOOL_ID_COLUMN (the same field
+    the old hash-based checkpoint used), so datasets without an identity column still get
+    row-skip resume. Callers must use the same identity_col when checking a row against the
+    returned processed_keys.
 
     Returns:
         processed_keys: set of (identity, task, task_evidence) — rows to skip
-        relevant_count_per_key: dict of (uuid, task) -> int — cap counter state (always
-        keyed by UUID specifically; the cap itself is disabled when UUID is unavailable)
+        relevant_count_per_key: dict of (identity, task) -> int — cap counter state (only
+        meaningful when identity_col == IDENTITY_COLUMN; the cap itself is disabled when
+        IDENTITY_COLUMN is unavailable)
 
     Reading the output CSV (instead of the checkpoint JSON) means resume state
     survives service-level reruns: the partial output is already flushed to disk
@@ -462,29 +512,29 @@ def _read_resume_state(output_dir, input_filename, worker_id, identity_col="UUID
     if not os.path.isfile(partial_output):
         return processed_keys, relevant_count_dict
     try:
-        needed = {"UUID", "School ID", INPUT_TASK_COLUMN, "Task Evidence", "Relevance Tag"}
+        needed = {identity_col, SCHOOL_ID_COLUMN, INPUT_TASK_COLUMN, EVIDENCE_COLUMN, "Relevance Tag"}
         df = pd.read_csv(
             partial_output,
             usecols=lambda c: c in needed,
             engine="python",
             on_bad_lines="skip",
         )
-        if {identity_col, INPUT_TASK_COLUMN, "Task Evidence"}.issubset(df.columns):
+        if {identity_col, INPUT_TASK_COLUMN, EVIDENCE_COLUMN}.issubset(df.columns):
             for _, r in df.iterrows():
                 ident = str(r[identity_col]).strip()
                 task = str(r[INPUT_TASK_COLUMN]).strip()
-                url  = str(r["Task Evidence"]).strip()
+                url  = str(r[EVIDENCE_COLUMN]).strip()
                 if url and url.lower() not in ("nan", "null", "none", ""):
                     processed_keys.add((ident, task, url))
-        if {"UUID", INPUT_TASK_COLUMN, "Relevance Tag"}.issubset(df.columns):
+        if {identity_col, INPUT_TASK_COLUMN, "Relevance Tag"}.issubset(df.columns):
             rel_rows = df[df["Relevance Tag"] == RELEVANCE_TAG_RELEVANT]
             for _, r in rel_rows.iterrows():
-                key = (str(r["UUID"]).strip(), str(r[INPUT_TASK_COLUMN]).strip())
+                key = (str(r[identity_col]).strip(), str(r[INPUT_TASK_COLUMN]).strip())
                 relevant_count_dict[key] = relevant_count_dict.get(key, 0) + 1
         if processed_keys or relevant_count_dict:
             logging.info(
                 f"[Worker {worker_id}] [Resume] {len(processed_keys)} rows already done "
-                f"(identity={identity_col}), {len(relevant_count_dict)} (UUID, {INPUT_TASK_COLUMN}) "
+                f"(identity={identity_col}), {len(relevant_count_dict)} ({identity_col}, {INPUT_TASK_COLUMN}) "
                 f"keys with Relevant count — from output CSV"
             )
     except Exception as e:
@@ -1754,15 +1804,28 @@ CORRECT JSON Response:
 # === Helper function to determine evidence type ===
 def get_evidence_type(url):
     """Determine the evidence type from URL by matching its extension against the
-    configured EVIDENCE_TYPE_EXTENSIONS map — mirrors the pre-processor's resolver so a
-    tenant-custom type (any key beyond image/pdf/excel) is recognized consistently instead
-    of silently resolving to None here while the pre-processor already let the row through.
+    configured EVIDENCE_TYPE_EXTENSIONS map. Checks the URL path first (handles the
+    common case of extra query params after the file, e.g. '?w=100'), then falls back
+    to the full raw URL string — needed for download-proxy URLs that embed the actual
+    filename inside a query value (e.g. '.../download?file=.../photo.jpg'), where the
+    path itself ('/download') has no extension at all. Mirrors the pre-processor's
+    resolver exactly so a row the pre-processor lets through never resolves to None
+    here — a None would leave the per-row accumulator lists misaligned and crash
+    _flush_to_csv on length mismatch.
     Returns the type key (e.g. 'image', 'pdf', 'excel', or any tenant-configured key), or
     None if no extension matched."""
-    url = str(url).strip().lower()
-    for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
-        if any(url.endswith(ext) for ext in extensions):
-            return type_key
+    url = str(url).strip()
+    if not url or url.lower() == "null":
+        return None
+    try:
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        full = url.lower()
+        for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
+            if any(path.endswith(ext) or full.endswith(ext) for ext in extensions):
+                return type_key
+    except Exception:
+        pass
     return None
 
 
@@ -2124,14 +2187,14 @@ def _flush_to_csv(df_slice, qa, reason, tags, types, extra_data, output_file, wr
         return
 
     df_out = df_slice.copy()
-    df_out["Task evidence Q and A"] = list(qa)
-    df_out["Task evidence Q and A Reason"] = list(reason)
+    df_out["Evidence Q and A"] = list(qa)
+    df_out["Evidence Q and A Reason"] = list(reason)
     df_out["Relevance Tag"] = list(tags)
     df_out["Task Type"] = list(types)
     if ENABLE_EXTRA_KEYS:
         for key_name, vals in extra_data.items():
             df_out[key_name] = list(vals)
-    df_out["Image Preview"] = df_out["Task Evidence"].apply(
+    df_out["Image Preview"] = df_out[EVIDENCE_COLUMN].apply(
         lambda x: str(x) if str(x).lower().endswith(tuple(IMAGE_FORMATS)) else ""
     )
 
@@ -2228,7 +2291,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
         df = pd.read_excel(input_file) if input_file.endswith(".xlsx") else pd.read_csv(input_file)
 
-        required_input_columns = ["Task Evidence", INPUT_TASK_COLUMN, INPUT_TASK_QUESTION_COLUMN]
+        required_input_columns = [EVIDENCE_COLUMN, INPUT_TASK_COLUMN, INPUT_TASK_QUESTION_COLUMN]
         missing_input_columns = [column for column in required_input_columns if column not in df.columns]
         if missing_input_columns:
             raise KeyError(
@@ -2236,10 +2299,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 f"Detected columns: {list(df.columns)}"
             )
 
-        # Filter: Keep rows with Task Evidence, but allow null mapped-question column for user-owned tasks.
+        # Filter: Keep rows with evidence, but allow null mapped-question column for user-owned tasks.
         df_filtered = df[
-            ~df["Task Evidence"].isin([None, "Null"])
-        ].dropna(subset=["Task Evidence"])
+            ~df[EVIDENCE_COLUMN].isin([None, "Null"])
+        ].dropna(subset=[EVIDENCE_COLUMN])
 
         # Don't filter out rows with null mapped-question value - they might be user-owned tasks.
         logging.info(f"[Worker {worker_id}] Total rows after filtering: {len(df_filtered)}")
@@ -2247,10 +2310,12 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # ===== RESUME STATE: read partial output CSV once, use for both row-skip and cap rebuild =====
         # Using the output CSV (not the checkpoint JSON) means state survives service-level reruns:
         # the partial output is flushed to disk progressively; the checkpoint JSON is ephemeral.
-        # Identity column for row-skip matching: UUID when the input has one, else fall back to
-        # School ID (what the old hash-based checkpoint keyed on) so datasets without a UUID
-        # column still get basic resume protection instead of silently reprocessing everything.
-        resume_identity_col = "UUID" if "UUID" in df_filtered.columns else "School ID"
+        # Identity column for row-skip matching: IDENTITY_COLUMN (per-tenant, from
+        # CsvSourceType.column_mappings.identifier) when the input has it, else fall back to
+        # SCHOOL_ID_COLUMN (what the old hash-based checkpoint keyed on) so datasets without
+        # an identity column still get basic resume protection instead of silently
+        # reprocessing everything.
+        resume_identity_col = IDENTITY_COLUMN if IDENTITY_COLUMN in df_filtered.columns else SCHOOL_ID_COLUMN
         resume_processed_keys, resume_relevant_counts = _read_resume_state(
             OUTPUT_DIR, input_filename, worker_id, identity_col=resume_identity_col
         )
@@ -2261,7 +2326,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 return (
                     str(row.get(resume_identity_col, "")).strip(),
                     str(row.get(INPUT_TASK_COLUMN, "")).strip(),
-                    str(row.get("Task Evidence", "")).strip(),
+                    str(row.get(EVIDENCE_COLUMN, "")).strip(),
                 ) in resume_processed_keys
             mask = df_filtered.apply(_already_done, axis=1)
             rows_skipped_from_checkpoint = int(mask.sum())
@@ -2270,12 +2335,13 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             if rows_skipped_from_checkpoint > 0:
                 logging.info(f"[Worker {worker_id}] [Resume] Skipping {rows_skipped_from_checkpoint} already-processed rows (output-CSV state)")
 
-        # ===== RELEVANT CAP: per-(UUID, task) counters for this worker's file =====
-        # Per-worker scope is correct because group-aware splitting keeps each (UUID, task)
-        # pair inside a single file. Disabled gracefully when the input lacks a UUID column.
+        # ===== RELEVANT CAP: per-(IDENTITY_COLUMN, task) counters for this worker's file =====
+        # Per-worker scope is correct because group-aware splitting keeps each
+        # (IDENTITY_COLUMN, task) pair inside a single file. Disabled gracefully when the
+        # input lacks the identity column.
         is_relevant_limit_enabled = MAX_RELEVANT_PER_USER_TASK is not None
-        if is_relevant_limit_enabled and "UUID" not in df_filtered.columns:
-            logging.warning(f"[Worker {worker_id}] relevant_cap_disabled reason=missing_uuid_column file={input_filename}")
+        if is_relevant_limit_enabled and IDENTITY_COLUMN not in df_filtered.columns:
+            logging.warning(f"[Worker {worker_id}] relevant_cap_disabled reason=missing_identity_column column={IDENTITY_COLUMN} file={input_filename}")
             is_relevant_limit_enabled = False
         relevant_count_per_key = dict(resume_relevant_counts) if is_relevant_limit_enabled else {}
         not_validated_count = 0
@@ -2288,9 +2354,9 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         success_list = []
         failed_list = []
         if is_relevant_limit_enabled and relevant_count_per_key:
-            logging.info(f"[Worker {worker_id}] [Resume] Restored Relevant counts for {len(relevant_count_per_key)} (UUID, task) groups from output CSV")
+            logging.info(f"[Worker {worker_id}] [Resume] Restored Relevant counts for {len(relevant_count_per_key)} ({IDENTITY_COLUMN}, task) groups from output CSV")
         if is_relevant_limit_enabled:
-            logging.info(f"[Worker {worker_id}] Relevant cap ENABLED: max {MAX_RELEVANT_PER_USER_TASK} Relevant per (UUID, task)")
+            logging.info(f"[Worker {worker_id}] Relevant cap ENABLED: max {MAX_RELEVANT_PER_USER_TASK} Relevant per ({IDENTITY_COLUMN}, task)")
 
         # 🆕 Add extra key columns if enabled
         if ENABLE_EXTRA_KEYS:
@@ -2336,11 +2402,11 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             row_hash = generate_row_hash(row)
             
             # ===== PROCESS ROW (all rows here need processing) =====
-            task_evidence = str(row["Task Evidence"]).strip()
+            task_evidence = str(row[EVIDENCE_COLUMN]).strip()
             task_question_raw = row.get(INPUT_TASK_QUESTION_COLUMN, "")
             task_question = str(task_question_raw).strip() if pd.notna(task_question_raw) and task_question_raw != "Null" else ""
             task_name_raw = str(row.get(INPUT_TASK_COLUMN, "")).strip()
-            school_id = str(row.get("School ID", "unknown")).strip()
+            school_id = str(row.get(SCHOOL_ID_COLUMN, "unknown")).strip()
 
             # Normalize task name for matching (handles all stray-quote / prefix variants)
             task_name = _normalize_task_name(task_name_raw)
@@ -2377,18 +2443,18 @@ def main(input_file, worker_id=None, checkpoint_data=None):
 
                 continue
 
-            # ===== RELEVANT CAP: once a (UUID, task) group hit the cap, mark and skip =====
+            # ===== RELEVANT CAP: once an (IDENTITY_COLUMN, task) group hit the cap, mark and skip =====
             # Computed once per row and reused by the success-path increment below. Mirrors
             # the "no question" skip path above to keep the parallel output lists aligned
             # (one append per list + processed_count += 1), but makes no API call.
-            # A blank/NaN UUID must not become a shared relevant_evidence_cap_key —
-            # str(nan) == "nan", which is truthy, so rows with missing UUIDs would otherwise
-            # all be grouped under the same ("nan", task) key and capped together even though
-            # they belong to different users.
-            _row_uuid = str(row.get("UUID", "")).strip()
-            relevant_evidence_cap_key = (_row_uuid, task_name_raw) if is_relevant_limit_enabled and _row_uuid.lower() not in ("nan", "null", "none", "") else None
+            # A blank/NaN identity value must not become a shared relevant_evidence_cap_key —
+            # str(nan) == "nan", which is truthy, so rows with a missing identity value would
+            # otherwise all be grouped under the same ("nan", task) key and capped together
+            # even though they belong to different users/submissions.
+            _row_identity = str(row.get(IDENTITY_COLUMN, "")).strip()
+            relevant_evidence_cap_key = (_row_identity, task_name_raw) if is_relevant_limit_enabled and _row_identity.lower() not in ("nan", "null", "none", "") else None
             if relevant_evidence_cap_key and relevant_count_per_key.get(relevant_evidence_cap_key, 0) >= MAX_RELEVANT_PER_USER_TASK:
-                logging.info(f"[Worker {worker_id}] Row {idx+1} — Relevant cap reached for (UUID, task); marking notValidated")
+                logging.info(f"[Worker {worker_id}] Row {idx+1} — Relevant cap reached for ({IDENTITY_COLUMN}, task); marking notValidated")
                 task_types.append("Capped")
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
@@ -2517,7 +2583,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                         else:
                             # Fallback to regex extraction for non-enrollment tasks or older responses
                             text_to_analyze = {
-                                'Task Evidence': row.get('Task Evidence', ''),
+                                'Task Evidence': row.get(EVIDENCE_COLUMN, ''),
                                 'Task Remarks': row.get('Task Remarks', ''),
                                 'Sub-Tasks': row.get('Sub-Tasks', ''),
                                 'Answers': ' '.join(str(a) for a in answers),
@@ -2593,14 +2659,14 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         # Build in-memory df for stats and user-owned reporting only
         # (CSV is already fully written; no second to_csv call needed)
         df_filtered = df_filtered.head(processed_count).copy()
-        df_filtered["Task evidence Q and A"] = task_evidence_qa
-        df_filtered["Task evidence Q and A Reason"] = task_evidence_qa_reason
+        df_filtered["Evidence Q and A"] = task_evidence_qa
+        df_filtered["Evidence Q and A Reason"] = task_evidence_qa_reason
         df_filtered["Relevance Tag"] = relevance_tags
         df_filtered["Task Type"] = task_types
         if ENABLE_EXTRA_KEYS:
             for key_name, values in extra_keys_data.items():
                 df_filtered[key_name] = values
-        df_filtered["Image Preview"] = df_filtered["Task Evidence"].apply(
+        df_filtered["Image Preview"] = df_filtered[EVIDENCE_COLUMN].apply(
             lambda x: str(x) if str(x).lower().endswith(tuple(IMAGE_FORMATS)) else ""
         )
         df_to_save = df_filtered  # already written to CSV; used only for stats below

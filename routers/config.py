@@ -3,7 +3,7 @@ Config Router
 Provides generic configuration list APIs.
 """
 import logging
-from typing import Literal
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Path, Query
 from fastapi.responses import JSONResponse
@@ -29,11 +29,18 @@ logger = logging.getLogger(__name__)
 async def list(
     config_service: ConfigServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
-    type: Literal["project", "evidence_type", "school_filter"] = Query(...),
+    type: Literal["csv_source_type", "evidence_type", "school_filter"] = Query(...),
+    type_key: Optional[str] = Query(
+        default=None,
+        description="CsvSourceType.type_key to scope evidence_type/school_filter to "
+        "(e.g. a value from a type=csv_source_type item). Ignored for type=csv_source_type "
+        "itself. Required for type=evidence_type and type=school_filter — a request for "
+        "either without type_key returns 400 rather than silently resolving to 'project_report'.",
+    ),
 ):
-    """List config values by type. Supported: type=project, type=evidence_type, type=school_filter."""
+    """List config values by type. Supported: type=csv_source_type, type=evidence_type, type=school_filter."""
     try:
-        items = config_service.list(type, current_user)
+        items = config_service.list(type, current_user, type_key=type_key)
         payload = StandardAPIResponse(
             success=True,
             message="Config fetched successfully" if items else "No config found",
@@ -58,7 +65,7 @@ async def list(
 
 
 @router.get(
-    "/csv-source-types/{type_id}/sample/{file_type}",
+    "/csv-source-types/{type_key}/sample/{file_type}",
     response_model=ReportDownloadResponse,
     responses={
         400: {"model": StandardAPIResponse, "description": "Invalid file_type parameter"},
@@ -70,17 +77,17 @@ async def list(
 async def get_sample_csv_url(
     config_service: ConfigServiceDep,
     current_user: UserResponse = Depends(AuthService.get_current_user),
-    type_id: int = Path(..., description="CSV source type ID"),
+    type_key: str = Path(..., description="CsvSourceType.type_key, e.g. 'project_report'"),
     file_type: Literal["input", "criteria", "school_filter"] = Path(..., description="Sample file type"),
 ):
     """
     Get signed download URL for sample CSV file.
-    
+
     Args:
-        type_id: CSV source type ID
+        type_key: CsvSourceType.type_key — the same identifier execution.csv_type_id uses
         file_type: One of 'input', 'criteria', or 'school_filter'
 
     Returns:
         Signed download URL with expiration time
     """
-    return await config_service.get_sample_file_url(type_id, file_type, current_user)
+    return await config_service.get_sample_file_url(type_key, file_type, current_user)

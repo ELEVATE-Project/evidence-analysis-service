@@ -20,6 +20,7 @@ if str(SERVICE_ROOT) not in sys.path:
     sys.path.insert(0, str(SERVICE_ROOT))
 from core.constants import EVIDENCE_TYPE_EXTENSIONS as DEFAULT_EVIDENCE_TYPE_EXTENSIONS
 from core.constants import SCHOOL_FILTER_REQUIRED_COLUMN as DEFAULT_SCHOOL_FILTER_REQUIRED_COLUMN
+from core.constants import DEFAULT_EVIDENCE_COLUMN, DEFAULT_INPUT_SCHOOL_ID_COLUMN
 
 def str2bool(val):
     return str(val).lower() in ("1", "true", "yes")
@@ -31,7 +32,25 @@ def _parse_args():
     parser.add_argument(
         "--question-task-column",
         default=None,
-        help="Configured task column name in questions CSV (from CSV config)",
+        help="Column in the questions/criteria CSV used to match each question to a "
+        "task. Used as the join key: every input row's task (see --input-task-column) "
+        "is looked up against this column to find the right question/criteria for it.",
+    )
+    parser.add_argument(
+        "--input-task-column",
+        default=None,
+        help="Column in the real input CSV that holds each row's task. Read per row and "
+        "looked up in the questions CSV (via --question-task-column) to find which "
+        "question to evaluate that row's evidence against. Usually a different column "
+        "name than --question-task-column, since we don't control the input file's "
+        "column names.",
+    )
+    parser.add_argument(
+        "--question-text-column",
+        default=None,
+        help="Column in the questions/criteria CSV that holds the actual question text "
+        "sent to the AI for evaluation. If not set, falls back to a list of common "
+        "column names this script already recognizes (like 'Question').",
     )
     parser.add_argument("--filter-csv", default=None, help="Optional school filter CSV path")
     parser.add_argument("--output-dir", default=None, help="Output directory path")
@@ -49,21 +68,55 @@ def _parse_args():
     parser.add_argument(
         "--school-filter-column",
         default=None,
-        help="Required column name in the school-filter CSV (per-tenant, from "
-        "CsvSourceType.school_filter_config); absent = core.constants default",
+        help="Column in the school-filter CSV that holds each valid school code. Used "
+        "to build the allowlist of schools to process (only when school filtering is "
+        "on). If not set, uses a built-in default.",
+    )
+    parser.add_argument(
+        "--evidence-column",
+        default=None,
+        help="Column in the input CSV that holds the evidence URL (the image/PDF/Excel "
+        "file to evaluate). If not set, uses a built-in default.",
+    )
+    parser.add_argument(
+        "--school-id-column",
+        default=None,
+        help="Column in the input CSV that holds each row's own school ID. Compared "
+        "against the school-filter CSV's allowlist to decide whether to keep or skip "
+        "that row (only when school filtering is on). If not set, uses a built-in "
+        "default.",
+    )
+    parser.add_argument(
+        "--identity-column",
+        default=None,
+        help="Column that identifies who each row belongs to (e.g. 'UUID'). Used to "
+        "sort/group rows so all evidence for the same person+task ends up in the same "
+        "split file — needed for the relevant-evidence cap (--max-relevant-per-user-"
+        "task) to count correctly across files. If not set, group-aware splitting is "
+        "skipped and the cap is disabled — evidence still gets processed normally.",
     )
     parser.add_argument(
         "--evidence-types",
         default=None,
-        help="Comma list of allowed evidence types (image,pdf,excel); required",
+        help="Comma list of evidence types to actually process (image,pdf,excel); "
+        "rows whose evidence doesn't match one of these are skipped. Required.",
     )
     parser.add_argument(
         "--evidence-types-to-validate",
         default=None,
-        help="JSON object mapping evidence type key -> list of file extensions "
-        "(per-tenant, from CsvSourceType.evidence_types_config); absent = core.constants default",
+        help="Maps each evidence type (image/pdf/excel) to its allowed file "
+        "extensions, as JSON — used to tell what type a given evidence URL is. If not "
+        "set, uses a built-in default.",
     )
-    parser.add_argument("--max-relevant-per-user-task", default=None, type=int, help="Per-(UUID, task) relevant-evidence cap; enables group-aware splitting when set")
+    parser.add_argument(
+        "--max-relevant-per-user-task",
+        default=None,
+        type=int,
+        help="Stop sending evidence to the AI for a given person+task once this many "
+        "have already been marked Relevant — the rest are written as notValidated, no "
+        "API call, saving cost. Setting this also turns on group-aware splitting "
+        "(see --identity-column), which the cap depends on to count correctly.",
+    )
     return parser.parse_args()
 
 ARGS = _parse_args()
@@ -78,6 +131,22 @@ QUESTION_CSV = ARGS.question_csv or os.getenv("PREPROCESS_QUESTION_CSV") or DEFA
 TASK_MATCH_COLUMN_CONFIG = (
     (ARGS.question_task_column or "").strip()
     or (os.getenv("PREPROCESS_QUESTION_TASK_COLUMN", "") or "").strip()
+)
+# Independent from TASK_MATCH_COLUMN_CONFIG above: that one is searched for in the
+# questions/criteria CSV, this one in the real input CSV. Falls back to
+# TASK_MATCH_COLUMN_CONFIG for a type where both files happen to share one column name.
+INPUT_TASK_MATCH_COLUMN_CONFIG = (
+    (ARGS.input_task_column or "").strip()
+    or (os.getenv("PREPROCESS_INPUT_TASK_COLUMN", "") or "").strip()
+    or TASK_MATCH_COLUMN_CONFIG
+)
+# Question-text column in the questions/criteria CSV. Empty means "not configured" —
+# the Step 2 loader below falls back to its long-standing hardcoded candidate list
+# ("Question", "QUESTION", etc.) so standalone/manual runs without this configured keep
+# working exactly as before.
+QUESTION_TEXT_COLUMN_CONFIG = (
+    (ARGS.question_text_column or "").strip()
+    or (os.getenv("PREPROCESS_QUESTION_TEXT_COLUMN", "") or "").strip()
 )
 FILTER_CSV = ARGS.filter_csv or os.getenv("PREPROCESS_FILTER_CSV") or DEFAULT_FILTER_CSV
 OUTPUT_DIR = ARGS.output_dir or os.getenv("PREPROCESS_OUTPUT_DIR") or "output-pre-processor"
@@ -95,6 +164,36 @@ USE_SCHOOL_FILTER = str2bool(use_school_filter_value)  # Set True to filter by s
 # core.constants default so standalone/manual runs without --school-filter-column
 # don't crash with a NameError when USE_SCHOOL_FILTER is on.
 SCHOOL_FILTER_COLUMN = (ARGS.school_filter_column or "").strip() or DEFAULT_SCHOOL_FILTER_REQUIRED_COLUMN
+
+# Per-tenant column names for the input CSV's evidence-URL and school-ID columns,
+# passed in by execution_processor.py from CsvSourceType.evidence_columns /
+# column_mappings.geo.school_id. CLI arg takes priority, then env var (set once by
+# execution_processor.py so it applies to every subprocess invocation without needing
+# to be threaded through each individual command), then the core.constants default for
+# standalone/manual runs.
+EVIDENCE_COLUMN = (
+    (ARGS.evidence_column or "").strip()
+    or (os.getenv("PREPROCESS_EVIDENCE_COLUMN", "") or "").strip()
+    or DEFAULT_EVIDENCE_COLUMN
+)
+SCHOOL_ID_COLUMN = (
+    (ARGS.school_id_column or "").strip()
+    or (os.getenv("PREPROCESS_SCHOOL_ID_COLUMN", "") or "").strip()
+    or DEFAULT_INPUT_SCHOOL_ID_COLUMN
+)
+# Row-identity column for group-aware splitting — "UUID" for CSV shapes where one row/UUID
+# maps to one submission (e.g. project_report); a per-submission column (e.g. "Observation
+# Submission Id") for shapes where the same UUID legitimately recurs across independent
+# submissions. CLI-arg > env-var, same priority as EVIDENCE_COLUMN above, but no
+# DEFAULT_IDENTITY_COLUMN fallback: unlike EVIDENCE_COLUMN/SCHOOL_ID_COLUMN (every source
+# type has those), identity is genuinely optional (see project_report_no_uuid), so an
+# unconfigured identity column means "this CSV shape has none" — not "assume UUID". Group-
+# aware splitting below already treats an empty/absent IDENTITY_COLUMN as "not active" and
+# processes every row without the cap.
+IDENTITY_COLUMN = (
+    (ARGS.identity_column or "").strip()
+    or (os.getenv("PREPROCESS_IDENTITY_COLUMN", "") or "").strip()
+)
 
 if not ARGS.evidence_types:
     print("ERROR: --evidence-types is required but was empty.")
@@ -138,8 +237,13 @@ print(f"   MAIN_FILE_SPLIT: {MAIN_FILE_SPLIT}")
 print(f"   MAIN_BATCH_ROWS_PER_BATCH: {MAIN_BATCH_ROWS_PER_BATCH}")
 print(f"   MAX_MAIN_BATCHES: {MAX_MAIN_BATCHES}")
 print(f"   USE_SCHOOL_FILTER: {USE_SCHOOL_FILTER}")
+print(f"   EVIDENCE_COLUMN: {EVIDENCE_COLUMN}")
+print(f"   SCHOOL_ID_COLUMN: {SCHOOL_ID_COLUMN}")
+print(f"   IDENTITY_COLUMN: {IDENTITY_COLUMN}")
 print(f"   ALLOWED_EVIDENCE_TYPES: {sorted(ALLOWED_EVIDENCE_TYPES)}")
 print(f"   TASK_MATCH_COLUMN_CONFIG: {TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
+print(f"   INPUT_TASK_MATCH_COLUMN_CONFIG: {INPUT_TASK_MATCH_COLUMN_CONFIG or '(missing)'}")
+print(f"   QUESTION_TEXT_COLUMN_CONFIG: {QUESTION_TEXT_COLUMN_CONFIG or '(not configured, using hardcoded candidates)'}")
 print(f"   QUESTION_TASK_COLUMN_FALLBACK: {DEFAULT_QUESTION_TASK_COLUMN}")
 print(f"   INPUT_TASK_COLUMN_FALLBACK: {DEFAULT_INPUT_TASK_COLUMN}")
 print()
@@ -350,16 +454,22 @@ def normalize_task_name(name):
 # === Helper function to determine evidence type ===
 def get_evidence_type(url):
     """Determine the evidence type from URL by matching its extension against the
-    configured EVIDENCE_TYPE_EXTENSIONS map. Returns the type key (e.g. 'image', 'pdf',
-    'excel', or any tenant-configured key), or None if no extension matched."""
+    configured EVIDENCE_TYPE_EXTENSIONS map. Checks the URL path first (handles the
+    common case of extra query params after the file, e.g. '?w=100'), then falls back
+    to the full raw URL string — needed for download-proxy URLs that embed the actual
+    filename inside a query value (e.g. '.../download?file=.../photo.jpg'), where the
+    path itself ('/download') has no extension at all.
+    Returns the type key (e.g. 'image', 'pdf', 'excel', or any tenant-configured key), or
+    None if no extension matched."""
     url = clean_cell(url) # Clean the URL string first for *checking*
     if not url or url.lower() == "null":
         return None
     try:
         parsed = urlparse(url)
         path = parsed.path.lower()
+        full = url.lower()
         for type_key, extensions in EVIDENCE_TYPE_EXTENSIONS.items():
-            if any(path.endswith(ext) for ext in extensions):
+            if any(path.endswith(ext) or full.endswith(ext) for ext in extensions):
                 return type_key
     except Exception:
         pass
@@ -382,17 +492,26 @@ with open(QUESTION_CSV, newline='', encoding="utf-8") as f:
         reader.fieldnames,
         TASK_MATCH_COLUMN_CONFIG,
     )
-    question_column = _resolve_header_name(
-        reader.fieldnames,
-        [
-            "Refined questions using tool and webpage",
-            "Question",
-            "QUESTION",
-            "Questions",
-            "QUESTIONS FOR METRICS",
-            "Evidence Criteria",
-        ],
+    question_column = (
+        _resolve_header_name(reader.fieldnames, [QUESTION_TEXT_COLUMN_CONFIG])
+        if QUESTION_TEXT_COLUMN_CONFIG
+        else None
     )
+    if not question_column:
+        # Not configured (or configured name wasn't found) — fall back to the long-standing
+        # hardcoded candidate list, so standalone/manual runs and any tenant that hasn't
+        # set question_config.question_column keep working exactly as before.
+        question_column = _resolve_header_name(
+            reader.fieldnames,
+            [
+                "Refined questions using tool and webpage",
+                "Question",
+                "QUESTION",
+                "Questions",
+                "QUESTIONS FOR METRICS",
+                "Evidence Criteria",
+            ],
+        )
     if not question_column:
         print(
             "⚠️  Could not resolve question CSV headers. "
@@ -445,15 +564,28 @@ if header is None:
 print(f"Loaded {total_input_rows} data rows to process.")
 # --- END NEW ---
 
-input_task_column = _resolve_input_task_column(header, TASK_MATCH_COLUMN_CONFIG)
+# Guard against a config mismatch: if SCHOOL_ID_COLUMN isn't in the input CSV header,
+# `school_id = row.get(SCHOOL_ID_COLUMN, "")` below would silently resolve to "" for
+# every row, so the USE_SCHOOL_FILTER membership check would filter out every single
+# row with no indication it's a config mismatch rather than a real 0-match result.
+# Mirrors the FILTER_CSV-not-found fallback above: disable filtering and continue
+# rather than aborting the whole run.
+if USE_SCHOOL_FILTER and SCHOOL_ID_COLUMN not in header:
+    print(
+        f"⚠️  USE_SCHOOL_FILTER is True but '{SCHOOL_ID_COLUMN}' column not found in "
+        f"input CSV header. Skipping school filter."
+    )
+    USE_SCHOOL_FILTER = False
+
+input_task_column = _resolve_input_task_column(header, INPUT_TASK_MATCH_COLUMN_CONFIG)
 
 filtered_rows = []
 
 # Add new columns
 new_columns = [
-    "Task Evidence Question",
-    "Task evidence Q and A",
-    "Task evidence Q and A Reason",
+    "Evidence Question",
+    "Evidence Q and A",
+    "Evidence Q and A Reason",
     "Relevance Tag",
     "Image Preview",
     "Evidence Type"  # NEW: Track evidence type (image, pdf, excel)
@@ -467,11 +599,11 @@ for col in new_columns:
 # --- NEW: Iterate over the list 'all_rows' instead of the 'reader' object ---
 for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
     
-    school_id = row.get("School ID", "").strip()
+    school_id = row.get(SCHOOL_ID_COLUMN, "").strip()
     task_raw = row.get(input_task_column, "")
     task = clean_cell(task_raw)           # Clean task for exact lookup
     task_norm = normalize_task_name(task_raw)  # Normalized for fuzzy fallback lookup
-    evidence = row.get("Task Evidence", "") # Get raw evidence
+    evidence = row.get(EVIDENCE_COLUMN, "") # Get raw evidence
 
     # Rule 0: Skip if School ID not in FILTER_CSV (only if USE_SCHOOL_FILTER is enabled)
     if USE_SCHOOL_FILTER and school_id not in valid_school_codes:
@@ -504,9 +636,9 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
 
     # === Step 4: Fill additional columns & Clean District ===
     # _q already resolved above in Rule 1 — reuse directly.
-    row["Task Evidence Question"] = _q
-    row["Task evidence Q and A"] = ""
-    row["Task evidence Q and A Reason"] = ""
+    row["Evidence Question"] = _q
+    row["Evidence Q and A"] = ""
+    row["Evidence Q and A Reason"] = ""
     row["Relevance Tag"] = ""
     row["Image Preview"] = ""
     row["Evidence Type"] = evidence_type  # NEW: Store evidence type
@@ -519,28 +651,36 @@ for row in tqdm(all_rows, total=total_input_rows, desc="Processing input CSV"):
     filtered_rows.append([row.get(h, "") for h in final_header])
 
 # === Step 4b: Group-aware ordering for the relevant-evidence cap ===
-# Sort rows so every (UUID, <task>) pair is contiguous. This lets Step 5 split files only
-# at group boundaries, keeping each pair inside one file (required for the processor's
-# per-worker cap to count correctly). Skipped unless group-aware splitting is enabled, so
-# default runs keep their original row order untouched.
-_uuid_idx = final_header.index("UUID") if "UUID" in final_header else None
+# Sort rows so every (IDENTITY_COLUMN, <task>) pair is contiguous. This lets Step 5 split
+# files only at group boundaries, keeping each pair inside one file (required for the
+# processor's per-worker cap to count correctly). Skipped unless group-aware splitting is
+# enabled, so default runs keep their original row order untouched.
+
+# _identity_idx is used for group-aware splitting.
+# If the identity column is not present, _identity_idx will be None. In that case, the
+# relevant-evidence cap (--max-relevant-per-user-task) will not work — all evidence
+# will be evaluated instead.
+
+_identity_idx = final_header.index(IDENTITY_COLUMN) if IDENTITY_COLUMN in final_header else None
 _task_idx = final_header.index(input_task_column) if input_task_column in final_header else None
-_group_aware_active = GROUP_AWARE_SPLIT and _uuid_idx is not None and _task_idx is not None
+_group_aware_active = GROUP_AWARE_SPLIT and _identity_idx is not None and _task_idx is not None
 if GROUP_AWARE_SPLIT and not _group_aware_active:
-    # Falling back to size-only splitting here would let a (UUID, task) pair straddle two
-    # split files; each processor worker enforces the cap independently, so the per-pair
-    # cap silently stops being a real cap. Abort instead of producing output that looks
-    # fine but breaks the guarantee the caller (execution_processor.py) is relying on.
-    # FATAL: prefix on stderr is picked up by execution_processor._run_command() and
-    # surfaced verbatim as the execution's failure_reason instead of a generic exit-code message.
+    # A CSV source type configured with no identity column (e.g. project_report_no_uuid)
+    # has no (IDENTITY_COLUMN, task) key to group-aware split on. The processor already
+    # degrades gracefully in this situation — it disables the per-worker relevant-evidence
+    # cap and processes every row (see relevant_cap_disabled in 1-main-parallel-script.py).
+    # Mirror that here: skip group-aware splitting/sorting and fall through to plain
+    # size-only splitting instead of aborting, so evidence still gets processed, just
+    # without the cap.
     print(
-        "FATAL: group-aware splitting requested (--max-relevant-per-user-task) but UUID/task column missing — aborting.",
+        f"WARNING: relevant_cap_disabled reason=missing_identity_column "
+        f"column={IDENTITY_COLUMN} task_column={input_task_column} — group-aware splitting "
+        f"skipped, all evidences will be processed without the per-user relevant-evidence cap.",
         file=sys.stderr,
     )
-    sys.exit(1)
 if _group_aware_active:
-    filtered_rows.sort(key=lambda r: (str(r[_uuid_idx]), str(r[_task_idx])))
-    print(f"✅ Sorted {len(filtered_rows)} rows by (UUID, {input_task_column}) for group-aware splitting.")
+    filtered_rows.sort(key=lambda r: (str(r[_identity_idx]), str(r[_task_idx])))
+    print(f"✅ Sorted {len(filtered_rows)} rows by ({IDENTITY_COLUMN}, {input_task_column}) for group-aware splitting.")
 
 # === Step 4c: Main-batch cut (sequential processing of very large uploads) ===
 # Runs once, before the normal Step 5 split. Cuts filtered_rows into N main batches —
@@ -565,9 +705,9 @@ if MAIN_FILE_SPLIT and not ARGS.skip_batch_cut:
             current.append(r)
             at_target = len(current) >= effective_batch_rows
             is_last = j == len(filtered_rows) - 1
-            this_key = (str(r[_uuid_idx]), str(r[_task_idx]))
+            this_key = (str(r[_identity_idx]), str(r[_task_idx]))
             next_key = None if is_last else (
-                str(filtered_rows[j + 1][_uuid_idx]), str(filtered_rows[j + 1][_task_idx])
+                str(filtered_rows[j + 1][_identity_idx]), str(filtered_rows[j + 1][_task_idx])
             )
             at_boundary = is_last or next_key != this_key
             if at_target and at_boundary:
@@ -649,9 +789,9 @@ else:
             current.append(r)
             at_target = len(current) >= ROWS_PER_FILE
             is_last = j == len(filtered_rows) - 1
-            this_key = (str(r[_uuid_idx]), str(r[_task_idx]))
+            this_key = (str(r[_identity_idx]), str(r[_task_idx]))
             next_key = None if is_last else (
-                str(filtered_rows[j + 1][_uuid_idx]), str(filtered_rows[j + 1][_task_idx])
+                str(filtered_rows[j + 1][_identity_idx]), str(filtered_rows[j + 1][_task_idx])
             )
             # Only close the current file at a group boundary, so a (UUID, task) pair
             # never straddles two files.
@@ -763,7 +903,7 @@ print("  ➡️ 3. SKIPPED if 'Task Evidence' (after cleaning) was empty or 'nul
 print("  ➡️ 4. SKIPPED if 'Task Evidence' URL was not valid (not image/pdf/excel).")
 
 print("\n  For EACH row that PASSED all filters:")
-print("  ➡️ Cleaned and matched 'Tasks' to populate 'Task Evidence Question'.")
+print("  ➡️ Cleaned and matched 'Tasks' to populate 'Evidence Question'.")
 print("  ➡️ Cleaned 'District' names (e.g., 'Kaimur (Bhabua)' -> 'Kaimur').")
 print("  ➡️ Set the 'Image Preview' column to be empty.")
 print("  ➡️ Kept the original 'Task Evidence' value.")
