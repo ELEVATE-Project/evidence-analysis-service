@@ -1,4 +1,5 @@
-context,criteria
-Q-101,Does the evidence show the teacher using activity-based or hands-on learning materials during the lesson?
-Q-102,Does the evidence show students actively participating in a group discussion or collaborative activity?
-Q-103,Does the evidence show a classroom display board that is updated with current topics or student work?
+context,criteria,field_name,field_description,value_type
+Q-101,Does the evidence show the teacher using activity-based or hands-on learning materials during the lesson?,,,
+Q-102,Does the evidence show students actively participating in a group discussion or collaborative activity?,,,
+Q-103,Does the evidence show a classroom display board that is updated with current topics or student work?,,,
+Q-102,,Student_Count,"Extract the approximate number of students visible participating in the group discussion or collaborative activity shown in the evidence. Count only students clearly visible in the image, not the total class size if not shown.",int
