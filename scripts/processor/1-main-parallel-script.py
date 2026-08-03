@@ -798,7 +798,7 @@ def load_questions_mapping(questions_file):
         variants resolve to the same question.
       - extra_fields_by_task: dict keyed by normalized task name -> list of
         {"field", "description", "type"} dicts, parsed from the optional
-        extraction_field / extraction_description / extraction_type columns. A row
+        field_name / field_description / value_type columns. A row
         contributes an entry here regardless of whether its question column is empty,
         so a criteria CSV can carry extraction-only rows (no question) for a task.
     """
@@ -825,24 +825,24 @@ def load_questions_mapping(questions_file):
                 "Evidence Criteria",
             ],
         )
-        has_extraction_columns = {"extraction_field", "extraction_description", "extraction_type"} <= set(df_questions.columns)
+        has_extraction_columns = {"field_name", "field_description", "value_type"} <= set(df_questions.columns)
 
         for _, row in df_questions.iterrows():
             task_name_raw = str(row.get(task_column, "")).strip()
             norm_key = _normalize_task_name(task_name_raw)
 
             if has_extraction_columns and norm_key:
-                extraction_field = str(row.get("extraction_field", "")).strip()
+                extraction_field = str(row.get("field_name", "")).strip()
                 if extraction_field and extraction_field.lower() not in ("nan", "none"):
                     field_config = {
                         "field": extraction_field,
-                        "description": str(row.get("extraction_description", "")).strip(),
-                        "type": (str(row.get("extraction_type", "")).strip().lower() or "string"),
+                        "description": str(row.get("field_description", "")).strip(),
+                        "type": (str(row.get("value_type", "")).strip().lower() or "string"),
                     }
                     task_fields = extra_fields_by_task.setdefault(norm_key, [])
                     if any(f["field"] == extraction_field for f in task_fields):
                         logging.warning(
-                            "[ExtraFields] Duplicate extraction_field '%s' for task '%s' — keeping first occurrence",
+                            "[ExtraFields] Duplicate field_name '%s' for task '%s' — keeping first occurrence",
                             extraction_field, norm_key,
                         )
                     else:

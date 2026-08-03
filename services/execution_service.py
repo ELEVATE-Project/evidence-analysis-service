@@ -79,6 +79,13 @@ _DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS = 0.5
 class ExecutionService:
     """Service for managing executions"""
 
+    # Values accepted in a criteria CSV's value_type column — must match the branches
+    # _extract_and_cast_extra_fields() in scripts/processor/1-main-parallel-script.py
+    # actually casts to (anything else silently falls through to str() there, so an
+    # unrecognized type wouldn't fail the run, it would just quietly never be numeric —
+    # validation rejects that case explicitly instead of letting it through silently).
+    EXTRACTION_FIELD_TYPES = frozenset({"int", "float", "string"})
+
     def __init__(self, db: Session, worker: BackgroundWorker):
         self.db = db
         self.storage_service = StorageService()
@@ -623,6 +630,52 @@ class ExecutionService:
         headers, _ = self._extract_headers_and_row_count(questions_file_bytes, "Questions file")
         self._validate_questions_csv_metadata(headers, source_type)
 
+    @classmethod
+    def _validate_extraction_fields_column(
+        cls,
+        file_bytes: bytes,
+        headers: list[str],
+        task_column: str,
+    ) -> None:
+        """Fail validation immediately if any row defining a field_name is missing a
+        required companion value (value_type not one of the supported types, or
+        field_description blank).
+
+        Without this, a bad row here only surfaces deep inside the processor script
+        mid-execution (scripts/processor/1-main-parallel-script.py's load_questions_mapping
+        logs a warning and treats that field as unusable) — after AI cost has already been
+        spent on other rows. Catching it here, at upload validation, lets the user fix it
+        before starting a run.
+        """
+        if "field_name" not in headers:
+            return
+
+        decoded_content = cls._decode_csv_bytes(file_bytes)
+        reader = csv.DictReader(io.StringIO(decoded_content))
+        for row_number, row in enumerate(reader, start=2):  # start=2: header occupies row 1
+            field_name = (row.get("field_name") or "").strip()
+            if not field_name:
+                continue
+
+            task_label = (row.get(task_column) or "").strip() or f"row {row_number}"
+            row_label = f"Questions file row {row_number} (task '{task_label}'), field_name '{field_name}'"
+
+            entry_type = (row.get("value_type") or "").strip().lower()
+            if entry_type not in cls.EXTRACTION_FIELD_TYPES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"{row_label}: value_type must be one of "
+                        f"{sorted(cls.EXTRACTION_FIELD_TYPES)} — got {row.get('value_type')!r}."
+                    ),
+                )
+
+            if not (row.get("field_description") or "").strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"{row_label}: field_description must not be blank.",
+                )
+
     @staticmethod
     def _normalize_task_string(value: str) -> str:
         """Normalize a task string for reliable cross-file matching.
@@ -740,6 +793,9 @@ class ExecutionService:
                 f"The {file_label_lower} has more rows than allowed. "
                 "Please reduce the row count and re-upload."
             )
+
+        if "field_name" in normalized_lower or "value_type" in normalized_lower or "field_description" in normalized_lower:
+            return f"{normalized} Please fix the CSV and re-upload."
 
         return f"We found an issue while validating the {file_label_lower}. Please review and re-upload."
 
@@ -1581,6 +1637,7 @@ class ExecutionService:
                 questions_result.columns_detected = headers
                 questions_result.preview_rows = preview_rows
                 self._validate_questions_csv_metadata(headers, source_type)
+                self._validate_extraction_fields_column(questions_bytes, headers, criteria_csv_column)
                 questions_result.valid = True
                 questions_result.message = f"✓ Criteria file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
                 questions_result.missing_columns = []
