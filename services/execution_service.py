@@ -638,14 +638,19 @@ class ExecutionService:
         task_column: str,
     ) -> None:
         """Fail validation immediately if any row defining a field_name is missing a
-        required companion value (value_type not one of the supported types, or
-        field_description blank).
+        required companion value: the task column blank, value_type not one of the
+        supported types, or field_description blank.
 
         Without this, a bad row here only surfaces deep inside the processor script
-        mid-execution (scripts/processor/1-main-parallel-script.py's load_questions_mapping
-        logs a warning and treats that field as unusable) — after AI cost has already been
-        spent on other rows. Catching it here, at upload validation, lets the user fix it
-        before starting a run.
+        mid-execution. A blank task column is a particularly silent failure there:
+        load_questions_mapping()'s `if has_extraction_columns and norm_key:` gate is
+        meant to drop it, but pandas reads a blank CSV cell as NaN, and
+        str(NaN).strip() is the literal text "nan" — not an empty string — so the
+        gate doesn't actually filter it out. The field gets registered under the
+        bogus task key "nan" instead, which no real evidence row ever matches, so
+        the output column exists but is blank for every row — after AI cost has
+        already been spent on the run. Catching it here, at upload validation, lets
+        the user fix it before starting a run.
         """
         if "field_name" not in headers:
             return
@@ -657,8 +662,18 @@ class ExecutionService:
             if not field_name:
                 continue
 
-            task_label = (row.get(task_column) or "").strip() or f"row {row_number}"
-            row_label = f"Questions file row {row_number} (task '{task_label}'), field_name '{field_name}'"
+            task_value = (row.get(task_column) or "").strip()
+            if not task_value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Questions file row {row_number}, field_name '{field_name}': "
+                        f"the '{task_column}' column must not be blank — an extraction "
+                        f"field must be attached to a specific task."
+                    ),
+                )
+
+            row_label = f"Questions file row {row_number} (task '{task_value}'), field_name '{field_name}'"
 
             entry_type = (row.get("value_type") or "").strip().lower()
             if entry_type not in cls.EXTRACTION_FIELD_TYPES:
