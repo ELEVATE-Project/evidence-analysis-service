@@ -63,38 +63,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # sample_criteria_file_url isn't arbitrary runtime-generated data — it's always
-    # "/" + the fixed cloud_path string from _SAMPLE_UPLOAD_MANIFEST in
-    # services/bootstrap.py ("projects/sample_criteria.csv" /
-    # "observation/sample_criteria.csv"), which every deployment uploads to
-    # identically. Restore that deterministic value.
+    # Intentional no-op, not an oversight: a NULL sample_criteria_file_url is
+    # ambiguous. It can mean either "this migration's upgrade() cleared it" or
+    # "bootstrap has never successfully uploaded this file yet" (fresh
+    # environment, or a prior upload attempt that failed) — those two cases are
+    # indistinguishable from the column's current value alone, since upgrade()
+    # doesn't snapshot the prior value anywhere before clearing it.
     #
-    # Guarded by "IS NULL" so this only fixes rows this migration's upgrade()
-    # actually cleared, not rows that were NULL because bootstrap simply hasn't
-    # run yet on a brand-new environment (where the file wouldn't exist at that
-    # path at all, and stamping in a URL for it would be wrong).
-    tenant_code, organization_code = _resolve_scope()
-    op.execute(
-        sa.text(
-            """
-            UPDATE csv_source_types
-            SET sample_criteria_file_url = '/projects/sample_criteria.csv'
-            WHERE tenant_code = :tenant_code
-              AND organization_code = :organization_code
-              AND type_key = 'project_report'
-              AND sample_criteria_file_url IS NULL
-            """
-        ).bindparams(tenant_code=tenant_code, organization_code=organization_code)
-    )
-    op.execute(
-        sa.text(
-            """
-            UPDATE csv_source_types
-            SET sample_criteria_file_url = '/observation/sample_criteria.csv'
-            WHERE tenant_code = :tenant_code
-              AND organization_code = :organization_code
-              AND type_key = 'observation'
-              AND sample_criteria_file_url IS NULL
-            """
-        ).bindparams(tenant_code=tenant_code, organization_code=organization_code)
-    )
+    # Guessing wrong is actively harmful, not just imprecise: stamping in the
+    # deterministic sample path for a row that was never actually uploaded
+    # would make services/bootstrap.py::_upload_sample_csvs permanently skip
+    # it ("if getattr(record, db_field, None): continue"), while the object
+    # genuinely does not exist in cloud storage — every signed download URL
+    # generated from that row would 404, with no future startup able to
+    # self-heal it. A no-op downgrade can't corrupt state; a wrong guess can.
+    pass
