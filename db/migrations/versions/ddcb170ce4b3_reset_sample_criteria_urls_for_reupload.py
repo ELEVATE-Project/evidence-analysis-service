@@ -14,15 +14,21 @@ pre-update file is still what's actually sitting in cloud storage. Clearing
 the field for just these two rows makes the next startup treat them as
 never-uploaded and push the current file content.
 
-Scoped to tenant_code='default', organization_code='default_code' (the only
-scope services/bootstrap.py::_resolve_scope() ever bootstraps sample CSVs
-for) and type_key IN ('project_report', 'observation') (the two source types
-whose sample_criteria.csv changed). sample_input_file_url and
-sample_school_filter_file_url are untouched — those files did not change.
+Scoped to the same (tenant_code, organization_code) pair services/bootstrap.py's
+_resolve_scope() resolves to at runtime — settings.DEFAULT_TENANT_CODE /
+DEFAULT_ORGANIZATION_CODE, falling back to "default" / "default_code" only when
+unset — not hardcoded literals, since a deployment can and does override these
+via env var (core/config.py). Also scoped to type_key IN ('project_report',
+'observation') — the two source types whose sample_criteria.csv changed.
+sample_input_file_url and sample_school_filter_file_url are untouched — those
+files did not change.
 """
 from typing import Sequence, Union
 
+import sqlalchemy as sa
 from alembic import op
+
+from core.config import settings
 
 revision: str = 'ddcb170ce4b3'
 down_revision: Union[str, None] = 'f4a7c2e9b6d1'
@@ -30,15 +36,29 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _resolve_scope() -> tuple[str, str]:
+    # Mirrors services/bootstrap.py::_resolve_scope() exactly, so this migration
+    # targets whatever (tenant_code, organization_code) that function would
+    # actually bootstrap sample CSVs for on this deployment.
+    tenant_code = (settings.DEFAULT_TENANT_CODE or "default").strip() or "default"
+    organization_code = (
+        (settings.DEFAULT_ORGANIZATION_CODE or "default_code").strip() or "default_code"
+    )
+    return tenant_code, organization_code
+
+
 def upgrade() -> None:
+    tenant_code, organization_code = _resolve_scope()
     op.execute(
-        """
-        UPDATE csv_source_types
-        SET sample_criteria_file_url = NULL
-        WHERE tenant_code = 'default'
-          AND organization_code = 'default_code'
-          AND type_key IN ('project_report', 'observation')
-        """
+        sa.text(
+            """
+            UPDATE csv_source_types
+            SET sample_criteria_file_url = NULL
+            WHERE tenant_code = :tenant_code
+              AND organization_code = :organization_code
+              AND type_key IN ('project_report', 'observation')
+            """
+        ).bindparams(tenant_code=tenant_code, organization_code=organization_code)
     )
 
 
@@ -53,23 +73,28 @@ def downgrade() -> None:
     # actually cleared, not rows that were NULL because bootstrap simply hasn't
     # run yet on a brand-new environment (where the file wouldn't exist at that
     # path at all, and stamping in a URL for it would be wrong).
+    tenant_code, organization_code = _resolve_scope()
     op.execute(
-        """
-        UPDATE csv_source_types
-        SET sample_criteria_file_url = '/projects/sample_criteria.csv'
-        WHERE tenant_code = 'default'
-          AND organization_code = 'default_code'
-          AND type_key = 'project_report'
-          AND sample_criteria_file_url IS NULL
-        """
+        sa.text(
+            """
+            UPDATE csv_source_types
+            SET sample_criteria_file_url = '/projects/sample_criteria.csv'
+            WHERE tenant_code = :tenant_code
+              AND organization_code = :organization_code
+              AND type_key = 'project_report'
+              AND sample_criteria_file_url IS NULL
+            """
+        ).bindparams(tenant_code=tenant_code, organization_code=organization_code)
     )
     op.execute(
-        """
-        UPDATE csv_source_types
-        SET sample_criteria_file_url = '/observation/sample_criteria.csv'
-        WHERE tenant_code = 'default'
-          AND organization_code = 'default_code'
-          AND type_key = 'observation'
-          AND sample_criteria_file_url IS NULL
-        """
+        sa.text(
+            """
+            UPDATE csv_source_types
+            SET sample_criteria_file_url = '/observation/sample_criteria.csv'
+            WHERE tenant_code = :tenant_code
+              AND organization_code = :organization_code
+              AND type_key = 'observation'
+              AND sample_criteria_file_url IS NULL
+            """
+        ).bindparams(tenant_code=tenant_code, organization_code=organization_code)
     )
