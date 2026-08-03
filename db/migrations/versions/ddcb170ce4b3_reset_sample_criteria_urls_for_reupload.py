@@ -43,8 +43,33 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # One-way data reset: the sample_criteria_file_url values being cleared are
-    # cloud storage paths generated at upload time (services/bootstrap.py), not
-    # data this migration has a copy of. There is nothing to restore them to —
-    # downgrade is intentionally a no-op rather than fabricating a path.
-    pass
+    # sample_criteria_file_url isn't arbitrary runtime-generated data — it's always
+    # "/" + the fixed cloud_path string from _SAMPLE_UPLOAD_MANIFEST in
+    # services/bootstrap.py ("projects/sample_criteria.csv" /
+    # "observation/sample_criteria.csv"), which every deployment uploads to
+    # identically. Restore that deterministic value.
+    #
+    # Guarded by "IS NULL" so this only fixes rows this migration's upgrade()
+    # actually cleared, not rows that were NULL because bootstrap simply hasn't
+    # run yet on a brand-new environment (where the file wouldn't exist at that
+    # path at all, and stamping in a URL for it would be wrong).
+    op.execute(
+        """
+        UPDATE csv_source_types
+        SET sample_criteria_file_url = '/projects/sample_criteria.csv'
+        WHERE tenant_code = 'default'
+          AND organization_code = 'default_code'
+          AND type_key = 'project_report'
+          AND sample_criteria_file_url IS NULL
+        """
+    )
+    op.execute(
+        """
+        UPDATE csv_source_types
+        SET sample_criteria_file_url = '/observation/sample_criteria.csv'
+        WHERE tenant_code = 'default'
+          AND organization_code = 'default_code'
+          AND type_key = 'observation'
+          AND sample_criteria_file_url IS NULL
+        """
+    )
