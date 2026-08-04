@@ -2,4 +2,5 @@ context,criteria,field_name,field_description,value_type
 Q-101,Does the evidence show the teacher using activity-based or hands-on learning materials during the lesson?,,,
 Q-102,Does the evidence show students actively participating in a group discussion or collaborative activity?,,,
 Q-103,Does the evidence show a classroom display board that is updated with current topics or student work?,,,
-Q-102,,Student_Count,"Extract the approximate number of students visible participating in the group discussion or collaborative activity shown in the evidence. Count only students clearly visible in the image, not the total class size if not shown.",int
+Q-102,,Student_Count,"Extract the approximate number of students visible participating in the group discussion or collaborative activity shown in the evidence. Count only students clearly visible in the image, not the total class size if not shown. [This creates a new column named ""Student_Count"" in your report, filled in with a number for every matching evidence row - blank if the AI can't confidently tell.]",int
+Q-101,,Material_Type,"Extract the type of hands-on material the teacher is using, such as worksheets, blocks, charts, or models. [This creates a new column named ""Material_Type"" in your report, filled in with the AI's text answer for every matching evidence row - blank if none is visible.]",string
