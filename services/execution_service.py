@@ -638,8 +638,9 @@ class ExecutionService:
         task_column: str,
     ) -> None:
         """Fail validation immediately if any row defining a field_name is missing a
-        required companion value: the task column blank, value_type not one of the
-        supported types, or field_description blank.
+        required companion value: the task column blank (only when a task column is
+        actually configured for this source type — see below), value_type not one
+        of the supported types, or field_description blank.
 
         Without this, a bad row here only surfaces deep inside the processor script
         mid-execution. A blank task column is a particularly silent failure there:
@@ -662,18 +663,26 @@ class ExecutionService:
             if not field_name:
                 continue
 
-            task_value = (row.get(task_column) or "").strip()
-            if not task_value:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Questions file row {row_number}, field_name '{field_name}': "
-                        f"the '{task_column}' column must not be blank — an extraction "
-                        f"field must be attached to a specific task."
-                    ),
-                )
-
-            row_label = f"Questions file row {row_number} (task '{task_value}'), field_name '{field_name}'"
+            if task_column:
+                task_value = (row.get(task_column) or "").strip()
+                if not task_value:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Questions file row {row_number}, field_name '{field_name}': "
+                            f"the '{task_column}' column must not be blank — an extraction "
+                            f"field must be attached to a specific task."
+                        ),
+                    )
+                row_label = f"Questions file row {row_number} (task '{task_value}'), field_name '{field_name}'"
+            else:
+                # No task column is configured for this source type at all (blank
+                # evidence_context_config.criteria_csv_column / input_csv_column) —
+                # there's nothing meaningful to check a task value against, so this
+                # row's task isn't validated. Rejecting here based on an empty
+                # task_column would produce a nonsensical "the '' column must not
+                # be blank" error for an otherwise-valid file.
+                row_label = f"Questions file row {row_number}, field_name '{field_name}'"
 
             entry_type = (row.get("value_type") or "").strip().lower()
             if entry_type not in cls.EXTRACTION_FIELD_TYPES:
