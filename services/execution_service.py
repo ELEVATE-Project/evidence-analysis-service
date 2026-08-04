@@ -658,9 +658,10 @@ class ExecutionService:
     ) -> None:
         """Fail validation immediately if any row defining a field_name is missing a
         required companion value: the task column blank (only when a task column is
-        actually configured for this source type — see below), value_type not one
-        of the supported types, field_description blank, or field_name colliding
-        with a reserved/input-CSV column (see RESERVED_OUTPUT_COLUMNS).
+        actually configured for this source type — see below), value_type set to an
+        unrecognized value (blank is allowed — see below), field_description blank,
+        or field_name colliding with a reserved/input-CSV column (see
+        RESERVED_OUTPUT_COLUMNS).
 
         Without this, a bad row here only surfaces deep inside the processor script
         mid-execution. A blank task column is a particularly silent failure there:
@@ -723,8 +724,15 @@ class ExecutionService:
                 # be blank" error for an otherwise-valid file.
                 row_label = f"Questions file row {row_number}, field_name '{field_name}'"
 
+            # Blank is allowed here (not just tolerated) to match
+            # _extract_and_cast_extra_fields()'s own fallback in
+            # scripts/processor/1-main-parallel-script.py:840 — a blank value_type
+            # already runs fine, silently defaulting to "string", so rejecting it
+            # would only break previously-working criteria CSVs for no functional
+            # gain. Only an explicit, unrecognized value (e.g. a typo like
+            # "integer") is rejected.
             entry_type = (row.get("value_type") or "").strip().lower()
-            if entry_type not in cls.EXTRACTION_FIELD_TYPES:
+            if entry_type and entry_type not in cls.EXTRACTION_FIELD_TYPES:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
