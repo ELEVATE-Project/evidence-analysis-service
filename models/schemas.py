@@ -42,9 +42,10 @@ class UserResponse(BaseModel):
     email: str
     full_name: Optional[str] = None
     is_active: bool
+    is_superuser: bool = False
     tenant_code: Optional[str] = None
     organization_code: Optional[str] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -533,3 +534,33 @@ class CloudDownloadableUrlResponse(BaseModel):
             }
         }
     }
+
+
+class CsvSourceTypeUpdateRequest(BaseModel):
+    """Partial update for a CsvSourceType row. Every field is optional — only fields
+    the caller actually includes in the request body get changed (see
+    ConfigService.update_csv_source_type's use of model_dump(exclude_unset=True)), so
+    e.g. sending only {"sample_criteria_file_url": null} clears just that one field
+    without touching anything else. type_key / tenant_code / organization_code / id
+    are intentionally not updatable here — they're the row's lookup identity, not
+    config; renaming a type_key would need its own dedicated operation.
+    """
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    has_geo: Optional[bool] = None
+    has_program: Optional[bool] = None
+    has_rubric: Optional[bool] = None
+    has_narrative: Optional[bool] = None
+    max_rows_per_upload: Optional[int] = None
+    column_mappings: Optional[Dict[str, Any]] = None
+    evidence_columns: Optional[List[Any]] = None
+    evidence_types_config: Optional[List[Any]] = None
+    school_filter_config: Optional[Dict[str, Any]] = None
+    evidence_context_config: Optional[Dict[str, Any]] = None
+    available_filters: Optional[List[Any]] = None
+    question_config: Optional[Dict[str, Any]] = None
+    default_thresholds: Optional[Dict[str, Any]] = None
+    sample_input_file_url: Optional[str] = None
+    sample_criteria_file_url: Optional[str] = None
+    sample_school_filter_file_url: Optional[str] = None
+    is_active: Optional[bool] = None

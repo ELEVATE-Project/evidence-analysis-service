@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 from models.csv_source_type import CsvSourceType
-from models.schemas import ReportDownloadResponse, UserResponse
+from models.schemas import CsvSourceTypeUpdateRequest, ReportDownloadResponse, UserResponse
 from services.storage_service import StorageService
 
 
@@ -263,3 +263,75 @@ class ConfigService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate download URL: {str(exc)}",
             )
+
+    def update_csv_source_type(
+        self,
+        type_key: str,
+        update: CsvSourceTypeUpdateRequest,
+        current_user: UserResponse,
+    ) -> dict[str, Any]:
+        """
+        Partial update of a CsvSourceType row, scoped to the caller's own tenant/
+        organization. Only fields the caller actually included in the request body
+        are changed — model_dump(exclude_unset=True) distinguishes "field explicitly
+        sent" from "field omitted", so e.g. sending only
+        {"sample_criteria_file_url": null} clears just that field (forcing
+        services/bootstrap.py's _upload_sample_csvs to treat it as never-uploaded
+        and re-push it on the next startup) without touching anything else.
+
+        Superuser-only: this mutates shared tenant config — every user of this
+        tenant sees the same source-type config — not the caller's own data, unlike
+        everything else current_user-scoped in this service.
+
+        DB-only, so plain def per this repo's async standards.
+        """
+        if not current_user.is_superuser:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only a superuser can update CSV source type configuration.",
+            )
+
+        tenant_code, organization_code = self._resolve_scope(current_user)
+
+        source_type = (
+            self.db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.type_key == type_key,
+                CsvSourceType.tenant_code == tenant_code,
+                CsvSourceType.organization_code == organization_code,
+            )
+            .first()
+        )
+        if not source_type:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"CSV source type with type_key='{type_key}' not found.",
+            )
+
+        changed_fields = update.model_dump(exclude_unset=True)
+        if not changed_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No fields provided to update.",
+            )
+
+        for field_name, value in changed_fields.items():
+            setattr(source_type, field_name, value)
+        source_type.updated_by = current_user.id
+
+        try:
+            self.db.commit()
+        except Exception as exc:
+            self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update CSV source type: {str(exc)}",
+            )
+        self.db.refresh(source_type)
+
+        return {
+            "type_key": source_type.type_key,
+            "tenant_code": source_type.tenant_code,
+            "organization_code": source_type.organization_code,
+            "updated_fields": changed_fields,
+        }

@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 
 from core.dependencies import ConfigServiceDep
 from models.entity_schemas import ErrorDetails, StandardAPIResponse
-from models.schemas import ReportDownloadResponse, UserResponse
+from models.schemas import CsvSourceTypeUpdateRequest, ReportDownloadResponse, UserResponse
 from services.auth_service import AuthService
 
 router = APIRouter()
@@ -91,3 +91,51 @@ async def get_sample_csv_url(
         Signed download URL with expiration time
     """
     return await config_service.get_sample_file_url(type_key, file_type, current_user)
+
+
+@router.patch(
+    "/csv-source-types/{type_key}",
+    response_model=StandardAPIResponse,
+    responses={
+        400: {"model": StandardAPIResponse, "description": "No fields provided to update"},
+        401: {"model": StandardAPIResponse, "description": "Unauthorized"},
+        403: {"model": StandardAPIResponse, "description": "Superuser access required"},
+        404: {"model": StandardAPIResponse, "description": "CSV source type not found"},
+        500: {"model": StandardAPIResponse, "description": "Failed to update CSV source type"},
+    },
+)
+async def update_csv_source_type(
+    request: CsvSourceTypeUpdateRequest,
+    config_service: ConfigServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+    type_key: str = Path(..., description="CsvSourceType.type_key, e.g. 'project_report'"),
+):
+    """
+    Partial update of a CsvSourceType row, scoped to the caller's own tenant/
+    organization. Superuser-only. Only fields present in the request body are
+    changed — e.g. {"sample_criteria_file_url": null} clears just that field, which
+    forces the next application startup to re-upload the sample criteria CSV from
+    the current repo file instead of skipping it (see services/bootstrap.py).
+    """
+    try:
+        result = config_service.update_csv_source_type(type_key, request, current_user)
+        payload = StandardAPIResponse(
+            success=True,
+            message="CSV source type updated successfully",
+            data=result,
+        )
+        return JSONResponse(status_code=200, content=payload.model_dump(exclude_none=True))
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", 500)
+        detail = getattr(exc, "detail", "Unexpected internal error")
+        if status_code >= 500:
+            logger.exception("Unexpected error while updating CSV source type")
+        else:
+            logger.warning("CSV source type update request failed: %s", detail)
+        code = {400: "NO_FIELDS_PROVIDED", 403: "FORBIDDEN", 404: "NOT_FOUND"}.get(status_code, "INTERNAL_ERROR")
+        payload = StandardAPIResponse(
+            success=False,
+            message="Failed to update CSV source type",
+            error=ErrorDetails(code=code, details=detail),
+        )
+        return JSONResponse(status_code=status_code, content=payload.model_dump(exclude_none=True))
