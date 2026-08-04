@@ -86,6 +86,24 @@ class ExecutionService:
     # validation rejects that case explicitly instead of letting it through silently).
     EXTRACTION_FIELD_TYPES = frozenset({"int", "float", "string"})
 
+    # Output columns the pipeline always produces, regardless of the criteria CSV:
+    # scripts/pre-processor/1-pre-processor.py's `new_columns` (Evidence Question,
+    # Evidence Q and A, Evidence Q and A Reason, Relevance Tag, Image Preview,
+    # Evidence Type) plus Task Type, which 1-main-parallel-script.py adds itself. An
+    # extraction field named exactly one of these would silently overwrite that
+    # column's real values in the output CSV — the write sites in the processor
+    # (_flush_to_csv, the end-of-run rebuild) assign unconditionally, unlike the
+    # stub-creation step, which does guard against overwriting an existing column.
+    RESERVED_OUTPUT_COLUMNS = frozenset({
+        "Evidence Question",
+        "Evidence Q and A",
+        "Evidence Q and A Reason",
+        "Relevance Tag",
+        "Image Preview",
+        "Evidence Type",
+        "Task Type",
+    })
+
     def __init__(self, db: Session, worker: BackgroundWorker):
         self.db = db
         self.storage_service = StorageService()
@@ -636,11 +654,13 @@ class ExecutionService:
         file_bytes: bytes,
         headers: list[str],
         task_column: str,
+        input_columns: Optional[list[str]] = None,
     ) -> None:
         """Fail validation immediately if any row defining a field_name is missing a
         required companion value: the task column blank (only when a task column is
         actually configured for this source type — see below), value_type not one
-        of the supported types, or field_description blank.
+        of the supported types, field_description blank, or field_name colliding
+        with a reserved/input-CSV column (see RESERVED_OUTPUT_COLUMNS).
 
         Without this, a bad row here only surfaces deep inside the processor script
         mid-execution. A blank task column is a particularly silent failure there:
@@ -652,9 +672,18 @@ class ExecutionService:
         the output column exists but is blank for every row — after AI cost has
         already been spent on the run. Catching it here, at upload validation, lets
         the user fix it before starting a run.
+
+        A field_name colliding with an existing column is worse than silent — the
+        processor's final column writes (_flush_to_csv, the end-of-run rebuild in
+        scripts/processor/1-main-parallel-script.py) assign unconditionally, so a
+        field_name of e.g. "Relevance Tag" overwrites the real relevance scores for
+        the whole run with extraction data instead, corrupting report_service.py's
+        downstream analytics with no indication anything went wrong.
         """
         if "field_name" not in headers:
             return
+
+        reserved_columns = cls.RESERVED_OUTPUT_COLUMNS | set(input_columns or [])
 
         decoded_content = cls._decode_csv_bytes(file_bytes)
         reader = csv.DictReader(io.StringIO(decoded_content))
@@ -662,6 +691,16 @@ class ExecutionService:
             field_name = (row.get("field_name") or "").strip()
             if not field_name:
                 continue
+
+            if field_name in reserved_columns:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Questions file row {row_number}: field_name '{field_name}' "
+                        f"conflicts with an existing report column and would overwrite "
+                        f"its values. Choose a different field_name."
+                    ),
+                )
 
             if task_column:
                 task_value = (row.get(task_column) or "").strip()
@@ -1661,7 +1700,9 @@ class ExecutionService:
                 questions_result.columns_detected = headers
                 questions_result.preview_rows = preview_rows
                 self._validate_questions_csv_metadata(headers, source_type)
-                self._validate_extraction_fields_column(questions_bytes, headers, criteria_csv_column)
+                self._validate_extraction_fields_column(
+                    questions_bytes, headers, criteria_csv_column, input_result.columns_detected
+                )
                 questions_result.valid = True
                 questions_result.message = f"✓ Criteria file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
                 questions_result.missing_columns = []
