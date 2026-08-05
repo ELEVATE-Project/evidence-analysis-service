@@ -776,18 +776,19 @@ class ExecutionService:
         decoded_content = cls._decode_csv_bytes(file_bytes)
         rows = list(csv.DictReader(io.StringIO(decoded_content)))
 
-        # Normalized (quote/whitespace/NFC-insensitive), matching the processor's own
-        # task matching (_normalize_task_name in load_questions_mapping) — otherwise a
-        # criteria file where the same task's rows differ only in quoting or spacing
-        # would be falsely rejected here even though the processor treats them as the
-        # same task.
+        # Normalized via _normalize_task_name_for_processor_matching (lowercase +
+        # numeric-prefix spacing, not just quote/whitespace/NFC) to exactly match the
+        # processor's own task matching (_normalize_task_name in load_questions_mapping)
+        # — otherwise a criteria file where the same task's rows differ only in letter
+        # case or prefix spacing would be falsely rejected here even though the
+        # processor treats them as the same task.
         tasks_with_question: set[str] = set()
         if task_column and question_column:
             for row in rows:
                 task_value = (row.get(task_column) or "").strip()
                 question_value = (row.get(question_column) or "").strip()
                 if task_value and question_value:
-                    tasks_with_question.add(cls._normalize_task_string(task_value))
+                    tasks_with_question.add(cls._normalize_task_name_for_processor_matching(task_value))
 
         for row_number, row in enumerate(rows, start=2):  # start=2: header occupies row 1
             field_name = (row.get("field_name") or "").strip()
@@ -815,7 +816,7 @@ class ExecutionService:
                             f"field must be attached to a specific task."
                         ),
                     )
-                if question_column and cls._normalize_task_string(task_value) not in tasks_with_question:
+                if question_column and cls._normalize_task_name_for_processor_matching(task_value) not in tasks_with_question:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=(
@@ -857,6 +858,29 @@ class ExecutionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"{row_label}: field_description must not be blank.",
                 )
+
+    @staticmethod
+    def _normalize_task_name_for_processor_matching(value: str) -> str:
+        """Mirrors scripts/processor/1-main-parallel-script.py's _normalize_task_name
+        exactly (lowercase + numeric-prefix spacing, on top of quote/whitespace/NFC
+        handling) — deliberately kept separate from _normalize_task_string below, which
+        is shared with _validate_tasks_cross_reference_from_values and does NOT
+        lowercase or normalize numeric-prefix spacing. Using _normalize_task_string for
+        the tasks_with_question check would falsely reject a criteria file where the
+        same task's rows differ only in letter case (e.g. "Task A" vs "task a") or
+        prefix spacing (e.g. "5.Calculate" vs "5. Calculate") even though the processor
+        would treat them as the same task.
+        """
+        if not value:
+            return ""
+        s = value.strip()
+        s = s.strip("'\"")
+        s = re.sub(r"^(\d+\.\s*)['\"]+(\s*)", r"\1", s)
+        s = re.sub(r"^(\d+\.)\s*", r"\1 ", s).strip()
+        s = s.rstrip("'.\" ").strip()
+        s = re.sub(r"\s+", " ", s)
+        s = unicodedata.normalize("NFC", s)
+        return s.lower()
 
     @staticmethod
     def _normalize_task_string(value: str) -> str:

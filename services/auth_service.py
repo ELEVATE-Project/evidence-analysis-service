@@ -203,7 +203,14 @@ class AuthService:
         instead, inconsistent with every other error this endpoint returns.
         """
         expected = settings.INTERNAL_ACCESS_TOKEN
-        if not expected or not secrets.compare_digest(x_internal_access_token, expected):
+        # Compare as bytes, not str: secrets.compare_digest raises TypeError for str
+        # operands containing any non-ASCII character (Starlette decodes headers as
+        # latin-1, so a malformed header can easily contain one) — that TypeError isn't
+        # an HTTPException, so it would surface as a raw 500 instead of a clean 403.
+        # Bytes comparison has no such restriction.
+        if not expected or not secrets.compare_digest(
+            x_internal_access_token.encode("utf-8"), expected.encode("utf-8")
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Invalid or missing internal access token.",
