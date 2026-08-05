@@ -676,9 +676,33 @@ class ExecutionService:
         self,
         questions_file_bytes: bytes,
         source_type: CsvSourceType,
+        input_file_bytes: Optional[bytes] = None,
     ) -> None:
+        """Shared questions-file validation, covering both mandatory-column checks and
+        the extraction-fields checks (_validate_extraction_fields_column). Folding the
+        extraction checks in here — rather than only in validate_execution_files's own
+        inline logic — means every caller of this method gets them automatically,
+        including complete_execution_upload, which downloads both files itself and
+        previously skipped extraction validation entirely.
+        """
         headers, _ = self._extract_headers_and_row_count(questions_file_bytes, "Questions file")
         self._validate_questions_csv_metadata(headers, source_type)
+
+        input_columns: list[str] = []
+        if input_file_bytes:
+            input_columns, _ = self._extract_headers_and_row_count(input_file_bytes, "Input file")
+
+        evidence_context_config = source_type.evidence_context_config or {}
+        input_csv_column = str(evidence_context_config.get("input_csv_column", "")).strip()
+        criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip() or input_csv_column
+
+        self._validate_extraction_fields_column(
+            questions_file_bytes,
+            headers,
+            criteria_csv_column,
+            input_columns,
+            question_column=self._resolve_question_text_column(source_type),
+        )
 
     @classmethod
     def _validate_extraction_fields_column(
@@ -752,13 +776,18 @@ class ExecutionService:
         decoded_content = cls._decode_csv_bytes(file_bytes)
         rows = list(csv.DictReader(io.StringIO(decoded_content)))
 
+        # Normalized (quote/whitespace/NFC-insensitive), matching the processor's own
+        # task matching (_normalize_task_name in load_questions_mapping) — otherwise a
+        # criteria file where the same task's rows differ only in quoting or spacing
+        # would be falsely rejected here even though the processor treats them as the
+        # same task.
         tasks_with_question: set[str] = set()
         if task_column and question_column:
             for row in rows:
                 task_value = (row.get(task_column) or "").strip()
                 question_value = (row.get(question_column) or "").strip()
                 if task_value and question_value:
-                    tasks_with_question.add(task_value)
+                    tasks_with_question.add(cls._normalize_task_string(task_value))
 
         for row_number, row in enumerate(rows, start=2):  # start=2: header occupies row 1
             field_name = (row.get("field_name") or "").strip()
@@ -786,7 +815,7 @@ class ExecutionService:
                             f"field must be attached to a specific task."
                         ),
                     )
-                if question_column and task_value not in tasks_with_question:
+                if question_column and cls._normalize_task_string(task_value) not in tasks_with_question:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=(
@@ -2217,7 +2246,9 @@ class ExecutionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Questions file could not be read for validation.",
                 )
-            self._validate_questions_csv_against_source(questions_file_bytes, source_type)
+            self._validate_questions_csv_against_source(
+                questions_file_bytes, source_type, input_file_bytes=input_file_bytes
+            )
 
             # School filter is optional, so only re-validate it if one is actually attached —
             # but if it is, it gets the same re-check as input/questions rather than being

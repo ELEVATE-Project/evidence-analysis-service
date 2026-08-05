@@ -42,7 +42,13 @@ class UserResponse(BaseModel):
     email: str
     full_name: Optional[str] = None
     is_active: bool
-    is_superuser: bool = False
+    # Optional, not bool: the DB column is nullable (migration 7cd39d2cb21f has no
+    # server default), so any row inserted outside the ORM can hold NULL. Pydantic v2
+    # doesn't coerce None into bool, so a plain `bool` field here raises ValidationError
+    # inside AuthService.get_current_user for such a row — a 500 on every request that
+    # user makes. `if not current_user.is_superuser` still reads correctly with None
+    # (falsy), so no caller needs to change.
+    is_superuser: Optional[bool] = False
     tenant_code: Optional[str] = None
     organization_code: Optional[str] = None
 
