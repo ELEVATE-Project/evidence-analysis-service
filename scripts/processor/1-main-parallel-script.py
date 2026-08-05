@@ -1946,7 +1946,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         for key_name in all_extra_field_names:
             if key_name not in df_filtered.columns:
                 df_filtered[key_name] = ""
-                logging.info(f"[Worker {worker_id}] Added extra field column: {key_name}")
+                logging.info("[Worker %s] Added extra field column: %s", worker_id, key_name)
 
         processed_count = 0
         task_evidence_qa = []
@@ -2416,12 +2416,12 @@ if __name__ == "__main__":
         f["field"] for fields in _main_extra_fields_by_task.values() for f in fields
     })
     if all_extra_field_names:
-        logging.info(f"[Main] Extra field extraction ENABLED. Fields to extract:")
+        logging.info("[Main] Extra field extraction ENABLED. Fields to extract:")
         for task_key, fields in _main_extra_fields_by_task.items():
             for f in fields:
-                logging.info(f"   - task='{task_key}'  field={f['field']}  type={f['type']}")
+                logging.info("   - task=%s  field=%s  type=%s", task_key, f["field"], f["type"])
     else:
-        logging.info(f"[Main] Extra field extraction DISABLED (no extraction_field rows in criteria CSV).")
+        logging.info("[Main] Extra field extraction DISABLED (no extraction_field rows in criteria CSV).")
 
     # ✅ --- Global Stats Aggregators ---
     total_rows_processed_all = 0
@@ -2494,12 +2494,14 @@ if __name__ == "__main__":
             
             # Log final extra-field extraction statistics
             if all_extra_field_names:
-                logging.info(f"[Main] Final extra-field statistics:")
+                logging.info("[Main] Final extra-field statistics:")
                 for key_name in all_extra_field_names:
                     if key_name in merged_df.columns:
                         non_null = merged_df[key_name].notna().sum()
                         total = len(merged_df)
-                        logging.info(f"   - {key_name}: {non_null}/{total} ({non_null/total*100:.1f}%)")
+                        logging.info(
+                            "   - %s: %d/%d (%.1f%%)", key_name, non_null, total, non_null / total * 100
+                        )
         except Exception as e:
             logging.exception(f"[Main] Error during merging: {e}")
             exit(1)

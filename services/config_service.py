@@ -16,6 +16,25 @@ from services.storage_service import StorageService
 class ConfigService:
     """Service for config endpoints."""
 
+    # Mirrors CsvSourceType's nullable=False columns (models/csv_source_type.py) that are
+    # also present on CsvSourceTypeUpdateRequest. Every request field is declared Optional
+    # for partial-update semantics, but clearing one of these to None would violate the
+    # DB's NOT NULL constraint at commit — reject it here with a clean message instead of
+    # letting a raw IntegrityError surface as a generic 500.
+    REQUIRED_UPDATE_FIELDS = frozenset({
+        "display_name",
+        "has_geo",
+        "has_program",
+        "has_rubric",
+        "has_narrative",
+        "column_mappings",
+        "evidence_columns",
+        "evidence_types_config",
+        "school_filter_config",
+        "evidence_context_config",
+        "is_active",
+    })
+
     def __init__(self, db: Session):
         self.db = db
         self.storage_service = StorageService()
@@ -279,18 +298,15 @@ class ConfigService:
         services/bootstrap.py's _upload_sample_csvs to treat it as never-uploaded
         and re-push it on the next startup) without touching anything else.
 
-        Superuser-only: this mutates shared tenant config — every user of this
-        tenant sees the same source-type config — not the caller's own data, unlike
-        everything else current_user-scoped in this service.
+        Gated by the X-Internal-Access-Token header at the router layer
+        (AuthService.verify_internal_access_token) rather than by an is_superuser
+        check here — this mutates shared tenant config (every user of this tenant
+        sees the same source-type config, not the caller's own data), so it needs
+        the extra factor on top of normal JWT auth. current_user is still required
+        for tenant/organization scoping and the updated_by audit trail below.
 
         DB-only, so plain def per this repo's async standards.
         """
-        if not current_user.is_superuser:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only a superuser can update CSV source type configuration.",
-            )
-
         tenant_code, organization_code = self._resolve_scope(current_user)
 
         source_type = (
@@ -313,6 +329,25 @@ class ConfigService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No fields provided to update.",
+            )
+
+        cleared_required_fields = sorted(
+            field_name
+            for field_name, value in changed_fields.items()
+            if field_name in self.REQUIRED_UPDATE_FIELDS and value is None
+        )
+        if cleared_required_fields:
+            # 422, not 400: the request body itself is well-formed (unlike the empty-body
+            # 400 above) — the problem is a specific field's value, distinct enough from
+            # "no fields provided" to warrant its own error code (REQUIRED_FIELD_EMPTY,
+            # see routers/config.py) instead of being lumped in with it.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"{', '.join(cleared_required_fields)} cannot be cleared — "
+                    f"{'it is a' if len(cleared_required_fields) == 1 else 'they are'} "
+                    f"required setting{'s' if len(cleared_required_fields) != 1 else ''}."
+                ),
             )
 
         for field_name, value in changed_fields.items():

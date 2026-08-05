@@ -86,6 +86,13 @@ class ExecutionService:
     # validation rejects that case explicitly instead of letting it through silently).
     EXTRACTION_FIELD_TYPES = frozenset({"int", "float", "string"})
 
+    # Mirrors scripts/processor/1-main-parallel-script.py's has_extraction_columns gate:
+    # `{"field_name", "field_description", "value_type"} <= set(df_questions.columns)`.
+    # If any of these three headers is entirely absent (not just blank-valued), the
+    # processor disables extraction for the whole file silently — no per-row error, the
+    # feature just never activates. Validation must require the same full header set.
+    EXTRACTION_COMPANION_HEADERS = frozenset({"field_name", "field_description", "value_type"})
+
     # Output columns the pipeline always produces, regardless of the criteria CSV:
     # scripts/pre-processor/1-pre-processor.py's `new_columns` (Evidence Question,
     # Evidence Q and A, Evidence Q and A Reason, Relevance Tag, Image Preview,
@@ -626,6 +633,31 @@ class ExecutionService:
 
         return required_columns
 
+    @staticmethod
+    def _resolve_question_text_column(source_type: CsvSourceType) -> str:
+        """The criteria CSV's actual question-text column (e.g. "criteria" for
+        project_report, "Question" for project_report_2_0), not the task-identifier
+        column. Mirrors services/execution_processor.py's
+        _resolve_processor_columns_from_config exactly, since the processor script
+        resolves the same value via question_config.get("question_column") falling
+        back to the first non-sentinel mandatory_columns entry — kept in sync so
+        upload-time validation checks the same column the processor will actually read.
+        """
+        question_config = source_type.question_config if isinstance(source_type.question_config, dict) else {}
+        question_text_column = str(question_config.get("question_column", "")).strip()
+        if not question_text_column:
+            mandatory_columns = question_config.get("mandatory_columns", [])
+            if isinstance(mandatory_columns, list):
+                for column in mandatory_columns:
+                    column_str = str(column or "").strip()
+                    if not column_str:
+                        continue
+                    if column_str == "evidence_context_config.criteria_csv_column":
+                        continue
+                    question_text_column = column_str
+                    break
+        return question_text_column
+
     def _validate_questions_csv_metadata(
         self,
         headers: list[str],
@@ -655,13 +687,22 @@ class ExecutionService:
         headers: list[str],
         task_column: str,
         input_columns: Optional[list[str]] = None,
+        question_column: str = "",
     ) -> None:
-        """Fail validation immediately if any row defining a field_name is missing a
+        """Fail validation immediately if the questions file defines 'field_name' but is
+        missing a required companion header (field_description/value_type — see
+        EXTRACTION_COMPANION_HEADERS), or if any row defining a field_name is missing a
         required companion value: the task column blank (only when a task column is
         actually configured for this source type — see below), value_type set to an
         unrecognized value (blank is allowed — see below), field_description blank,
         or field_name colliding with a reserved/input-CSV column (see
         RESERVED_OUTPUT_COLUMNS).
+
+        A missing companion header is silent in its own way: the processor gates
+        extraction on all three headers being present (has_extraction_columns), so a
+        criteria CSV with 'field_name' but no 'value_type' header would run to
+        completion with extraction quietly disabled for the whole file, not just for
+        one row.
 
         Without this, a bad row here only surfaces deep inside the processor script
         mid-execution. A blank task column is a particularly silent failure there:
@@ -680,15 +721,46 @@ class ExecutionService:
         field_name of e.g. "Relevance Tag" overwrites the real relevance scores for
         the whole run with extraction data instead, corrupting report_service.py's
         downstream analytics with no indication anything went wrong.
+
+        A task that has extraction fields but no row with a non-blank question
+        (question_column) anywhere in the file is silent in a different way — not
+        rejected by the processor at all. load_questions_mapping() only adds a task
+        to questions_map when its question text is non-blank, so such a task never
+        gets a mapped question stamped onto its input rows; main()'s
+        `if not task_question: skip` then treats every one of that task's rows as
+        User-Owned and skips them entirely — no AI call, no extraction, no error,
+        and the task's other real-report columns (Relevance Tag, Evidence Q and A,
+        etc.) come back blank too, not just the extraction fields.
         """
         if "field_name" not in headers:
             return
 
+        missing_companions = cls.EXTRACTION_COMPANION_HEADERS - set(headers)
+        if missing_companions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Questions file defines 'field_name' but is missing required "
+                    f"companion column(s): {', '.join(sorted(missing_companions))}. "
+                    f"Extraction fields require all of {sorted(cls.EXTRACTION_COMPANION_HEADERS)} "
+                    f"to be present as columns."
+                ),
+            )
+
         reserved_columns = cls.RESERVED_OUTPUT_COLUMNS | set(input_columns or [])
 
         decoded_content = cls._decode_csv_bytes(file_bytes)
-        reader = csv.DictReader(io.StringIO(decoded_content))
-        for row_number, row in enumerate(reader, start=2):  # start=2: header occupies row 1
+        rows = list(csv.DictReader(io.StringIO(decoded_content)))
+
+        tasks_with_question: set[str] = set()
+        if task_column and question_column:
+            for row in rows:
+                task_value = (row.get(task_column) or "").strip()
+                question_value = (row.get(question_column) or "").strip()
+                if task_value and question_value:
+                    tasks_with_question.add(task_value)
+
+        for row_number, row in enumerate(rows, start=2):  # start=2: header occupies row 1
             field_name = (row.get("field_name") or "").strip()
             if not field_name:
                 continue
@@ -712,6 +784,16 @@ class ExecutionService:
                             f"Questions file row {row_number}, field_name '{field_name}': "
                             f"the '{task_column}' column must not be blank — an extraction "
                             f"field must be attached to a specific task."
+                        ),
+                    )
+                if question_column and task_value not in tasks_with_question:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Questions file row {row_number}, field_name '{field_name}': "
+                            f"task '{task_value}' defines an extraction field but has no row "
+                            f"with a non-blank '{question_column}' value anywhere in this file. "
+                            f"Extraction fields require at least one real question for their task."
                         ),
                     )
                 row_label = f"Questions file row {row_number} (task '{task_value}'), field_name '{field_name}'"
@@ -1682,6 +1764,11 @@ class ExecutionService:
                     tracked_column=input_csv_column,
                 )
                 input_result.rows_detected = row_count
+                # Set before _validate_input_csv_metadata (the only call below that can
+                # raise) so the extraction-fields collision check downstream still sees
+                # real input headers even when the input file goes on to fail its own
+                # validation rules for an unrelated reason (e.g. a missing mandatory
+                # column) — only a download/parse failure above leaves this unset.
                 input_result.columns_detected = headers
                 input_result.preview_rows = preview_rows
                 self._validate_input_csv_metadata(headers, row_count, source_type)
@@ -1709,7 +1796,11 @@ class ExecutionService:
                 questions_result.preview_rows = preview_rows
                 self._validate_questions_csv_metadata(headers, source_type)
                 self._validate_extraction_fields_column(
-                    questions_bytes, headers, criteria_csv_column, input_result.columns_detected
+                    questions_bytes,
+                    headers,
+                    criteria_csv_column,
+                    input_result.columns_detected,
+                    question_column=self._resolve_question_text_column(source_type),
                 )
                 questions_result.valid = True
                 questions_result.message = f"✓ Criteria file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
