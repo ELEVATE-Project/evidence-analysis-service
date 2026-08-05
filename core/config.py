@@ -43,7 +43,12 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
-    
+
+    # Shared-secret header gating internal/admin endpoints (e.g. CsvSourceType config
+    # updates) on top of normal JWT auth. Empty by default — an unset token means the
+    # gated endpoints always reject, not that the check is skipped.
+    INTERNAL_ACCESS_TOKEN: str = os.getenv("INTERNAL_ACCESS_TOKEN", "")
+
     # CORS
     CORS_ORIGINS: List[str] = ["http://localhost:5173", "http://localhost:3000"]
 

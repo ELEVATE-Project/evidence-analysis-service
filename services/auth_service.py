@@ -4,6 +4,7 @@ Handles user authentication, JWT token generation, and password hashing
 """
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+import secrets
 from jose import JWTError, jwt
 import bcrypt
 from fastapi import Depends, HTTPException, status
@@ -182,3 +183,35 @@ class AuthService:
             )
         
         return UserResponse.model_validate(user)
+
+    @staticmethod
+    def verify_internal_access_token(x_internal_access_token: str) -> None:
+        """Gate for internal/admin endpoints on a shared-secret header, checked against
+        settings.INTERNAL_ACCESS_TOKEN. This sits alongside normal JWT auth
+        (current_user), not in place of it — the endpoint still needs current_user for
+        tenant/organization scoping and the updated_by audit trail; this is an extra
+        factor on top, not a replacement for authentication.
+
+        An unset INTERNAL_ACCESS_TOKEN always rejects (fails closed) rather than
+        skipping the check, so a deployment that never configured this env var can't
+        be bypassed with an empty header value.
+
+        Plain function called from inside the route handler's own try/except, not a
+        FastAPI Depends() — a Depends() raising HTTPException runs before the handler
+        body and bypasses its try/except, so the error would skip the endpoint's
+        StandardAPIResponse envelope and return FastAPI's bare {"detail": ...} shape
+        instead, inconsistent with every other error this endpoint returns.
+        """
+        expected = settings.INTERNAL_ACCESS_TOKEN
+        # Compare as bytes, not str: secrets.compare_digest raises TypeError for str
+        # operands containing any non-ASCII character (Starlette decodes headers as
+        # latin-1, so a malformed header can easily contain one) — that TypeError isn't
+        # an HTTPException, so it would surface as a raw 500 instead of a clean 403.
+        # Bytes comparison has no such restriction.
+        if not expected or not secrets.compare_digest(
+            x_internal_access_token.encode("utf-8"), expected.encode("utf-8")
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Invalid or missing internal access token.",
+            )

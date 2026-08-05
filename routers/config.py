@@ -5,12 +5,12 @@ Provides generic configuration list APIs.
 import logging
 from typing import Literal, Optional
 
-from fastapi import APIRouter, Depends, Path, Query
+from fastapi import APIRouter, Depends, Header, Path, Query
 from fastapi.responses import JSONResponse
 
 from core.dependencies import ConfigServiceDep
 from models.entity_schemas import ErrorDetails, StandardAPIResponse
-from models.schemas import ReportDownloadResponse, UserResponse
+from models.schemas import CsvSourceTypeUpdateRequest, ReportDownloadResponse, UserResponse
 from services.auth_service import AuthService
 
 router = APIRouter()
@@ -91,3 +91,61 @@ async def get_sample_csv_url(
         Signed download URL with expiration time
     """
     return await config_service.get_sample_file_url(type_key, file_type, current_user)
+
+
+@router.patch(
+    "/csv-source-types/{type_key}",
+    response_model=StandardAPIResponse,
+    responses={
+        400: {"model": StandardAPIResponse, "description": "No fields provided to update"},
+        401: {"model": StandardAPIResponse, "description": "Unauthorized"},
+        403: {"model": StandardAPIResponse, "description": "Invalid or missing internal access token"},
+        404: {"model": StandardAPIResponse, "description": "CSV source type not found"},
+        422: {"model": StandardAPIResponse, "description": "A required field was set to null"},
+        500: {"model": StandardAPIResponse, "description": "Failed to update CSV source type"},
+    },
+)
+async def update_csv_source_type(
+    request: CsvSourceTypeUpdateRequest,
+    config_service: ConfigServiceDep,
+    current_user: UserResponse = Depends(AuthService.get_current_user),
+    type_key: str = Path(..., description="CsvSourceType.type_key, e.g. 'project_report'"),
+    x_internal_access_token: str = Header(default="", alias="X-Internal-Access-Token"),
+):
+    """
+    Partial update of a CsvSourceType row, scoped to the caller's own tenant/
+    organization. Requires a valid JWT (for tenant/org scoping and the updated_by
+    audit trail) plus the X-Internal-Access-Token header matching
+    settings.INTERNAL_ACCESS_TOKEN. Only fields present in the request body are
+    changed — e.g. {"sample_criteria_file_url": null} clears just that field, which
+    forces the next application startup to re-upload the sample criteria CSV from
+    the current repo file instead of skipping it (see services/bootstrap.py).
+    """
+    try:
+        AuthService.verify_internal_access_token(x_internal_access_token)
+        result = config_service.update_csv_source_type(type_key, request, current_user)
+        payload = StandardAPIResponse(
+            success=True,
+            message="CSV source type updated successfully",
+            data=result,
+        )
+        return JSONResponse(status_code=200, content=payload.model_dump(exclude_none=True))
+    except Exception as exc:
+        status_code = getattr(exc, "status_code", 500)
+        detail = getattr(exc, "detail", "Unexpected internal error")
+        if status_code >= 500:
+            logger.exception("Unexpected error while updating CSV source type")
+        else:
+            logger.warning("CSV source type update request failed: %s", detail)
+        code = {
+            400: "NO_FIELDS_PROVIDED",
+            403: "FORBIDDEN",
+            404: "NOT_FOUND",
+            422: "REQUIRED_FIELD_EMPTY",
+        }.get(status_code, "INTERNAL_ERROR")
+        payload = StandardAPIResponse(
+            success=False,
+            message="Failed to update CSV source type",
+            error=ErrorDetails(code=code, details=detail),
+        )
+        return JSONResponse(status_code=status_code, content=payload.model_dump(exclude_none=True))

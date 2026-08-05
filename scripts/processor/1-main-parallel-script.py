@@ -227,38 +227,6 @@ MAX_RELEVANT_PER_USER_TASK = (
 # Set to True for descriptive answers, False for YES/NO answers
 USE_DESCRIPTIVE_ANSWERS = os.getenv("USE_DESCRIPTIVE_ANSWERS", True)
 
-# ==== 🆕 ENROLLMENT CONFIGURATION ====
-# Configure which task should be processed for enrollment data (loaded from .env)
-ENROLLMENT_TASK_FILTER = os.getenv(
-    "ENROLLMENT_TASK_FILTER",
-    "5. Calculate percentage increase in enrolment from last year and create an enrolment report."
-)
-
-# Add any additional keys you want to extract here
-EXTRA_KEYS = {
-    'Enrollment_2024': {
-        'description': 'Enrollment count for 2024',
-        'extract_pattern': r'(?:total\s+enrolment\s+number\s+from\s+last\s+year|last\s+year.*?enrol(?:l|)ment.*?number|previous\s+year.*?enrol(?:l|)ment).*?[:\s]+(\d{1,4})|(?:enrol(?:l|)ment|नामांकन).*?(?:last\s+year|previous\s+year|2024).*?[:\s]+(\d{1,4})|(?:last\s+year|2024).*?[:\s]+(\d{1,4})(?!\s*%)',
-        'data_type': 'int',
-        'task_filter': True  # Only extract from specific task
-    },
-    'Enrollment_2025': {
-        'description': 'Enrollment count for 2025',
-        'extract_pattern': r'(?:total\s+enrolment\s+number\s+from\s+current\s+year|current\s+year.*?enrol(?:l|)ment.*?number|this\s+year.*?enrol(?:l|)ment).*?[:\s]+(\d{1,4})|(?:enrol(?:l|)ment|नामांकन).*?(?:current\s+year|this\s+year|2025).*?[:\s]+(\d{1,4})|(?:current\s+year|2025).*?[:\s]+(\d{1,4})(?!\s*%)',
-        'data_type': 'int',
-        'task_filter': True  # Only extract from specific task
-    },
-    'Enrollment_Increase_Percentage': {
-        'description': 'Percentage increase in enrollment',
-        'extract_pattern': r'(?:percentage\s+increase|%\s+increase|increase.*?percentage).*?(?:is\s+)?(-?\d+(?:\.\d+)?)\s*%|(-?\d+(?:\.\d+)?)\s*%\s*(?:increase|growth|rise|वृद्धि|decrease|decline)',
-        'data_type': 'float',
-        'task_filter': True  # Only extract from specific task
-    }
-}
-
-# Enable/disable extra keys extraction
-ENABLE_EXTRA_KEYS = True
-
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
@@ -822,16 +790,29 @@ def _resolve_column(
 
 
 def load_questions_mapping(questions_file):
-    """Load questions mapping from CSV file.
+    """Load questions mapping and per-task extra-field extraction config from the criteria CSV.
 
-    Returns a dict keyed by *normalized* task name so all stray-quote
-    / number-prefix / whitespace variants resolve to the same question.
-    The raw form is also stored as a secondary key for exact-match speed.
+    Returns (questions_map, extra_fields_by_task):
+      - questions_map: dict keyed by *normalized* task name (raw form also included as a
+        secondary key for exact-match speed) so all stray-quote / number-prefix / whitespace
+        variants resolve to the same question.
+      - extra_fields_by_task: dict keyed by normalized task name -> list of
+        {"field", "description", "type"} dicts, parsed from the optional
+        field_name / field_description / value_type columns. A row
+        contributes an entry here regardless of whether its question column is empty,
+        so a criteria CSV can carry extraction-only rows (no question) for a task.
     """
     questions_map = {}      # normalized key -> question
     questions_map_raw = {}  # raw cleaned key -> question (for exact-match fast path)
+    extra_fields_by_task = {}  # normalized task key -> list of field configs
     try:
         df_questions = pd.read_csv(questions_file)
+        # Strip stray whitespace from header names (e.g. " field_name") so the raw
+        # column-name checks below (has_extraction_columns, row.get("field_name")/
+        # ("field_description")/("value_type")) match a padded header the same way
+        # the upload-validation side already does — otherwise a padded header disables
+        # extraction for the whole run without any error.
+        df_questions.columns = [str(col).strip() for col in df_questions.columns]
         task_column = _resolve_column(
             df_questions.columns,
             QUESTION_TASK_COLUMN,
@@ -850,11 +831,30 @@ def load_questions_mapping(questions_file):
                 "Evidence Criteria",
             ],
         )
+        has_extraction_columns = {"field_name", "field_description", "value_type"} <= set(df_questions.columns)
 
         for _, row in df_questions.iterrows():
             task_name_raw = str(row.get(task_column, "")).strip()
-            question = str(row.get(question_column, "")).strip()
+            norm_key = _normalize_task_name(task_name_raw)
 
+            if has_extraction_columns and norm_key:
+                extraction_field = str(row.get("field_name", "")).strip()
+                if extraction_field and extraction_field.lower() not in ("nan", "none"):
+                    field_config = {
+                        "field": extraction_field,
+                        "description": str(row.get("field_description", "")).strip(),
+                        "type": (str(row.get("value_type", "")).strip().lower() or "string"),
+                    }
+                    task_fields = extra_fields_by_task.setdefault(norm_key, [])
+                    if any(f["field"] == extraction_field for f in task_fields):
+                        logging.warning(
+                            "[ExtraFields] Duplicate field_name '%s' for task '%s' — keeping first occurrence",
+                            extraction_field, norm_key,
+                        )
+                    else:
+                        task_fields.append(field_config)
+
+            question = str(row.get(question_column, "")).strip()
             if not question or question.lower() in ("nan", "none"):
                 logging.debug(f"[Questions] Skipping task with empty question: '{task_name_raw}'")
                 continue
@@ -863,7 +863,6 @@ def load_questions_mapping(questions_file):
             questions_map_raw[task_name_raw] = question
 
             # Fully-normalized key (handles all stray-quote / prefix variants)
-            norm_key = _normalize_task_name(task_name_raw)
             if norm_key:
                 questions_map[norm_key] = question
 
@@ -874,13 +873,19 @@ def load_questions_mapping(questions_file):
             question_column,
         )
         logging.info(f"[Questions] Unique normalized keys: {len(questions_map)} | raw keys: {len(questions_map_raw)}")
+        if extra_fields_by_task:
+            logging.info(
+                "[ExtraFields] Loaded extraction fields for %d task(s): %s",
+                len(extra_fields_by_task),
+                {k: [f["field"] for f in v] for k, v in extra_fields_by_task.items()},
+            )
     except Exception as e:
         logging.warning(f"Could not load questions file {questions_file}: {e}")
 
     # Return a single flat dict: raw keys + normalized keys.
     # Normalized keys overwrite raw keys on conflict (more permissive wins).
     combined = {**questions_map_raw, **questions_map}
-    return combined
+    return combined, extra_fields_by_task
 
 def _load_tokens_from_env(prefixes: list, label: str) -> list:
     tokens = []
@@ -1116,13 +1121,6 @@ class AnalysisResponse(typing.TypedDict):
     answers: list[str]
     reasonings: list[str]
 
-class EnrollmentAnalysisResponse(typing.TypedDict):
-    answers: list[str]
-    reasonings: list[str]
-    enrollment_2024: int | None
-    enrollment_2025: int | None
-    enrollment_increase_percentage: float | None
-
 if not _LLM_TOKENS:
     raise ValueError(f"[{_LLM_PROVIDER_NAME}] No valid tokens found!")
 
@@ -1135,227 +1133,33 @@ def _llm_generate(parts, token):
         generation_config=_build_generation_config(),
     )
 
-# === 🆕 Extra Keys Extraction Function ===
-def extract_extra_keys(text_fields, task_name=None):
-    """
-    Extract additional information based on EXTRA_KEYS configuration
-
-    Args:
-        text_fields: Dict or list of text fields to search
-        task_name: Name of the task being processed (for task filtering)
-
-    Returns:
-        Dict with extracted values for each extra key
-    """
-    if not ENABLE_EXTRA_KEYS:
-        return {}
-
-    # Combine all text fields into one string
-    if isinstance(text_fields, dict):
-        combined_text = ' '.join(str(v) for v in text_fields.values() if v)
-    elif isinstance(text_fields, list):
-        combined_text = ' '.join(str(v) for v in text_fields if v)
-    else:
-        combined_text = str(text_fields)
-
-    combined_text = combined_text.lower()
-
-    extracted = {}
-
-    for key_name, config in EXTRA_KEYS.items():
+# === Extra fields extraction: casts whatever Gemini returned for each criteria-CSV-defined
+# field to its declared type. Field definitions (name/description/type) come from
+# extra_fields_by_task, built by load_questions_mapping() from the criteria CSV.
+def _extract_and_cast_extra_fields(response_json, extra_fields):
+    """Pull each configured extra field out of the parsed Gemini response and cast it to
+    its declared type. No range/cross-field validation — the extraction_description in the
+    criteria CSV is the only guidance given to the model; a missing/unparseable value is
+    just recorded as None rather than guessed at."""
+    result = {}
+    for field_config in extra_fields:
+        field_name = field_config["field"]
+        raw = response_json.get(field_name)
+        if raw is None:
+            result[field_name] = None
+            continue
         try:
-            # Check if this key requires task filtering
-            if config.get('task_filter', False):
-                # Normalize both task names for comparison
-                task_name_normalized = task_name.strip().rstrip("'.\"").strip() if task_name else None
-                enrollment_filter_normalized = ENROLLMENT_TASK_FILTER.strip().rstrip("'.\"").strip()
-                
-                # Only extract if task matches ENROLLMENT_TASK_FILTER
-                if task_name_normalized is None or task_name_normalized != enrollment_filter_normalized:
-                    extracted[key_name] = None
-                    continue
-
-            pattern = config['extract_pattern']
-            data_type = config['data_type']
-
-            matches = re.findall(pattern, combined_text, re.IGNORECASE)
-
-            if matches:
-                # Handle tuple results from multiple capture groups
-                if isinstance(matches[0], tuple):
-                    # Get first non-empty match from the tuple
-                    value = next((m for m in matches[0] if m), None)
-                    if value is None:
-                        extracted[key_name] = None
-                        continue
-                else:
-                    value = matches[0]
-
-                # Convert to appropriate data type
-                if data_type == 'int':
-                    extracted[key_name] = int(value)
-                elif data_type == 'float':
-                    extracted[key_name] = float(value)
-                else:
-                    extracted[key_name] = str(value)
+            field_type = field_config["type"]
+            if field_type == "int":
+                result[field_name] = int(float(raw))
+            elif field_type == "float":
+                result[field_name] = float(raw)
             else:
-                extracted[key_name] = None
-                
-        except Exception as e:
-            logging.warning(f"Error extracting {key_name}: {e}")
-            extracted[key_name] = None
-    
-    return extracted
-
-# === 🆕 Enrollment Data Validation Function ===
-def validate_and_fix_enrollment_data(enr_2024, enr_2025, enr_pct, answers_text, reasonings_text):
-    """
-    Validate enrollment data from API response and apply sanity checks.
-    
-    Args:
-        enr_2024: Enrollment count for 2024 (from API JSON)
-        enr_2025: Enrollment count for 2025 (from API JSON)
-        enr_pct: Percentage increase (from API JSON)
-        answers_text: Combined answers text (for logging)
-        reasonings_text: Combined reasonings text (for logging)
-    
-    Returns:
-        Tuple of (validated_2024, validated_2025, validated_pct)
-    """
-    original_2024 = enr_2024
-    original_2025 = enr_2025
-    original_pct = enr_pct
-    
-    issues_found = []
-    
-    # ========== SANITY CHECK 1: Same value in all fields ==========
-    if enr_2024 is not None and enr_2025 is not None and enr_pct is not None:
-        if enr_2024 == enr_2025 == enr_pct:
-            issues_found.append(f"Same value in all fields: {enr_2024}")
-            # This is clearly wrong - keep only the one that makes sense
-            if -100 <= enr_2024 <= 300:
-                # Looks like a percentage, keep only that
-                enr_pct = enr_2024
-                enr_2024 = None
-                enr_2025 = None
-            else:
-                # Doesn't look like percentage, nullify all
-                enr_2024 = None
-                enr_2025 = None
-                enr_pct = None
-    
-    # ========== SANITY CHECK 2: Year numbers as counts ==========
-    if enr_2024 is not None and int(enr_2024) in [2024, 2025]:
-        issues_found.append(f"Year number {int(enr_2024)} extracted as 2024 count")
-        enr_2024 = None
-    
-    if enr_2025 is not None and int(enr_2025) in [2024, 2025]:
-        issues_found.append(f"Year number {int(enr_2025)} extracted as 2025 count")
-        enr_2025 = None
-    
-    # ========== SANITY CHECK 3: Unrealistic enrollment counts ==========
-    if enr_2024 is not None:
-        if enr_2024 < 5 or enr_2024 > 10000:
-            issues_found.append(f"2024 count {enr_2024} outside realistic range (5-10000)")
-            enr_2024 = None
-    
-    if enr_2025 is not None:
-        if enr_2025 < 5 or enr_2025 > 10000:
-            issues_found.append(f"2025 count {enr_2025} outside realistic range (5-10000)")
-            enr_2025 = None
-    
-    # ========== SANITY CHECK 4: Unrealistic percentage ==========
-    if enr_pct is not None:
-        if abs(enr_pct) > 500:  # More than 500% change is unrealistic
-            issues_found.append(f"Percentage {enr_pct}% is unrealistic")
-            enr_pct = None
-    
-    # ========== SANITY CHECK 5: Percentage as count or vice versa ==========
-    # If a count looks like a typical percentage (single or double digit)
-    if enr_2024 is not None and enr_2025 is not None:
-        if (enr_2024 < 100 and enr_2025 < 100) and enr_pct is None:
-            # Both counts are < 100 and no percentage - might be swapped
-            issues_found.append(f"Both counts < 100 ({enr_2024}, {enr_2025}) - might be percentages")
-    
-    # ========== FALLBACK: Extract from text if API didn't provide counts ==========
-    if (enr_2024 is None or enr_2025 is None) and answers_text:
-        logging.info(f"[Validation] API didn't provide counts. Attempting text extraction...")
-        combined_text = f"{answers_text} {reasonings_text}".lower()
-        
-        # Pattern 1: Look for "Total enrolment number from last year: 120"
-        if enr_2024 is None:
-            patterns_2024 = [
-                r'total\s+enrol(?:l|)ment\s+(?:number\s+)?(?:from\s+)?last\s+year[:\s]+(\d{2,4})',
-                r'last\s+year.*?enrol(?:l|)ment.*?[:\s](\d{2,4})',
-                r'enrol(?:l|)ment.*?last\s+year.*?[:\s](\d{2,4})',
-                r'previous\s+year.*?[:\s](\d{2,4})',
-            ]
-            for pattern in patterns_2024:
-                matches = re.findall(pattern, combined_text, re.IGNORECASE)
-                if matches:
-                    for match in matches:
-                        try:
-                            val = int(match)
-                            # Valid enrollment: not a year number, realistic range
-                            if 5 <= val <= 9999 and val not in [2024, 2025]:
-                                enr_2024 = val
-                                logging.info(f"[Validation] Extracted 2024 count from text: {enr_2024}")
-                                break
-                        except:
-                            continue
-                if enr_2024:
-                    break
-        
-        # Pattern 2: Look for "Total enrolment number from current year: 144"
-        if enr_2025 is None:
-            patterns_2025 = [
-                r'total\s+enrol(?:l|)ment\s+(?:number\s+)?(?:from\s+)?current\s+year[:\s]+(\d{2,4})',
-                r'current\s+year.*?enrol(?:l|)ment.*?[:\s](\d{2,4})',
-                r'enrol(?:l|)ment.*?current\s+year.*?[:\s](\d{2,4})',
-                r'this\s+year.*?[:\s](\d{2,4})',
-            ]
-            for pattern in patterns_2025:
-                matches = re.findall(pattern, combined_text, re.IGNORECASE)
-                if matches:
-                    for match in matches:
-                        try:
-                            val = int(match)
-                            if 5 <= val <= 9999 and val not in [2024, 2025]:
-                                enr_2025 = val
-                                logging.info(f"[Validation] Extracted 2025 count from text: {enr_2025}")
-                                break
-                        except:
-                            continue
-                if enr_2025:
-                    break
-    
-    # ========== CALCULATION: If we have 2 values, calculate the 3rd ==========
-    if enr_2024 is not None and enr_2025 is not None and enr_pct is None:
-        # Calculate percentage from counts
-        if enr_2024 > 0:
-            enr_pct = round(((enr_2025 - enr_2024) / enr_2024) * 100, 2)
-            logging.info(f"[Validation] Calculated percentage: {enr_pct}%")
-    
-    elif enr_2024 is not None and enr_pct is not None and enr_2025 is None:
-        # Calculate 2025 from 2024 and percentage
-        enr_2025 = int(round(enr_2024 * (1 + enr_pct / 100)))
-        logging.info(f"[Validation] Calculated 2025 count: {enr_2025}")
-    
-    elif enr_2025 is not None and enr_pct is not None and enr_2024 is None:
-        # Calculate 2024 from 2025 and percentage
-        if enr_pct != -100:  # Avoid division by zero
-            enr_2024 = int(round(enr_2025 / (1 + enr_pct / 100)))
-            logging.info(f"[Validation] Calculated 2024 count: {enr_2024}")
-    
-    # ========== LOGGING ==========
-    if issues_found:
-        logging.warning(f"[Validation] Issues detected: {'; '.join(issues_found)}")
-        logging.info(f"[Validation] BEFORE: 2024={original_2024}, 2025={original_2025}, %={original_pct}")
-        logging.info(f"[Validation] AFTER:  2024={enr_2024}, 2025={enr_2025}, %={enr_pct}")
-    else:
-        logging.info(f"[Validation] Data looks good: 2024={enr_2024}, 2025={enr_2025}, %={enr_pct}")
-    
-    return enr_2024, enr_2025, enr_pct
+                result[field_name] = str(raw)
+        except (ValueError, TypeError):
+            logging.warning("extra_field_cast_failed  field=%s  raw=%r  type=%s", field_name, raw, field_config.get("type"))
+            result[field_name] = None
+    return result
 
 # === Utility functions ===
 def calculate_relevance_tag(answers, mode=None, question_text=None, reasonings=None):
@@ -1572,7 +1376,8 @@ def rate_limiter(token: str):
 
 
 def process_image(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
-                  worker_id=None, input_file=None, row_number=None, school_id=None):
+                  worker_id=None, input_file=None, row_number=None, school_id=None, extra_fields=None):
+    extra_fields = extra_fields or []
     retries = 0
     worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
@@ -1580,14 +1385,6 @@ def process_image(task_evidence_link, task_evidence_question, task_name=None, ma
         try:
             rate_limiter(worker_token)
             image = httpx.get(task_evidence_link)
-
-            # Check if this is an enrollment-related task (normalize both sides)
-            task_name_normalized_check = (task_name.strip().rstrip("'.\"").strip() if task_name else "")
-            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'.\"").strip()
-            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
-            
-            if is_enrollment_task:
-                logging.info(f"[Enrollment] Model selection: Using enrollment_model for task '{task_name_normalized_check}'")
 
             # Flexible prompt that allows both YES/NO and descriptive answers
             prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
@@ -1605,7 +1402,7 @@ IMPORTANT RESPONSE FORMAT:
 Example for 1 question:
 {{
   "answers": ["YES"],
-  "reasonings": ["The image clearly shows enrollment data with increasing trend"]
+  "reasonings": ["The image clearly shows relevant evidence"]
 }}
 
 DO NOT put both YES/NO and explanation in the answers array!
@@ -1616,126 +1413,8 @@ Focus on:
 - Quality and clarity of the evidence
 - Educational context and completeness"""
 
-            if is_enrollment_task:
-                # Update the example to show enrollment fields
-                prompt = f"""You are an educational evidence validator. Analyze the given image and answer these questions:
-
-{task_evidence_question}
-
-IMPORTANT RESPONSE FORMAT:
-- For each question, provide EXACTLY ONE answer in the "answers" array
-- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
-- The answer can be either:
-  1. A clear YES or NO
-  2. A detailed descriptive answer (e.g., "The school has organized activities...")
-- Return ONLY valid JSON (no markdown, no code fences, no comments)
-
-Example for 1 question with enrollment data:
-{{
-  "answers": ["20%"],
-  "reasonings": ["The image clearly shows enrollment data with increasing trend"],
-  "enrollment_2024": 120,
-  "enrollment_2025": 144,
-  "enrollment_increase_percentage": 20.0
-}}
-
-DO NOT put both YES/NO and explanation in the answers array!
-
-Focus on:
-- Visual evidence in the image
-- Relevance to the question
-- Quality and clarity of the evidence
-- Educational context and completeness"""
-                prompt += """
-
-====================================================================================
-⚠️ CRITICAL: ENROLLMENT DATA EXTRACTION FROM REPORT IMAGE ⚠️
-====================================================================================
-
-You are analyzing an ENROLLMENT REPORT table/image. You MUST extract THREE DIFFERENT numerical values:
-
-📊 VALUE 1: enrollment_2024 (INTEGER - Student Count)
-   WHERE TO FIND: Look for column headers or labels like:
-   - "Total enrolment number from last year"
-   - "Last Year Enrolment" 
-   - "Previous Year"
-   - Near the year "2024"
-   
-   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
-   ❌ DO NOT extract: The year "2024" itself
-   ❌ DO NOT extract: Percentages
-   ✅ EXAMPLE: If table shows "Total enrolment from last year: 120" → return 120
-   ✅ EXAMPLE: If table shows "2024: 85 students" → return 85
-   
-📊 VALUE 2: enrollment_2025 (INTEGER - Student Count)  
-   WHERE TO FIND: Look for column headers or labels like:
-   - "Total enrolment number from current year"
-   - "Current Year Enrolment"
-   - "This Year"
-   - Near the year "2025"
-   
-   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
-   ❌ DO NOT extract: The year "2025" itself
-   ❌ DO NOT extract: Percentages
-   ✅ EXAMPLE: If table shows "Total enrolment from current year: 144" → return 144
-   ✅ EXAMPLE: If table shows "2025: 96 students" → return 96
-
-📊 VALUE 3: enrollment_increase_percentage (FLOAT - Percentage Value)
-   WHERE TO FIND: Look for column headers or labels like:
-   - "% increase"
-   - "Percentage increase" 
-   - "Growth %"
-   - Usually has a "%" symbol
-   
-   WHAT TO EXTRACT: The PERCENTAGE number (can be negative)
-   ✅ EXAMPLE: If shows "% increase: 8%" → return 8.0
-   ✅ EXAMPLE: If shows "-20%" → return -20.0
-   ✅ EXAMPLE: If shows "20% growth" → return 20.0
-
-====================================================================================
-❌ COMMON MISTAKES TO AVOID:
-====================================================================================
-1. ❌ Putting the SAME value in all three fields (e.g., all = 8.0)
-2. ❌ Extracting year numbers as counts (2024 as enrollment count)
-3. ❌ Extracting counts as percentages (120 as percentage)
-4. ❌ Extracting percentages as counts (8% as enrollment count)
-
-====================================================================================
-✅ CORRECT EXAMPLE FROM A TABLE:
-====================================================================================
-Table shows:
-| School | Last Year | Current Year | % Increase |
-| ABC    | 120       | 144          | 20%        |
-
-CORRECT JSON Response:
-{
-  "answers": ["20%"],
-  "reasonings": ["The table shows clear enrollment data"],
-  "enrollment_2024": 120,     ← Last Year count
-  "enrollment_2025": 144,     ← Current Year count  
-  "enrollment_increase_percentage": 20.0   ← Percentage
-}
-
-====================================================================================
-✅ ANOTHER CORRECT EXAMPLE:
-====================================================================================
-Table shows:
-| District | 2024 | 2025 | Growth |
-| XYZ      | 85   | 96   | -20%   |
-
-CORRECT JSON Response:
-{
-  "answers": ["The enrollment decreased by 20%"],
-  "reasonings": ["Based on the table data"],
-  "enrollment_2024": 85,      ← 2024 count
-  "enrollment_2025": 96,      ← 2025 count
-  "enrollment_increase_percentage": -20.0  ← Negative percentage
-}
-
-====================================================================================
-⚠️ If you cannot find a value clearly, set it to null. Do NOT guess!
-====================================================================================
-"""
+            if extra_fields:
+                prompt += _build_extra_fields_prompt_suffix(extra_fields)
 
             response = _llm_generate([
                 {"mime_type": "image/jpeg", "data": base64.b64encode(image.content).decode("utf-8")},
@@ -1745,9 +1424,9 @@ CORRECT JSON Response:
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
             )
-            
+
             # Log API usage
-            api_call_type = "enrollment_analysis" if is_enrollment_task else "image_analysis"
+            api_call_type = "extra_fields_analysis" if extra_fields else "image_analysis"
             log_api_usage(
                 worker_id=worker_id or "unknown",
                 input_file=input_file or "unknown",
@@ -1829,55 +1508,39 @@ def get_evidence_type(url):
     return None
 
 
-# === Enrollment prompt suffix (shared between image/pdf/excel processors) ===
-ENROLLMENT_PROMPT_SUFFIX = """
+# === Extra-fields prompt suffix (shared between image/pdf/excel processors) ===
+# Fields are entirely criteria-CSV-driven (extraction_field/extraction_description/
+# extraction_type columns, loaded per-task by load_questions_mapping()) — this function
+# just renders whatever fields the caller passes in, it has no knowledge of what any
+# specific field means.
+def _build_extra_fields_prompt_suffix(extra_fields):
+    if not extra_fields:
+        return ""
+    lines = "\n".join(
+        f"- {f['field']} ({f['type']}): {f['description']}" for f in extra_fields
+    )
+    return f"""
 
 ====================================================================================
-⚠️ CRITICAL: ENROLLMENT DATA EXTRACTION FROM REPORT ⚠️
+ADDITIONAL STRUCTURED FIELDS TO EXTRACT
 ====================================================================================
+In addition to answering the questions above, extract the following fields from the
+evidence and include them as extra keys in your JSON response:
 
-You are analyzing an ENROLLMENT REPORT. You MUST extract THREE DIFFERENT numerical values:
+{lines}
 
-📊 VALUE 1: enrollment_2024 (INTEGER - Student Count)
-   WHERE TO FIND: Look for labels like:
-   - "Total enrolment number from last year"
-   - "Last Year Enrolment" 
-   - "Previous Year"
-   - Near the year "2024"
-   
-   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
-   ❌ DO NOT extract: The year "2024" itself
-   ❌ DO NOT extract: Percentages
-   
-📊 VALUE 2: enrollment_2025 (INTEGER - Student Count)  
-   WHERE TO FIND: Look for labels like:
-   - "Total enrolment number from current year"
-   - "Current Year Enrolment"
-   - "This Year"
-   - Near the year "2025"
-   
-   WHAT TO EXTRACT: The STUDENT COUNT (typically 10-9999 range)
-   ❌ DO NOT extract: The year "2025" itself
-   ❌ DO NOT extract: Percentages
-
-📊 VALUE 3: enrollment_increase_percentage (FLOAT - Percentage Value)
-   WHERE TO FIND: Look for labels like:
-   - "% increase"
-   - "Percentage increase" 
-   - "Growth %"
-   - Usually has a "%" symbol
-   
-   WHAT TO EXTRACT: The PERCENTAGE number (can be negative)
-
-====================================================================================
-⚠️ If you cannot find a value clearly, set it to null. Do NOT guess!
+Rules:
+- If a value cannot be confidently determined, set it to null. Do NOT guess.
+- Treat each field independently — do not reuse the same value across multiple fields
+  unless a field's own instructions say to.
 ====================================================================================
 """
 
 
 def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
-                worker_id=None, input_file=None, row_number=None, school_id=None):
+                worker_id=None, input_file=None, row_number=None, school_id=None, extra_fields=None):
     """Process PDF evidence using Gemini API with usage tracking"""
+    extra_fields = extra_fields or []
     retries = 0
     worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
@@ -1887,15 +1550,7 @@ def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_
             # Download PDF
             pdf_response = httpx.get(task_evidence_link)
             pdf_data = pdf_response.content
-            
-            # Check if this is an enrollment-related task
-            task_name_normalized_check = (task_name.strip().rstrip("'\".").strip() if task_name else "")
-            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'\".").strip()
-            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
-            
-            if is_enrollment_task:
-                logging.info(f"[PDF] Using enrollment_model for task '{task_name_normalized_check}'")
-            
+
             prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
 
 {task_evidence_question}
@@ -1911,7 +1566,7 @@ IMPORTANT RESPONSE FORMAT:
 Example for 1 question:
 {{
   "answers": ["YES"],
-  "reasonings": ["The document clearly shows enrollment data with increasing trend"]
+  "reasonings": ["The document clearly shows relevant evidence"]
 }}
 
 DO NOT put both YES/NO and explanation in the answers array!
@@ -1921,39 +1576,10 @@ Focus on:
 - Relevance to the question
 - Quality and clarity of the evidence
 - Educational context and completeness"""
-            
-            if is_enrollment_task:
-                # Update the example to show enrollment fields
-                prompt = f"""You are an educational evidence validator. Analyze the given PDF document and answer these questions:
 
-{task_evidence_question}
+            if extra_fields:
+                prompt += _build_extra_fields_prompt_suffix(extra_fields)
 
-IMPORTANT RESPONSE FORMAT:
-- For each question, provide EXACTLY ONE answer in the "answers" array
-- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
-- The answer can be either:
-  1. A clear YES or NO
-  2. A detailed descriptive answer (e.g., "The school has organized activities...")
-- Return ONLY valid JSON (no markdown, no code fences, no comments)
-
-Example for 1 question with enrollment data:
-{{
-  "answers": ["20%"],
-  "reasonings": ["The document clearly shows enrollment data with increasing trend"],
-  "enrollment_2024": 120,
-  "enrollment_2025": 144,
-  "enrollment_increase_percentage": 20.0
-}}
-
-DO NOT put both YES/NO and explanation in the answers array!
-
-Focus on:
-- Content evidence in the document
-- Relevance to the question
-- Quality and clarity of the evidence
-- Educational context and completeness"""
-                prompt += ENROLLMENT_PROMPT_SUFFIX
-            
             response = _llm_generate([
                 {"mime_type": "application/pdf", "data": base64.b64encode(pdf_data).decode("utf-8")},
                 prompt,
@@ -1962,9 +1588,9 @@ Focus on:
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
             )
-            
+
             # Log API usage
-            api_call_type = "enrollment_analysis" if is_enrollment_task else "pdf_analysis"
+            api_call_type = "extra_fields_analysis" if extra_fields else "pdf_analysis"
             log_api_usage(
                 worker_id=worker_id or "unknown",
                 input_file=input_file or "unknown",
@@ -2019,8 +1645,9 @@ Focus on:
 
 
 def process_excel(task_evidence_link, task_evidence_question, task_name=None, max_retries=3,
-                  worker_id=None, input_file=None, row_number=None, school_id=None):
+                  worker_id=None, input_file=None, row_number=None, school_id=None, extra_fields=None):
     """Process Excel evidence - download and convert to text for Gemini with usage tracking"""
+    extra_fields = extra_fields or []
     retries = 0
     worker_token = get_worker_token(worker_id)
     expected_questions = _estimate_question_count(task_evidence_question)
@@ -2029,19 +1656,11 @@ def process_excel(task_evidence_link, task_evidence_question, task_name=None, ma
             rate_limiter(worker_token)
             # Download Excel file
             excel_response = httpx.get(task_evidence_link)
-            
+
             # Read Excel into DataFrame
             df_excel = pd.read_excel(io.BytesIO(excel_response.content))
             excel_text = df_excel.to_string()
-            
-            # Check if this is an enrollment-related task
-            task_name_normalized_check = (task_name.strip().rstrip("'\".").strip() if task_name else "")
-            filter_normalized_check = ENROLLMENT_TASK_FILTER.strip().rstrip("'\".").strip()
-            is_enrollment_task = (task_name_normalized_check == filter_normalized_check)
-            
-            if is_enrollment_task:
-                logging.info(f"[Excel] Using enrollment_model for task '{task_name_normalized_check}'")
-            
+
             prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
 
 {task_evidence_question}
@@ -2054,13 +1673,13 @@ IMPORTANT RESPONSE FORMAT:
 - Put your reasoning/explanation in the "reasonings" array (NOT in answers)
 - The answer can be either:
   1. A clear YES or NO
-  2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
+  2. A detailed descriptive answer (e.g., "The evidence clearly meets the criteria")
 - Return ONLY valid JSON (no markdown, no code fences, no comments)
 
 Example for 1 question:
 {{
   "answers": ["YES"],
-  "reasonings": ["The spreadsheet clearly shows enrollment data with upward trend"]
+  "reasonings": ["The spreadsheet clearly shows relevant evidence"]
 }}
 
 DO NOT put both YES/NO and explanation in the answers array!
@@ -2070,50 +1689,18 @@ Focus on:
 - Relevance to the question
 - Quality and completeness of the data
 - Educational context"""
-            
-            if is_enrollment_task:
-                # Update the example to show enrollment fields
-                prompt = f"""You are an educational evidence validator. Analyze the following Excel spreadsheet data and answer these questions:
 
-{task_evidence_question}
+            if extra_fields:
+                prompt += _build_extra_fields_prompt_suffix(extra_fields)
 
-EXCEL DATA:
-{excel_text[:10000]}
-
-IMPORTANT RESPONSE FORMAT:
-- For each question, provide EXACTLY ONE answer in the "answers" array
-- Put your reasoning/explanation in the "reasonings" array (NOT in answers)
-- The answer can be either:
-  1. A clear YES or NO
-  2. A detailed descriptive answer (e.g., "The enrollment increased from 120 to 144")
-- Return ONLY valid JSON (no markdown, no code fences, no comments)
-
-Example for 1 question with enrollment data:
-{{
-  "answers": ["20%"],
-  "reasonings": ["The spreadsheet clearly shows enrollment data with upward trend"],
-  "enrollment_2024": 120,
-  "enrollment_2025": 144,
-  "enrollment_increase_percentage": 20.0
-}}
-
-DO NOT put both YES/NO and explanation in the answers array!
-
-Focus on:
-- Data evidence in the spreadsheet
-- Relevance to the question
-- Quality and completeness of the data
-- Educational context"""
-                prompt += ENROLLMENT_PROMPT_SUFFIX
-            
             response = _llm_generate([prompt], token=worker_token)
             response_json = _ensure_required_qa_fields(
                 _parse_model_json_response(getattr(response, "text", "")),
                 expected_questions=expected_questions,
             )
-            
+
             # Log API usage
-            api_call_type = "enrollment_analysis" if is_enrollment_task else "excel_analysis"
+            api_call_type = "extra_fields_analysis" if extra_fields else "excel_analysis"
             log_api_usage(
                 worker_id=worker_id or "unknown",
                 input_file=input_file or "unknown",
@@ -2191,9 +1778,8 @@ def _flush_to_csv(df_slice, qa, reason, tags, types, extra_data, output_file, wr
     df_out["Evidence Q and A Reason"] = list(reason)
     df_out["Relevance Tag"] = list(tags)
     df_out["Task Type"] = list(types)
-    if ENABLE_EXTRA_KEYS:
-        for key_name, vals in extra_data.items():
-            df_out[key_name] = list(vals)
+    for key_name, vals in extra_data.items():
+        df_out[key_name] = list(vals)
     df_out["Image Preview"] = df_out[EVIDENCE_COLUMN].apply(
         lambda x: str(x) if str(x).lower().endswith(tuple(IMAGE_FORMATS)) else ""
     )
@@ -2285,9 +1871,13 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         rows_skipped_from_checkpoint = 0
         rows_processed_new = 0
 
-        # Load questions mapping
+        # Load questions mapping + per-task extra-field extraction config (both from the
+        # same criteria CSV — see load_questions_mapping()).
         questions_file = QUESTIONS_FILE
-        questions_map = load_questions_mapping(questions_file)
+        questions_map, extra_fields_by_task = load_questions_mapping(questions_file)
+        all_extra_field_names = sorted({
+            f["field"] for fields in extra_fields_by_task.values() for f in fields
+        })
 
         df = pd.read_excel(input_file) if input_file.endswith(".xlsx") else pd.read_csv(input_file)
 
@@ -2358,21 +1948,20 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         if is_relevant_limit_enabled:
             logging.info(f"[Worker {worker_id}] Relevant cap ENABLED: max {MAX_RELEVANT_PER_USER_TASK} Relevant per ({IDENTITY_COLUMN}, task)")
 
-        # 🆕 Add extra key columns if enabled
-        if ENABLE_EXTRA_KEYS:
-            for key_name in EXTRA_KEYS.keys():
-                if key_name not in df_filtered.columns:
-                    df_filtered[key_name] = ""
-                    logging.info(f"[Worker {worker_id}] Added extra key column: {key_name}")
+        # Add extra field columns (criteria-CSV-driven) if any task defines them
+        for key_name in all_extra_field_names:
+            if key_name not in df_filtered.columns:
+                df_filtered[key_name] = ""
+                logging.info("[Worker %s] Added extra field column: %s", worker_id, key_name)
 
         processed_count = 0
         task_evidence_qa = []
         task_evidence_qa_reason = []
         relevance_tags = []
         task_types = []  # Track if task is standard or user-owned
-        
-        # 🆕 Initialize extra keys columns
-        extra_keys_data = {key: [] for key in EXTRA_KEYS.keys()}
+
+        # Initialize extra field accumulator columns
+        extra_keys_data = {key: [] for key in all_extra_field_names}
 
         # ===== INCREMENTAL CSV WRITE SETUP =====
         output_filename = os.path.join(
@@ -2422,7 +2011,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
                 relevance_tags.append(None)
-                for key in EXTRA_KEYS.keys():
+                for key in all_extra_field_names:
                     extra_keys_data[key].append(None)
                 processed_count += 1  # must count skipped rows so list lengths stay aligned
 
@@ -2459,7 +2048,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                 task_evidence_qa.append(None)
                 task_evidence_qa_reason.append(None)
                 relevance_tags.append(RELEVANCE_TAG_NOT_VALIDATED)
-                for key in EXTRA_KEYS.keys():
+                for key in all_extra_field_names:
                     extra_keys_data[key].append(None)
                 not_validated_count += 1
                 mark_row_processed(input_filename, row_hash, checkpoint_data, RELEVANCE_TAG_NOT_VALIDATED)
@@ -2493,25 +2082,27 @@ def main(input_file, worker_id=None, checkpoint_data=None):
             evidence_type = get_evidence_type(task_evidence)
             if evidence_type:
                 logging.info(f"[Worker {worker_id}] Processing {evidence_type} {'user-owned' if is_user_owned else 'standard'} task row {idx+1}/{len(df_filtered)}")
-                
+
+                row_extra_fields = extra_fields_by_task.get(task_name, [])
+
                 # Route to appropriate processor based on evidence type
                 if evidence_type == "image":
                     response = process_image(
                         task_evidence, task_question, task_name_raw,
-                        worker_id=worker_id, input_file=input_file, 
-                        row_number=idx+1, school_id=school_id
+                        worker_id=worker_id, input_file=input_file,
+                        row_number=idx+1, school_id=school_id, extra_fields=row_extra_fields
                     )
                 elif evidence_type == "pdf":
                     response = process_pdf(
                         task_evidence, task_question, task_name_raw,
                         worker_id=worker_id, input_file=input_file,
-                        row_number=idx+1, school_id=school_id
+                        row_number=idx+1, school_id=school_id, extra_fields=row_extra_fields
                     )
                 elif evidence_type == "excel":
                     response = process_excel(
                         task_evidence, task_question, task_name_raw,
                         worker_id=worker_id, input_file=input_file,
-                        row_number=idx+1, school_id=school_id
+                        row_number=idx+1, school_id=school_id, extra_fields=row_extra_fields
                     )
                 else:
                     response = None
@@ -2538,63 +2129,10 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                     rows_processed_new += 1
                     mark_row_processed(input_filename, row_hash, checkpoint_data, relevance_tag)
 
-                    # 🆕 Extract enrollment data from JSON response or use regex fallback
-                    if ENABLE_EXTRA_KEYS:
-                        # Normalize both task names for comparison (remove trailing quotes, periods, spaces)
-                        task_name_normalized = task_name_raw.strip().rstrip("'.\"").strip()
-                        enrollment_filter_normalized = ENROLLMENT_TASK_FILTER.strip().rstrip("'.\"").strip()
-                        
-                        # Debug logging for enrollment task matching
-                        if "enrolment" in task_name_normalized.lower():
-                            logging.info(f"[Enrollment] Checking task: '{task_name_normalized}'")
-                            logging.info(f"[Enrollment] Expected filter: '{enrollment_filter_normalized}'")
-                            logging.info(f"[Enrollment] Match: {task_name_normalized == enrollment_filter_normalized}")
-                        
-                        # Check if this is an enrollment task response with enrollment fields
-                        # Check if this is an enrollment task (regardless of whether API returned enrollment keys)
-                        is_enrollment_task = (task_name_normalized == enrollment_filter_normalized)
-                        
-                        # Check if API actually returned enrollment data
-                        has_enrollment_data = 'enrollment_2024' in response or 'enrollment_2025' in response or 'enrollment_increase_percentage' in response
-
-                        if is_enrollment_task:
-                            # Log raw API response for debugging
-                            logging.info(f"[Enrollment] Task matched! API returned enrollment data: {has_enrollment_data}")
-                            logging.info(f"[Enrollment] Raw API response: enrollment_2024={response.get('enrollment_2024')}, enrollment_2025={response.get('enrollment_2025')}, percentage={response.get('enrollment_increase_percentage')}")
-                            
-                            # Extract directly from JSON response
-                            raw_2024 = response.get('enrollment_2024')
-                            raw_2025 = response.get('enrollment_2025')
-                            raw_pct = response.get('enrollment_increase_percentage')
-                            
-                            # Validate and fix enrollment data
-                            answers_text = ' '.join(str(a) for a in answers)
-                            reasonings_text = ' '.join(str(r) for r in reasonings)
-                            
-                            validated_2024, validated_2025, validated_pct = validate_and_fix_enrollment_data(
-                                raw_2024, raw_2025, raw_pct, answers_text, reasonings_text
-                            )
-                            
-                            extra_keys_data['Enrollment_2024'].append(validated_2024)
-                            extra_keys_data['Enrollment_2025'].append(validated_2025)
-                            extra_keys_data['Enrollment_Increase_Percentage'].append(validated_pct)
-                            
-                            logging.info(f"[Worker {worker_id}] Enrollment data (validated): 2024={validated_2024}, 2025={validated_2025}, %={validated_pct}")
-                        else:
-                            # Fallback to regex extraction for non-enrollment tasks or older responses
-                            text_to_analyze = {
-                                'Task Evidence': row.get(EVIDENCE_COLUMN, ''),
-                                'Task Remarks': row.get('Task Remarks', ''),
-                                'Sub-Tasks': row.get('Sub-Tasks', ''),
-                                'Answers': ' '.join(str(a) for a in answers),
-                                'Reasonings': ' '.join(str(r) for r in reasonings)
-                            }
-                            extracted = extract_extra_keys(text_to_analyze, task_name_normalized)
-                            for key in EXTRA_KEYS.keys():
-                                extra_keys_data[key].append(extracted.get(key))
-                    else:
-                        for key in EXTRA_KEYS.keys():
-                            extra_keys_data[key].append(None)
+                    # Extract this task's configured extra fields (if any) from the JSON response
+                    extracted = _extract_and_cast_extra_fields(response, row_extra_fields)
+                    for key in all_extra_field_names:
+                        extra_keys_data[key].append(extracted.get(key))
                 else:
                     logging.warning(f"[Worker {worker_id}] Invalid response at row {idx+1}")
                     task_evidence_qa.append(None)
@@ -2603,7 +2141,7 @@ def main(input_file, worker_id=None, checkpoint_data=None):
                     task_types[-1] = "Failed"  # Update the last task type
                     ai_failure_count += 1
                     failed_list.append(task_evidence)
-                    for key in EXTRA_KEYS.keys():
+                    for key in all_extra_field_names:
                         extra_keys_data[key].append(None)
             # No final else: the pre-processor's Rule 3 already drops any row whose evidence
             # type can't be resolved at all, so evidence_type is never falsy here for rows
@@ -2663,9 +2201,8 @@ def main(input_file, worker_id=None, checkpoint_data=None):
         df_filtered["Evidence Q and A Reason"] = task_evidence_qa_reason
         df_filtered["Relevance Tag"] = relevance_tags
         df_filtered["Task Type"] = task_types
-        if ENABLE_EXTRA_KEYS:
-            for key_name, values in extra_keys_data.items():
-                df_filtered[key_name] = values
+        for key_name, values in extra_keys_data.items():
+            df_filtered[key_name] = values
         df_filtered["Image Preview"] = df_filtered[EVIDENCE_COLUMN].apply(
             lambda x: str(x) if str(x).lower().endswith(tuple(IMAGE_FORMATS)) else ""
         )
@@ -2879,13 +2416,18 @@ if __name__ == "__main__":
     logging.info("[Main] Input CSV mapped-question column: %s", INPUT_TASK_QUESTION_COLUMN)
     logging.info("[Main] ===============================================")
     
-    # 🆕 Log extra keys configuration
-    if ENABLE_EXTRA_KEYS:
-        logging.info(f"[Main] Extra keys extraction ENABLED. Keys to extract:")
-        for key_name, config in EXTRA_KEYS.items():
-            logging.info(f"   - {key_name}: {config['description']}")
+    # Log extra-field extraction configuration (criteria-CSV-driven — see load_questions_mapping())
+    _, _main_extra_fields_by_task = load_questions_mapping(QUESTIONS_FILE)
+    all_extra_field_names = sorted({
+        f["field"] for fields in _main_extra_fields_by_task.values() for f in fields
+    })
+    if all_extra_field_names:
+        logging.info("[Main] Extra field extraction ENABLED. Fields to extract:")
+        for task_key, fields in _main_extra_fields_by_task.items():
+            for f in fields:
+                logging.info("   - task=%s  field=%s  type=%s", task_key, f["field"], f["type"])
     else:
-        logging.info(f"[Main] Extra keys extraction DISABLED.")
+        logging.info("[Main] Extra field extraction DISABLED (no extraction_field rows in criteria CSV).")
 
     # ✅ --- Global Stats Aggregators ---
     total_rows_processed_all = 0
@@ -2956,14 +2498,16 @@ if __name__ == "__main__":
                 user_owned_df.to_csv(user_owned_summary_file, index=False)
                 logging.info(f"✅ User-owned tasks merged into: {user_owned_summary_file}")
             
-            # 🆕 Log final extra keys statistics
-            if ENABLE_EXTRA_KEYS:
-                logging.info(f"[Main] Final enrollment statistics:")
-                for key_name in EXTRA_KEYS.keys():
+            # Log final extra-field extraction statistics
+            if all_extra_field_names:
+                logging.info("[Main] Final extra-field statistics:")
+                for key_name in all_extra_field_names:
                     if key_name in merged_df.columns:
                         non_null = merged_df[key_name].notna().sum()
                         total = len(merged_df)
-                        logging.info(f"   - {key_name}: {non_null}/{total} ({non_null/total*100:.1f}%)")
+                        logging.info(
+                            "   - %s: %d/%d (%.1f%%)", key_name, non_null, total, non_null / total * 100
+                        )
         except Exception as e:
             logging.exception(f"[Main] Error during merging: {e}")
             exit(1)

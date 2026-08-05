@@ -9,12 +9,31 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 from models.csv_source_type import CsvSourceType
-from models.schemas import ReportDownloadResponse, UserResponse
+from models.schemas import CsvSourceTypeUpdateRequest, ReportDownloadResponse, UserResponse
 from services.storage_service import StorageService
 
 
 class ConfigService:
     """Service for config endpoints."""
+
+    # Mirrors CsvSourceType's nullable=False columns (models/csv_source_type.py) that are
+    # also present on CsvSourceTypeUpdateRequest. Every request field is declared Optional
+    # for partial-update semantics, but clearing one of these to None would violate the
+    # DB's NOT NULL constraint at commit — reject it here with a clean message instead of
+    # letting a raw IntegrityError surface as a generic 500.
+    REQUIRED_UPDATE_FIELDS = frozenset({
+        "display_name",
+        "has_geo",
+        "has_program",
+        "has_rubric",
+        "has_narrative",
+        "column_mappings",
+        "evidence_columns",
+        "evidence_types_config",
+        "school_filter_config",
+        "evidence_context_config",
+        "is_active",
+    })
 
     def __init__(self, db: Session):
         self.db = db
@@ -263,3 +282,91 @@ class ConfigService:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to generate download URL: {str(exc)}",
             )
+
+    def update_csv_source_type(
+        self,
+        type_key: str,
+        update: CsvSourceTypeUpdateRequest,
+        current_user: UserResponse,
+    ) -> dict[str, Any]:
+        """
+        Partial update of a CsvSourceType row, scoped to the caller's own tenant/
+        organization. Only fields the caller actually included in the request body
+        are changed — model_dump(exclude_unset=True) distinguishes "field explicitly
+        sent" from "field omitted", so e.g. sending only
+        {"sample_criteria_file_url": null} clears just that field (forcing
+        services/bootstrap.py's _upload_sample_csvs to treat it as never-uploaded
+        and re-push it on the next startup) without touching anything else.
+
+        Gated by the X-Internal-Access-Token header at the router layer
+        (AuthService.verify_internal_access_token) rather than by an is_superuser
+        check here — this mutates shared tenant config (every user of this tenant
+        sees the same source-type config, not the caller's own data), so it needs
+        the extra factor on top of normal JWT auth. current_user is still required
+        for tenant/organization scoping and the updated_by audit trail below.
+
+        DB-only, so plain def per this repo's async standards.
+        """
+        tenant_code, organization_code = self._resolve_scope(current_user)
+
+        source_type = (
+            self.db.query(CsvSourceType)
+            .filter(
+                CsvSourceType.type_key == type_key,
+                CsvSourceType.tenant_code == tenant_code,
+                CsvSourceType.organization_code == organization_code,
+            )
+            .first()
+        )
+        if not source_type:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"CSV source type with type_key='{type_key}' not found.",
+            )
+
+        changed_fields = update.model_dump(exclude_unset=True)
+        if not changed_fields:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No fields provided to update.",
+            )
+
+        cleared_required_fields = sorted(
+            field_name
+            for field_name, value in changed_fields.items()
+            if field_name in self.REQUIRED_UPDATE_FIELDS and value is None
+        )
+        if cleared_required_fields:
+            # 422, not 400: the request body itself is well-formed (unlike the empty-body
+            # 400 above) — the problem is a specific field's value, distinct enough from
+            # "no fields provided" to warrant its own error code (REQUIRED_FIELD_EMPTY,
+            # see routers/config.py) instead of being lumped in with it.
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"{', '.join(cleared_required_fields)} cannot be cleared — "
+                    f"{'it is a' if len(cleared_required_fields) == 1 else 'they are'} "
+                    f"required setting{'s' if len(cleared_required_fields) != 1 else ''}."
+                ),
+            )
+
+        for field_name, value in changed_fields.items():
+            setattr(source_type, field_name, value)
+        source_type.updated_by = current_user.id
+
+        try:
+            self.db.commit()
+        except Exception as exc:
+            self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to update CSV source type: {str(exc)}",
+            )
+        self.db.refresh(source_type)
+
+        return {
+            "type_key": source_type.type_key,
+            "tenant_code": source_type.tenant_code,
+            "organization_code": source_type.organization_code,
+            "updated_fields": changed_fields,
+        }

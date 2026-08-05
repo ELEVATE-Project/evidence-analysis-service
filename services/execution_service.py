@@ -79,6 +79,38 @@ _DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS = 0.5
 class ExecutionService:
     """Service for managing executions"""
 
+    # Values accepted in a criteria CSV's value_type column — must match the branches
+    # _extract_and_cast_extra_fields() in scripts/processor/1-main-parallel-script.py
+    # actually casts to (anything else silently falls through to str() there, so an
+    # unrecognized type wouldn't fail the run, it would just quietly never be numeric —
+    # validation rejects that case explicitly instead of letting it through silently).
+    EXTRACTION_FIELD_TYPES = frozenset({"int", "float", "string"})
+
+    # Mirrors scripts/processor/1-main-parallel-script.py's has_extraction_columns gate:
+    # `{"field_name", "field_description", "value_type"} <= set(df_questions.columns)`.
+    # If any of these three headers is entirely absent (not just blank-valued), the
+    # processor disables extraction for the whole file silently — no per-row error, the
+    # feature just never activates. Validation must require the same full header set.
+    EXTRACTION_COMPANION_HEADERS = frozenset({"field_name", "field_description", "value_type"})
+
+    # Output columns the pipeline always produces, regardless of the criteria CSV:
+    # scripts/pre-processor/1-pre-processor.py's `new_columns` (Evidence Question,
+    # Evidence Q and A, Evidence Q and A Reason, Relevance Tag, Image Preview,
+    # Evidence Type) plus Task Type, which 1-main-parallel-script.py adds itself. An
+    # extraction field named exactly one of these would silently overwrite that
+    # column's real values in the output CSV — the write sites in the processor
+    # (_flush_to_csv, the end-of-run rebuild) assign unconditionally, unlike the
+    # stub-creation step, which does guard against overwriting an existing column.
+    RESERVED_OUTPUT_COLUMNS = frozenset({
+        "Evidence Question",
+        "Evidence Q and A",
+        "Evidence Q and A Reason",
+        "Relevance Tag",
+        "Image Preview",
+        "Evidence Type",
+        "Task Type",
+    })
+
     def __init__(self, db: Session, worker: BackgroundWorker):
         self.db = db
         self.storage_service = StorageService()
@@ -601,6 +633,31 @@ class ExecutionService:
 
         return required_columns
 
+    @staticmethod
+    def _resolve_question_text_column(source_type: CsvSourceType) -> str:
+        """The criteria CSV's actual question-text column (e.g. "criteria" for
+        project_report, "Question" for project_report_2_0), not the task-identifier
+        column. Mirrors services/execution_processor.py's
+        _resolve_processor_columns_from_config exactly, since the processor script
+        resolves the same value via question_config.get("question_column") falling
+        back to the first non-sentinel mandatory_columns entry — kept in sync so
+        upload-time validation checks the same column the processor will actually read.
+        """
+        question_config = source_type.question_config if isinstance(source_type.question_config, dict) else {}
+        question_text_column = str(question_config.get("question_column", "")).strip()
+        if not question_text_column:
+            mandatory_columns = question_config.get("mandatory_columns", [])
+            if isinstance(mandatory_columns, list):
+                for column in mandatory_columns:
+                    column_str = str(column or "").strip()
+                    if not column_str:
+                        continue
+                    if column_str == "evidence_context_config.criteria_csv_column":
+                        continue
+                    question_text_column = column_str
+                    break
+        return question_text_column
+
     def _validate_questions_csv_metadata(
         self,
         headers: list[str],
@@ -619,9 +676,218 @@ class ExecutionService:
         self,
         questions_file_bytes: bytes,
         source_type: CsvSourceType,
+        input_file_bytes: Optional[bytes] = None,
     ) -> None:
+        """Shared questions-file validation, covering both mandatory-column checks and
+        the extraction-fields checks (_validate_extraction_fields_column). Folding the
+        extraction checks in here — rather than only in validate_execution_files's own
+        inline logic — means every caller of this method gets them automatically,
+        including complete_execution_upload, which downloads both files itself and
+        previously skipped extraction validation entirely.
+        """
         headers, _ = self._extract_headers_and_row_count(questions_file_bytes, "Questions file")
         self._validate_questions_csv_metadata(headers, source_type)
+
+        input_columns: list[str] = []
+        if input_file_bytes:
+            input_columns, _ = self._extract_headers_and_row_count(input_file_bytes, "Input file")
+
+        evidence_context_config = source_type.evidence_context_config or {}
+        input_csv_column = str(evidence_context_config.get("input_csv_column", "")).strip()
+        criteria_csv_column = str(evidence_context_config.get("criteria_csv_column", "")).strip() or input_csv_column
+
+        self._validate_extraction_fields_column(
+            questions_file_bytes,
+            headers,
+            criteria_csv_column,
+            input_columns,
+            question_column=self._resolve_question_text_column(source_type),
+        )
+
+    @classmethod
+    def _validate_extraction_fields_column(
+        cls,
+        file_bytes: bytes,
+        headers: list[str],
+        task_column: str,
+        input_columns: Optional[list[str]] = None,
+        question_column: str = "",
+    ) -> None:
+        """Fail validation immediately if the questions file defines 'field_name' but is
+        missing a required companion header (field_description/value_type — see
+        EXTRACTION_COMPANION_HEADERS), or if any row defining a field_name is missing a
+        required companion value: the task column blank (only when a task column is
+        actually configured for this source type — see below), value_type set to an
+        unrecognized value (blank is allowed — see below), field_description blank,
+        or field_name colliding with a reserved/input-CSV column (see
+        RESERVED_OUTPUT_COLUMNS).
+
+        A missing companion header is silent in its own way: the processor gates
+        extraction on all three headers being present (has_extraction_columns), so a
+        criteria CSV with 'field_name' but no 'value_type' header would run to
+        completion with extraction quietly disabled for the whole file, not just for
+        one row.
+
+        Without this, a bad row here only surfaces deep inside the processor script
+        mid-execution. A blank task column is a particularly silent failure there:
+        load_questions_mapping()'s `if has_extraction_columns and norm_key:` gate is
+        meant to drop it, but pandas reads a blank CSV cell as NaN, and
+        str(NaN).strip() is the literal text "nan" — not an empty string — so the
+        gate doesn't actually filter it out. The field gets registered under the
+        bogus task key "nan" instead, which no real evidence row ever matches, so
+        the output column exists but is blank for every row — after AI cost has
+        already been spent on the run. Catching it here, at upload validation, lets
+        the user fix it before starting a run.
+
+        A field_name colliding with an existing column is worse than silent — the
+        processor's final column writes (_flush_to_csv, the end-of-run rebuild in
+        scripts/processor/1-main-parallel-script.py) assign unconditionally, so a
+        field_name of e.g. "Relevance Tag" overwrites the real relevance scores for
+        the whole run with extraction data instead, corrupting report_service.py's
+        downstream analytics with no indication anything went wrong.
+
+        A task that has extraction fields but no row with a non-blank question
+        (question_column) anywhere in the file is silent in a different way — not
+        rejected by the processor at all. load_questions_mapping() only adds a task
+        to questions_map when its question text is non-blank, so such a task never
+        gets a mapped question stamped onto its input rows; main()'s
+        `if not task_question: skip` then treats every one of that task's rows as
+        User-Owned and skips them entirely — no AI call, no extraction, no error,
+        and the task's other real-report columns (Relevance Tag, Evidence Q and A,
+        etc.) come back blank too, not just the extraction fields.
+        """
+        if "field_name" not in headers:
+            return
+
+        missing_companions = cls.EXTRACTION_COMPANION_HEADERS - set(headers)
+        if missing_companions:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Questions file defines 'field_name' but is missing required "
+                    f"companion column(s): {', '.join(sorted(missing_companions))}. "
+                    f"Extraction fields require all of {sorted(cls.EXTRACTION_COMPANION_HEADERS)} "
+                    f"to be present as columns."
+                ),
+            )
+
+        reserved_columns = cls.RESERVED_OUTPUT_COLUMNS | set(input_columns or [])
+
+        decoded_content = cls._decode_csv_bytes(file_bytes)
+        reader = csv.DictReader(io.StringIO(decoded_content))
+        # Strip header names the same way `headers` (above) was derived — otherwise a
+        # stray space in the header row (e.g. " field_name") makes every row.get("field_name")
+        # below return None, silently skipping all extraction-field validation for the
+        # whole file even though the presence checks above already passed.
+        if reader.fieldnames:
+            reader.fieldnames = [(name or "").strip() for name in reader.fieldnames]
+        rows = list(reader)
+
+        # Normalized via _normalize_task_name_for_processor_matching (lowercase +
+        # numeric-prefix spacing, not just quote/whitespace/NFC) to exactly match the
+        # processor's own task matching (_normalize_task_name in load_questions_mapping)
+        # — otherwise a criteria file where the same task's rows differ only in letter
+        # case or prefix spacing would be falsely rejected here even though the
+        # processor treats them as the same task.
+        tasks_with_question: set[str] = set()
+        if task_column and question_column:
+            for row in rows:
+                task_value = (row.get(task_column) or "").strip()
+                question_value = (row.get(question_column) or "").strip()
+                if task_value and question_value:
+                    tasks_with_question.add(cls._normalize_task_name_for_processor_matching(task_value))
+
+        for row_number, row in enumerate(rows, start=2):  # start=2: header occupies row 1
+            field_name = (row.get("field_name") or "").strip()
+            if not field_name:
+                continue
+
+            if field_name in reserved_columns:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Questions file row {row_number}: field_name '{field_name}' "
+                        f"conflicts with an existing report column and would overwrite "
+                        f"its values. Choose a different field_name."
+                    ),
+                )
+
+            if task_column:
+                task_value = (row.get(task_column) or "").strip()
+                if not task_value:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Questions file row {row_number}, field_name '{field_name}': "
+                            f"the '{task_column}' column must not be blank — an extraction "
+                            f"field must be attached to a specific task."
+                        ),
+                    )
+                if question_column and cls._normalize_task_name_for_processor_matching(task_value) not in tasks_with_question:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Questions file row {row_number}, field_name '{field_name}': "
+                            f"task '{task_value}' defines an extraction field but has no row "
+                            f"with a non-blank '{question_column}' value anywhere in this file. "
+                            f"Extraction fields require at least one real question for their task."
+                        ),
+                    )
+                row_label = f"Questions file row {row_number} (task '{task_value}'), field_name '{field_name}'"
+            else:
+                # No task column is configured for this source type at all (blank
+                # evidence_context_config.criteria_csv_column / input_csv_column) —
+                # there's nothing meaningful to check a task value against, so this
+                # row's task isn't validated. Rejecting here based on an empty
+                # task_column would produce a nonsensical "the '' column must not
+                # be blank" error for an otherwise-valid file.
+                row_label = f"Questions file row {row_number}, field_name '{field_name}'"
+
+            # Blank is allowed here (not just tolerated) to match
+            # _extract_and_cast_extra_fields()'s own fallback in
+            # scripts/processor/1-main-parallel-script.py:840 — a blank value_type
+            # already runs fine, silently defaulting to "string", so rejecting it
+            # would only break previously-working criteria CSVs for no functional
+            # gain. Only an explicit, unrecognized value (e.g. a typo like
+            # "integer") is rejected.
+            entry_type = (row.get("value_type") or "").strip().lower()
+            if entry_type and entry_type not in cls.EXTRACTION_FIELD_TYPES:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"{row_label}: value_type must be one of "
+                        f"{sorted(cls.EXTRACTION_FIELD_TYPES)} — got {row.get('value_type')!r}."
+                    ),
+                )
+
+            if not (row.get("field_description") or "").strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"{row_label}: field_description must not be blank.",
+                )
+
+    @staticmethod
+    def _normalize_task_name_for_processor_matching(value: str) -> str:
+        """Mirrors scripts/processor/1-main-parallel-script.py's _normalize_task_name
+        exactly (lowercase + numeric-prefix spacing, on top of quote/whitespace/NFC
+        handling) — deliberately kept separate from _normalize_task_string below, which
+        is shared with _validate_tasks_cross_reference_from_values and does NOT
+        lowercase or normalize numeric-prefix spacing. Using _normalize_task_string for
+        the tasks_with_question check would falsely reject a criteria file where the
+        same task's rows differ only in letter case (e.g. "Task A" vs "task a") or
+        prefix spacing (e.g. "5.Calculate" vs "5. Calculate") even though the processor
+        would treat them as the same task.
+        """
+        if not value:
+            return ""
+        s = value.strip()
+        s = s.strip("'\"")
+        s = re.sub(r"^(\d+\.\s*)['\"]+(\s*)", r"\1", s)
+        s = re.sub(r"^(\d+\.)\s*", r"\1 ", s).strip()
+        s = s.rstrip("'.\" ").strip()
+        s = re.sub(r"\s+", " ", s)
+        s = unicodedata.normalize("NFC", s)
+        return s.lower()
 
     @staticmethod
     def _normalize_task_string(value: str) -> str:
@@ -740,6 +1006,9 @@ class ExecutionService:
                 f"The {file_label_lower} has more rows than allowed. "
                 "Please reduce the row count and re-upload."
             )
+
+        if "field_name" in normalized_lower or "value_type" in normalized_lower or "field_description" in normalized_lower:
+            return f"{normalized} Please fix the CSV and re-upload."
 
         return f"We found an issue while validating the {file_label_lower}. Please review and re-upload."
 
@@ -1555,6 +1824,11 @@ class ExecutionService:
                     tracked_column=input_csv_column,
                 )
                 input_result.rows_detected = row_count
+                # Set before _validate_input_csv_metadata (the only call below that can
+                # raise) so the extraction-fields collision check downstream still sees
+                # real input headers even when the input file goes on to fail its own
+                # validation rules for an unrelated reason (e.g. a missing mandatory
+                # column) — only a download/parse failure above leaves this unset.
                 input_result.columns_detected = headers
                 input_result.preview_rows = preview_rows
                 self._validate_input_csv_metadata(headers, row_count, source_type)
@@ -1581,6 +1855,13 @@ class ExecutionService:
                 questions_result.columns_detected = headers
                 questions_result.preview_rows = preview_rows
                 self._validate_questions_csv_metadata(headers, source_type)
+                self._validate_extraction_fields_column(
+                    questions_bytes,
+                    headers,
+                    criteria_csv_column,
+                    input_result.columns_detected,
+                    question_column=self._resolve_question_text_column(source_type),
+                )
                 questions_result.valid = True
                 questions_result.message = f"✓ Criteria file validated successfully! ({row_count:,} rows, {len(headers)} columns)"
                 questions_result.missing_columns = []
@@ -1996,7 +2277,9 @@ class ExecutionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Questions file could not be read for validation.",
                 )
-            self._validate_questions_csv_against_source(questions_file_bytes, source_type)
+            self._validate_questions_csv_against_source(
+                questions_file_bytes, source_type, input_file_bytes=input_file_bytes
+            )
 
             # School filter is optional, so only re-validate it if one is actually attached —
             # but if it is, it gets the same re-check as input/questions rather than being

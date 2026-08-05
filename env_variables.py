@@ -54,6 +54,10 @@ ENVIRONMENT_VARIABLES: dict[str, dict[str, Any]] = {
         "optional": True,
         "default": 1440,
     },
+    "INTERNAL_ACCESS_TOKEN": {
+        "message": "Shared-secret header value gating internal/admin endpoints",
+        "optional": False,
+    },
 
     # CORS
     "CORS_ORIGINS": {
