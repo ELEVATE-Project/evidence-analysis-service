@@ -2629,6 +2629,11 @@ class ExecutionService:
         progress_percentage = None
         if execution.total_rows and execution.total_rows > 0:
             progress_percentage = (processed_rows / execution.total_rows) * 100
+        elif (execution.status or "").strip().lower() == "completed":
+            # total_rows is 0 for a completed execution when no rows survived
+            # pre-processing (e.g. school filter / evidence-URL filter matched
+            # nothing). The job is done, not stalled at 0% — report it as such.
+            progress_percentage = 100.0
 
         return StatusResponse(
             id=execution.id,
