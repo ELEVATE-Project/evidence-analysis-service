@@ -1391,6 +1391,11 @@ def process_image(task_evidence_link, task_evidence_question, task_name=None, ma
 
 {task_evidence_question}
 
+IDENTIFY EVERY QUESTION:
+- The text above may contain more than one distinct question — numbered ("1.", "2."), joined by "and", or separated by "?".
+- Count how many separate questions are being asked, then answer EACH one individually, in the same order.
+- Do not merge multiple questions into a single answer, and do not skip any of them.
+
 IMPORTANT RESPONSE FORMAT:
 - For each question, provide EXACTLY ONE answer in the "answers" array
 - Put your reasoning/explanation in the "reasonings" array (NOT in answers)
@@ -1398,11 +1403,18 @@ IMPORTANT RESPONSE FORMAT:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The school has organized activities...")
 - Return ONLY valid JSON (no markdown, no code fences, no comments)
+- The "answers" and "reasonings" arrays MUST have exactly as many items as there are questions
 
 Example for 1 question:
 {{
   "answers": ["YES"],
   "reasonings": ["The image clearly shows relevant evidence"]
+}}
+
+Example for 2 questions:
+{{
+  "answers": ["8%", "YES"],
+  "reasonings": ["The image shows a column labeled '% increase' with the value 8%", "The image clearly shows the school name and block details"]
 }}
 
 DO NOT put both YES/NO and explanation in the answers array!
@@ -1555,6 +1567,11 @@ def process_pdf(task_evidence_link, task_evidence_question, task_name=None, max_
 
 {task_evidence_question}
 
+IDENTIFY EVERY QUESTION:
+- The text above may contain more than one distinct question — numbered ("1.", "2."), joined by "and", or separated by "?".
+- Count how many separate questions are being asked, then answer EACH one individually, in the same order.
+- Do not merge multiple questions into a single answer, and do not skip any of them.
+
 IMPORTANT RESPONSE FORMAT:
 - For each question, provide EXACTLY ONE answer in the "answers" array
 - Put your reasoning/explanation in the "reasonings" array (NOT in answers)
@@ -1562,11 +1579,18 @@ IMPORTANT RESPONSE FORMAT:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The school has organized activities...")
 - Return ONLY valid JSON (no markdown, no code fences, no comments)
+- The "answers" and "reasonings" arrays MUST have exactly as many items as there are questions
 
 Example for 1 question:
 {{
   "answers": ["YES"],
   "reasonings": ["The document clearly shows relevant evidence"]
+}}
+
+Example for 2 questions:
+{{
+  "answers": ["8%", "YES"],
+  "reasonings": ["The document shows a column labeled '% increase' with the value 8%", "The document clearly shows the school name and block details"]
 }}
 
 DO NOT put both YES/NO and explanation in the answers array!
@@ -1668,6 +1692,11 @@ def process_excel(task_evidence_link, task_evidence_question, task_name=None, ma
 EXCEL DATA:
 {excel_text[:10000]}
 
+IDENTIFY EVERY QUESTION:
+- The text above may contain more than one distinct question — numbered ("1.", "2."), joined by "and", or separated by "?".
+- Count how many separate questions are being asked, then answer EACH one individually, in the same order.
+- Do not merge multiple questions into a single answer, and do not skip any of them.
+
 IMPORTANT RESPONSE FORMAT:
 - For each question, provide EXACTLY ONE answer in the "answers" array
 - Put your reasoning/explanation in the "reasonings" array (NOT in answers)
@@ -1675,11 +1704,18 @@ IMPORTANT RESPONSE FORMAT:
   1. A clear YES or NO
   2. A detailed descriptive answer (e.g., "The evidence clearly meets the criteria")
 - Return ONLY valid JSON (no markdown, no code fences, no comments)
+- The "answers" and "reasonings" arrays MUST have exactly as many items as there are questions
 
 Example for 1 question:
 {{
   "answers": ["YES"],
   "reasonings": ["The spreadsheet clearly shows relevant evidence"]
+}}
+
+Example for 2 questions:
+{{
+  "answers": ["8%", "YES"],
+  "reasonings": ["The spreadsheet shows a column labeled '% increase' with the value 8%", "The spreadsheet clearly shows the school name and block details"]
 }}
 
 DO NOT put both YES/NO and explanation in the answers array!
