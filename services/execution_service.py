@@ -74,6 +74,7 @@ _FILE_TYPE_HINTS = {
 _DOWNLOADABLE_PATH_SEGMENT_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _DEFAULT_ESTIMATED_COST_PER_ROW = Decimal("0.0010")
 _DEFAULT_ESTIMATED_TIME_PER_ROW_SECONDS = 0.5
+_EXECUTION_STATUS_COMPLETED = "completed"
 
 
 class ExecutionService:
@@ -2629,6 +2630,11 @@ class ExecutionService:
         progress_percentage = None
         if execution.total_rows and execution.total_rows > 0:
             progress_percentage = (processed_rows / execution.total_rows) * 100
+        elif (execution.status or "").strip().lower() == _EXECUTION_STATUS_COMPLETED:
+            # total_rows is 0 for a completed execution when no rows survived
+            # pre-processing (e.g. school filter / evidence-URL filter matched
+            # nothing). The job is done, not stalled at 0% — report it as such.
+            progress_percentage = 100.0
 
         return StatusResponse(
             id=execution.id,

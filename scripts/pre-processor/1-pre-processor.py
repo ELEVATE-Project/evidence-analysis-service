@@ -721,6 +721,12 @@ if MAIN_FILE_SPLIT and not ARGS.skip_batch_cut:
             for i in range(math.ceil(len(filtered_rows) / effective_batch_rows))
         ] if filtered_rows else []
 
+    # No rows survived pre-processing filters (e.g. school filter matched nothing) —
+    # fall back to one header-only batch instead of zero, so execution_processor.py's
+    # "no main batch files were produced" check (a real-bug guard) doesn't misfire on
+    # this legitimate zero-row outcome.
+    batches = batches or [[]]
+
     padding_width = max(1, len(str(len(batches))))
     actual_rows_written = 0
     for i, batch in enumerate(batches):
@@ -806,6 +812,12 @@ else:
             filtered_rows[i * ROWS_PER_FILE:(i + 1) * ROWS_PER_FILE]
             for i in range(math.ceil(len(filtered_rows) / ROWS_PER_FILE))
         ]
+
+    # No rows survived pre-processing filters (e.g. school filter matched nothing) —
+    # fall back to one header-only split file instead of zero, so
+    # execution_processor.py's "No split files found" check (a real-bug guard)
+    # doesn't misfire on this legitimate zero-row outcome.
+    chunks = chunks or [[]]
 
     total_files = len(chunks)
 
